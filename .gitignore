@@ -2,9 +2,9 @@
 .venv/
 __pycache__/
 *.pyc
-matches.db
 
-# Other local databases and backups
+# All local databases and backups
+*.db
 *.sqlite
 *.sqlite3
 *.db-*
