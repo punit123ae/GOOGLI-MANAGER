@@ -1,7 +1,9 @@
+
 import io
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import discord
 from discord.ext import commands
@@ -54,8 +56,12 @@ def totals(rows):
     wickets = sum(r["wickets"] for r in rows)
     dismissals = sum(1 for r in rows if not r["not_out"])
     return {
-        "matches": len(rows), "runs": runs, "balls_faced": faced,
-        "runs_conceded": conceded, "balls_bowled": bowled, "wickets": wickets,
+        "matches": len(rows),
+        "runs": runs,
+        "balls_faced": faced,
+        "runs_conceded": conceded,
+        "balls_bowled": bowled,
+        "wickets": wickets,
         "not_outs": sum(r["not_out"] for r in rows),
         "strike_rate": runs / faced * 100 if faced else 0,
         "bat_avg": runs / dismissals if dismissals else runs,
@@ -68,8 +74,12 @@ def totals(rows):
 
 def classify_player(t):
     """Classify from recorded batting/bowling contribution, not an AI guess."""
-    bat = (t["runs"] >= 50 or t["balls_faced"] >= 20) and (t["runs"] / max(t["balls_faced"], 1) >= 0.75)
-    bowl = t["wickets"] >= 2 or (t["balls_bowled"] >= 12 and t["economy"] <= 10)
+    bat = (t["runs"] >= 50 or t["balls_faced"] >= 20) and (
+        t["runs"] / max(t["balls_faced"], 1) >= 0.75
+    )
+    bowl = t["wickets"] >= 2 or (
+        t["balls_bowled"] >= 12 and t["economy"] <= 10
+    )
     if bat and bowl:
         return "ALL-ROUNDER"
     if bowl and not bat:
@@ -83,134 +93,606 @@ def classify_player(t):
 
 def impact_scores(t):
     """Simple repeatable 0-100 impact indicators derived from recorded stats."""
-    bat_score = min(100, round(min(t["runs"] / 5, 55) + min(t["strike_rate"] / 4, 25) + min(t["bat_avg"] / 5, 20)))
+    bat_score = min(
+        100,
+        round(
+            min(t["runs"] / 5, 55)
+            + min(t["strike_rate"] / 4, 25)
+            + min(t["bat_avg"] / 5, 20)
+        ),
+    )
     wickets_component = min(55, t["wickets"] * 8)
-    economy_component = max(0, min(25, 25 - max(0, t["economy"] - 4) * 2)) if t["balls_bowled"] else 0
-    bowling_score = min(100, round(wickets_component + economy_component + min(20, t["balls_bowled"] / 6)))
+    economy_component = (
+        max(0, min(25, 25 - max(0, t["economy"] - 4) * 2))
+        if t["balls_bowled"]
+        else 0
+    )
+    bowling_score = min(
+        100,
+        round(
+            wickets_component
+            + economy_component
+            + min(20, t["balls_bowled"] / 6)
+        ),
+    )
     return bat_score, bowling_score
 
+
+# ============================================================
+# DESIGN 1 - ORIGINAL RENDERER
+# Keep this renderer unchanged to preserve the existing design.
+# ============================================================
 
 def make_stats_image(member, rows, guild_icon=None, avatar=None):
     """Player performance card. Every displayed statistic is computed from imported DB rows."""
     t = totals(rows)
     role = classify_player(t)
     bat_impact, bowl_impact = impact_scores(t)
-    rating = round((bat_impact * 0.55 + bowl_impact * 0.45) if role == "ALL-ROUNDER" else (bat_impact if role == "BATSMAN" else bowl_impact))
+    rating = round(
+        (bat_impact * 0.55 + bowl_impact * 0.45)
+        if role == "ALL-ROUNDER"
+        else (bat_impact if role == "BATSMAN" else bowl_impact)
+    )
     width, height = 1600, 900
-    bg = (7, 13, 23); panel = (15, 23, 35); panel2 = (19, 30, 45)
-    white, muted, blue, lime, cyan = (242, 246, 253), (143, 160, 181), (35, 119, 231), (194, 255, 51), (81, 218, 238)
+    bg = (7, 13, 23)
+    panel = (15, 23, 35)
+    panel2 = (19, 30, 45)
+    white, muted, blue, lime, cyan = (
+        (242, 246, 253),
+        (143, 160, 181),
+        (35, 119, 231),
+        (194, 255, 51),
+        (81, 218, 238),
+    )
     image = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(image)
-    # Subtle diagonal background accents, original layout inspired by sports analytics cards.
-    draw.polygon([(1190, 0), (1600, 0), (1600, 900), (1440, 900)], fill=(8, 26, 48))
-    draw.polygon([(0, 0), (42, 0), (220, 900), (158, 900)], fill=(12, 49, 91))
-    draw.line((55, 118, 1545, 118), fill=(39, 53, 70), width=2)
-    draw.text((58, 32), member.guild.name.upper()[:35], font=load_font(25, True), fill=white)
-    draw.text((58, 70), "PLAYER PERFORMANCE  /  SEASON PROFILE", font=load_font(17, True), fill=blue)
-    draw.text((1130, 48), "PLAYER IDENTITY CARD", font=load_font(31, True), fill=white)
 
-    # Left identity card
-    draw.rounded_rectangle((55, 145, 555, 835), radius=28, fill=panel, outline=(35, 57, 83), width=2)
-    draw.text((88, 175), "OVERALL RATING", font=load_font(18, True), fill=blue)
+    # Original background accents.
+    draw.polygon(
+        [(1190, 0), (1600, 0), (1600, 900), (1440, 900)],
+        fill=(8, 26, 48),
+    )
+    draw.polygon(
+        [(0, 0), (42, 0), (220, 900), (158, 900)],
+        fill=(12, 49, 91),
+    )
+    draw.line((55, 118, 1545, 118), fill=(39, 53, 70), width=2)
+    draw.text(
+        (58, 32),
+        member.guild.name.upper()[:35],
+        font=load_font(25, True),
+        fill=white,
+    )
+    draw.text(
+        (58, 70),
+        "PLAYER PERFORMANCE  /  SEASON PROFILE",
+        font=load_font(17, True),
+        fill=blue,
+    )
+    draw.text(
+        (1130, 48),
+        "PLAYER IDENTITY CARD",
+        font=load_font(31, True),
+        fill=white,
+    )
+
+    # Left identity card.
+    draw.rounded_rectangle(
+        (55, 145, 555, 835),
+        radius=28,
+        fill=panel,
+        outline=(35, 57, 83),
+        width=2,
+    )
+    draw.text(
+        (88, 175), "OVERALL RATING",
+        font=load_font(18, True), fill=blue,
+    )
     draw.text((82, 200), str(rating), font=load_font(94, True), fill=white)
     draw.text((215, 258), "/100", font=load_font(23, True), fill=muted)
+
     pill_w = 230 if role == "ALL-ROUNDER" else 190
-    draw.rounded_rectangle((330, 180, 330 + pill_w, 228), radius=20, fill=(12, 42, 76), outline=(29, 88, 151), width=1)
+    draw.rounded_rectangle(
+        (330, 180, 330 + pill_w, 228),
+        radius=20,
+        fill=(12, 42, 76),
+        outline=(29, 88, 151),
+        width=1,
+    )
     draw.text((348, 194), role, font=load_font(18, True), fill=blue)
 
-    # Circular avatar and small server mark; fallback initials if Discord images are unavailable.
+    # Circular avatar and optional server icon.
     avatar_box = (155, 315, 455, 615)
     draw.ellipse(avatar_box, fill=(39, 56, 75), outline=white, width=6)
+
     if avatar:
         try:
-            import io as _io
-            av = Image.open(_io.BytesIO(avatar)).convert("RGB").resize((280, 280))
-            mask = Image.new("L", (280, 280), 0); ImageDraw.Draw(mask).ellipse((0, 0, 279, 279), fill=255)
+            av = Image.open(io.BytesIO(avatar)).convert("RGB").resize((280, 280))
+            mask = Image.new("L", (280, 280), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, 279, 279), fill=255)
             image.paste(av, (165, 325), mask)
             draw.ellipse((155, 315, 455, 615), outline=white, width=6)
         except Exception:
             pass
     else:
         initials = (member.display_name[:1] or "?").upper()
-        draw.text((275, 405), initials, font=load_font(90, True), fill=white)
+        draw.text(
+            (275, 405), initials,
+            font=load_font(90, True), fill=white,
+        )
+
     if guild_icon:
         try:
-            import io as _io
-            gi = Image.open(_io.BytesIO(guild_icon)).convert("RGB").resize((82, 82))
+            gi = Image.open(io.BytesIO(guild_icon)).convert("RGB").resize((82, 82))
             image.paste(gi, (395, 535))
             draw.ellipse((392, 532, 482, 622), outline=blue, width=5)
         except Exception:
             pass
-    draw.text((85, 642), member.display_name[:25], font=load_font(35, True), fill=white)
-    draw.text((88, 687), "TEAM NOT CONNECTED", font=load_font(18, True), fill=muted)
-    draw.text((88, 735), "BATTING IMPACT", font=load_font(17, True), fill=muted)
-    draw.text((475, 727), str(bat_impact), font=load_font(26, True), fill=white, anchor="ra")
-    draw.rounded_rectangle((88, 765, 510, 778), radius=6, fill=(39, 47, 58))
-    draw.rounded_rectangle((88, 765, 88 + int(422 * bat_impact / 100), 778), radius=6, fill=lime)
-    draw.text((88, 790), "BOWLING IMPACT", font=load_font(17, True), fill=muted)
-    draw.text((475, 782), str(bowl_impact), font=load_font(26, True), fill=white, anchor="ra")
-    draw.rounded_rectangle((88, 820, 510, 833), radius=6, fill=(39, 47, 58))
-    draw.rounded_rectangle((88, 820, 88 + int(422 * bowl_impact / 100), 833), radius=6, fill=cyan)
 
-    # Main stats, intentionally excluding MVP and fielding/catches until those are tracked.
+    draw.text(
+        (85, 642), member.display_name[:25],
+        font=load_font(35, True), fill=white,
+    )
+    draw.text(
+        (88, 687), "TEAM NOT CONNECTED",
+        font=load_font(18, True), fill=muted,
+    )
+    draw.text(
+        (88, 735), "BATTING IMPACT",
+        font=load_font(17, True), fill=muted,
+    )
+    draw.text(
+        (475, 727), str(bat_impact),
+        font=load_font(26, True), fill=white, anchor="ra",
+    )
+    draw.rounded_rectangle(
+        (88, 765, 510, 778), radius=6, fill=(39, 47, 58),
+    )
+    draw.rounded_rectangle(
+        (88, 765, 88 + int(422 * bat_impact / 100), 778),
+        radius=6, fill=lime,
+    )
+    draw.text(
+        (88, 790), "BOWLING IMPACT",
+        font=load_font(17, True), fill=muted,
+    )
+    draw.text(
+        (475, 782), str(bowl_impact),
+        font=load_font(26, True), fill=white, anchor="ra",
+    )
+    draw.rounded_rectangle(
+        (88, 820, 510, 833), radius=6, fill=(39, 47, 58),
+    )
+    draw.rounded_rectangle(
+        (88, 820, 88 + int(422 * bowl_impact / 100), 833),
+        radius=6, fill=cyan,
+    )
+
+    # Original main stats.
     x0, x1 = 595, 1545
-    draw.text((x0, 150), "SEASON SNAPSHOT", font=load_font(20, True), fill=white)
-    cards = [("MATCHES", t["matches"], blue), ("RUNS", t["runs"], lime), ("WICKETS", t["wickets"], cyan), ("STRIKE RATE", fmt(t["strike_rate"]), blue)]
-    card_y = 188; card_w = 220; gap = 20
+    draw.text(
+        (x0, 150), "SEASON SNAPSHOT",
+        font=load_font(20, True), fill=white,
+    )
+    cards = [
+        ("MATCHES", t["matches"], blue),
+        ("RUNS", t["runs"], lime),
+        ("WICKETS", t["wickets"], cyan),
+        ("STRIKE RATE", fmt(t["strike_rate"]), blue),
+    ]
+    card_y = 188
+    card_w = 220
+    gap = 20
+
     for i, (label, value, accent) in enumerate(cards):
         x = x0 + i * (card_w + gap)
-        draw.rounded_rectangle((x, card_y, x + card_w, card_y + 105), radius=18, fill=panel, outline=(36, 47, 61), width=2)
-        draw.text((x + 20, card_y + 18), label, font=load_font(15, True), fill=muted)
-        draw.ellipse((x + card_w - 31, card_y + 19, x + card_w - 17, card_y + 33), fill=accent)
-        draw.text((x + 20, card_y + 52), str(value), font=load_font(31, True), fill=accent if label != "MATCHES" else white)
+        draw.rounded_rectangle(
+            (x, card_y, x + card_w, card_y + 105),
+            radius=18,
+            fill=panel,
+            outline=(36, 47, 61),
+            width=2,
+        )
+        draw.text(
+            (x + 20, card_y + 18), label,
+            font=load_font(15, True), fill=muted,
+        )
+        draw.ellipse(
+            (x + card_w - 31, card_y + 19, x + card_w - 17, card_y + 33),
+            fill=accent,
+        )
+        draw.text(
+            (x + 20, card_y + 52), str(value),
+            font=load_font(31, True),
+            fill=accent if label != "MATCHES" else white,
+        )
 
-    # Batting panel
-    draw.rounded_rectangle((x0, 320, x0 + 455, 680), radius=23, fill=panel, outline=(35, 48, 64), width=2)
-    draw.rounded_rectangle((x0 + 25, 340, x0 + 65, 347), radius=4, fill=lime)
-    draw.text((x0 + 25, 362), "BATTING", font=load_font(21, True), fill=lime)
-    batting = [("INNINGS", t["matches"]), ("AVERAGE", fmt(t["bat_avg"])), ("BALLS FACED", t["balls_faced"]), ("HIGH SCORE", max((r["runs"] for r in rows), default=0)), ("FIFTIES", sum(50 <= r["runs"] < 100 for r in rows)), ("HUNDREDS", sum(r["runs"] >= 100 for r in rows)), ("DUCKS", sum(r["runs"] == 0 and not r["not_out"] for r in rows)), ("NOT OUTS", t["not_outs"])]
+    # Original batting panel.
+    draw.rounded_rectangle(
+        (x0, 320, x0 + 455, 680),
+        radius=23,
+        fill=panel,
+        outline=(35, 48, 64),
+        width=2,
+    )
+    draw.rounded_rectangle(
+        (x0 + 25, 340, x0 + 65, 347), radius=4, fill=lime,
+    )
+    draw.text(
+        (x0 + 25, 362), "BATTING",
+        font=load_font(21, True), fill=lime,
+    )
+    batting = [
+        ("INNINGS", t["matches"]),
+        ("AVERAGE", fmt(t["bat_avg"])),
+        ("BALLS FACED", t["balls_faced"]),
+        ("HIGH SCORE", max((r["runs"] for r in rows), default=0)),
+        ("FIFTIES", sum(50 <= r["runs"] < 100 for r in rows)),
+        ("HUNDREDS", sum(r["runs"] >= 100 for r in rows)),
+        ("DUCKS", sum(r["runs"] == 0 and not r["not_out"] for r in rows)),
+        ("NOT OUTS", t["not_outs"]),
+    ]
     for i, (label, value) in enumerate(batting):
         col, row = i % 2, i // 2
-        x = x0 + 30 + col * 210; y = 405 + row * 64
-        draw.text((x, y), label, font=load_font(13, True), fill=muted)
-        draw.text((x, y + 21), str(value), font=load_font(25, True), fill=white)
+        x = x0 + 30 + col * 210
+        y = 405 + row * 64
+        draw.text(
+            (x, y), label, font=load_font(13, True), fill=muted,
+        )
+        draw.text(
+            (x, y + 21), str(value),
+            font=load_font(25, True), fill=white,
+        )
 
-    # Bowling panel
+    # Original bowling panel.
     bx = x0 + 475
-    draw.rounded_rectangle((bx, 320, bx + 475, 680), radius=23, fill=panel, outline=(35, 48, 64), width=2)
-    draw.rounded_rectangle((bx + 25, 340, bx + 65, 347), radius=4, fill=cyan)
-    draw.text((bx + 25, 362), "BOWLING", font=load_font(21, True), fill=cyan)
-    best = max(((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0), default=(0, 0))
-    bowling = [("INNINGS", sum(r["balls_bowled"] > 0 for r in rows)), ("OVERS", fmt(t["overs"])), ("AVERAGE", fmt(t["bowl_avg"])), ("ECONOMY", fmt(t["economy"])), ("STRIKE RATE", fmt(t["bowl_sr"])), ("BEST FIGURES", f"{best[0]}/{-best[1]}")]
+    draw.rounded_rectangle(
+        (bx, 320, bx + 475, 680),
+        radius=23,
+        fill=panel,
+        outline=(35, 48, 64),
+        width=2,
+    )
+    draw.rounded_rectangle(
+        (bx + 25, 340, bx + 65, 347), radius=4, fill=cyan,
+    )
+    draw.text(
+        (bx + 25, 362), "BOWLING",
+        font=load_font(21, True), fill=cyan,
+    )
+    best = max(
+        (
+            (r["wickets"], -r["runs_conceded"])
+            for r in rows if r["balls_bowled"] > 0
+        ),
+        default=(0, 0),
+    )
+    bowling = [
+        ("INNINGS", sum(r["balls_bowled"] > 0 for r in rows)),
+        ("OVERS", fmt(t["overs"])),
+        ("AVERAGE", fmt(t["bowl_avg"])),
+        ("ECONOMY", fmt(t["economy"])),
+        ("STRIKE RATE", fmt(t["bowl_sr"])),
+        ("BEST FIGURES", f"{best[0]}/{-best[1]}"),
+    ]
     for i, (label, value) in enumerate(bowling):
         col, row = i % 2, i // 2
-        x = bx + 30 + col * 220; y = 405 + row * 78
-        draw.text((x, y), label, font=load_font(13, True), fill=muted)
-        draw.text((x, y + 22), str(value), font=load_font(25, True), fill=white)
+        x = bx + 30 + col * 220
+        y = 405 + row * 78
+        draw.text(
+            (x, y), label, font=load_font(13, True), fill=muted,
+        )
+        draw.text(
+            (x, y + 22), str(value),
+            font=load_font(25, True), fill=white,
+        )
 
-    draw.text((x0, 725), "GENERATED FROM RECORDED MATCH STATS  •  TEAM DETAILS CAN BE ADDED LATER", font=load_font(15, True), fill=muted)
+    draw.text(
+        (x0, 725),
+        "GENERATED FROM RECORDED MATCH STATS  •  TEAM DETAILS CAN BE ADDED LATER",
+        font=load_font(15, True),
+        fill=muted,
+    )
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     output.seek(0)
     return output
 
 
+# ============================================================
+# DESIGN 2 - PROVIDED BLUE BACKGROUND
+# ============================================================
+
+def make_stats_image_design2(member, rows, avatar=None):
+    """Generate the blue-background stats card for Design 2."""
+    from PIL import ImageOps
+
+    background_path = Path(__file__).resolve().with_name("stats_design2_bg.png")
+
+    if not background_path.is_file():
+        raise FileNotFoundError(
+            f"Design 2 background image is missing: {background_path}"
+        )
+
+    width, height = 1600, 900
+
+    # Fit the supplied image to 16:9 without distorting its proportions.
+    with Image.open(background_path) as source:
+        background = ImageOps.fit(
+            source.convert("RGB"),
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+
+    image = background.convert("RGBA")
+
+    # Translucent blue panels preserve the original background's visual style.
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+
+    panel = (2, 14, 32, 218)
+    outline = (35, 126, 245, 235)
+
+    od.rounded_rectangle(
+        (55, 165, 515, 790),
+        radius=28, fill=panel, outline=outline, width=3,
+    )
+    od.rounded_rectangle(
+        (1085, 165, 1545, 790),
+        radius=28, fill=panel, outline=outline, width=3,
+    )
+    od.rounded_rectangle(
+        (565, 165, 1035, 790),
+        radius=28,
+        fill=(1, 11, 28, 190),
+        outline=(48, 145, 255, 210),
+        width=3,
+    )
+
+    image = Image.alpha_composite(image, overlay)
+    draw = ImageDraw.Draw(image)
+
+    white = (245, 249, 255, 255)
+    muted = (167, 198, 231, 255)
+    blue = (57, 151, 255, 255)
+    cyan = (91, 220, 255, 255)
+
+    guild_name = getattr(
+        getattr(member, "guild", None),
+        "name",
+        "DISCORD SERVER",
+    )
+
+    draw.text(
+        (60, 45), guild_name.upper()[:38],
+        font=load_font(24, True), fill=white,
+    )
+    draw.text(
+        (60, 82), "PLAYER PERFORMANCE  /  SEASON PROFILE",
+        font=load_font(17, True), fill=blue,
+    )
+    draw.line(
+        (60, 125, 1540, 125),
+        fill=(55, 125, 205, 220),
+        width=2,
+    )
+
+    t = totals(rows)
+
+    # Batting panel.
+    draw.text(
+        (88, 195), "BATTING",
+        font=load_font(27, True), fill=blue,
+    )
+    batting = [
+        ("MATCHES", t["matches"]),
+        ("RUNS", t["runs"]),
+        ("BALLS FACED", t["balls_faced"]),
+        ("AVERAGE", fmt(t["bat_avg"])),
+        ("STRIKE RATE", fmt(t["strike_rate"])),
+    ]
+
+    for i, (label, value) in enumerate(batting):
+        y = 260 + i * 98
+        draw.rounded_rectangle(
+            (82, y, 488, y + 75),
+            radius=13,
+            fill=(3, 24, 49, 225),
+            outline=(30, 86, 145, 210),
+            width=1,
+        )
+        draw.text(
+            (102, y + 11), label,
+            font=load_font(14, True), fill=muted,
+        )
+        draw.text(
+            (102, y + 34), str(value),
+            font=load_font(26, True), fill=white,
+        )
+
+    # Bowling panel.
+    draw.text(
+        (1118, 195), "BOWLING",
+        font=load_font(27, True), fill=cyan,
+    )
+    bowling = [
+        ("WICKETS", t["wickets"]),
+        ("RUNS CONCEDED", t["runs_conceded"]),
+        ("BALLS BOWLED", t["balls_bowled"]),
+        ("BOWLING AVERAGE", fmt(t["bowl_avg"])),
+        ("ECONOMY", fmt(t["economy"])),
+    ]
+
+    for i, (label, value) in enumerate(bowling):
+        y = 260 + i * 98
+        draw.rounded_rectangle(
+            (1112, y, 1518, y + 75),
+            radius=13,
+            fill=(3, 24, 49, 225),
+            outline=(30, 86, 145, 210),
+            width=1,
+        )
+        draw.text(
+            (1132, y + 11), label,
+            font=load_font(14, True), fill=muted,
+        )
+        draw.text(
+            (1132, y + 34), str(value),
+            font=load_font(26, True), fill=white,
+        )
+
+    # Centered Discord avatar.
+    avatar_size = 210
+    avatar_x = (width - avatar_size) // 2
+    avatar_y = 270
+
+    draw.ellipse(
+        (
+            avatar_x - 9,
+            avatar_y - 9,
+            avatar_x + avatar_size + 9,
+            avatar_y + avatar_size + 9,
+        ),
+        fill=(2, 17, 38, 255),
+        outline=blue,
+        width=5,
+    )
+
+    pasted_avatar = False
+
+    if avatar:
+        try:
+            av = Image.open(io.BytesIO(avatar)).convert("RGB")
+            av = av.resize(
+                (avatar_size, avatar_size),
+                Image.Resampling.LANCZOS,
+            )
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse(
+                (0, 0, avatar_size - 1, avatar_size - 1),
+                fill=255,
+            )
+            image.paste(av, (avatar_x, avatar_y), mask)
+            pasted_avatar = True
+        except Exception:
+            pasted_avatar = False
+
+    draw = ImageDraw.Draw(image)
+
+    if not pasted_avatar:
+        initials = (
+            getattr(member, "display_name", "?")[:1] or "?"
+        ).upper()
+        draw.text(
+            (width // 2, avatar_y + 65),
+            initials,
+            font=load_font(72, True),
+            fill=white,
+            anchor="mt",
+        )
+
+    draw.ellipse(
+        (
+            avatar_x - 9,
+            avatar_y - 9,
+            avatar_x + avatar_size + 9,
+            avatar_y + avatar_size + 9,
+        ),
+        outline=blue,
+        width=5,
+    )
+
+    # Username, kept within the center column.
+    username = getattr(member, "display_name", "Player")
+    name_font_size = 27
+    name_font = load_font(name_font_size, True)
+
+    while (
+        draw.textbbox((0, 0), username, font=name_font)[2] > 420
+        and name_font_size > 16
+    ):
+        name_font_size -= 1
+        name_font = load_font(name_font_size, True)
+
+    draw.text(
+        (width // 2, 520),
+        username,
+        font=name_font,
+        fill=white,
+        anchor="mt",
+    )
+    draw.text(
+        (width // 2, 570),
+        "PLAYER PROFILE",
+        font=load_font(16, True),
+        fill=cyan,
+        anchor="mt",
+    )
+    draw.rounded_rectangle(
+        (640, 625, 960, 631),
+        radius=3,
+        fill=(29, 80, 130, 255),
+    )
+    draw.text(
+        (width // 2, 662),
+        f"{t['matches']} MATCHES RECORDED",
+        font=load_font(16, True),
+        fill=muted,
+        anchor="mt",
+    )
+    draw.text(
+        (width // 2, 840),
+        "GOOGLI MANAGER  •  PLAYER STATS",
+        font=load_font(15, True),
+        fill=muted,
+        anchor="mt",
+    )
+
+    output = io.BytesIO()
+    image.convert("RGB").save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
+
+# ============================================================
+# EXISTING EMBEDS AND DROPDOWN
+# ============================================================
+
 def build_overview_embed(player_name, rows):
     t = totals(rows)
     embed = discord.Embed(
         title=f"Overall Performance — {player_name}",
-        description=f"**Matches recorded:** {t['matches']}\nUse the dropdown to view overall performance or the player's most recent five matches.",
+        description=(
+            f"**Matches recorded:** {t['matches']}\n"
+            "Use the dropdown to view overall performance or the player's "
+            "most recent five matches."
+        ),
         color=discord.Color.from_rgb(24, 47, 82),
     )
-    embed.add_field(name="Batting", value=(
-        f"Runs: **{t['runs']}**\nBalls: **{t['balls_faced']}**\n"
-        f"Average: **{fmt(t['bat_avg'])}**\nStrike rate: **{fmt(t['strike_rate'])}**\nNot outs: **{t['not_outs']}**"
-    ), inline=True)
-    embed.add_field(name="Bowling", value=(
-        f"Wickets: **{t['wickets']}**\nRuns conceded: **{t['runs_conceded']}**\n"
-        f"Balls bowled: **{t['balls_bowled']}**\nEconomy: **{fmt(t['economy'])}**\n"
-        f"Average: **{fmt(t['bowl_avg'])}**\nStrike rate: **{fmt(t['bowl_sr'])}**"
-    ), inline=True)
+    embed.add_field(
+        name="Batting",
+        value=(
+            f"Runs: **{t['runs']}**\n"
+            f"Balls: **{t['balls_faced']}**\n"
+            f"Average: **{fmt(t['bat_avg'])}**\n"
+            f"Strike rate: **{fmt(t['strike_rate'])}**\n"
+            f"Not outs: **{t['not_outs']}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Bowling",
+        value=(
+            f"Wickets: **{t['wickets']}**\n"
+            f"Runs conceded: **{t['runs_conceded']}**\n"
+            f"Balls bowled: **{t['balls_bowled']}**\n"
+            f"Economy: **{fmt(t['economy'])}**\n"
+            f"Average: **{fmt(t['bowl_avg'])}**\n"
+            f"Strike rate: **{fmt(t['bowl_sr'])}**"
+        ),
+        inline=True,
+    )
     embed.set_footer(text="GOOGLI MANAGER • Overall performance")
     return embed
 
@@ -219,16 +701,23 @@ def build_recent_embed(player_name, rows):
     recent = list(reversed(rows[-5:]))
     embed = discord.Embed(
         title=f"Recent 5 Matches — {player_name}",
-        description="Most recent imported records first. Match names/opponents can be connected later.",
+        description=(
+            "Most recent imported records first. "
+            "Match names/opponents can be connected later."
+        ),
         color=discord.Color.from_rgb(24, 47, 82),
     )
     for index, row in enumerate(recent, start=1):
         outs = "not out" if row["not_out"] else "out"
         embed.add_field(
             name=f"Recent match {index}",
-            value=(f"**Batting:** {row['runs']} runs off {row['balls_faced']} balls ({outs})\n"
-                   f"**Bowling:** {row['wickets']} wickets, {row['runs_conceded']} runs conceded, "
-                   f"{row['balls_bowled']} balls bowled"),
+            value=(
+                f"**Batting:** {row['runs']} runs off "
+                f"{row['balls_faced']} balls ({outs})\n"
+                f"**Bowling:** {row['wickets']} wickets, "
+                f"{row['runs_conceded']} runs conceded, "
+                f"{row['balls_bowled']} balls bowled"
+            ),
             inline=False,
         )
     embed.set_footer(text=f"Showing {len(recent)} of {len(rows)} recorded matches")
@@ -237,20 +726,47 @@ def build_recent_embed(player_name, rows):
 
 class StatsSelect(discord.ui.Select):
     def __init__(self):
-        super().__init__(placeholder="Choose a stats view...", min_values=1, max_values=1, options=[
-            discord.SelectOption(label="Overall Performance", description="Career totals and averages", emoji="📊", value="overall"),
-            discord.SelectOption(label="Recent 5 Matches", description="Detailed recent match records", emoji="📋", value="recent"),
-        ])
+        super().__init__(
+            placeholder="Choose a stats view...",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Overall Performance",
+                    description="Career totals and averages",
+                    emoji="📊",
+                    value="overall",
+                ),
+                discord.SelectOption(
+                    label="Recent 5 Matches",
+                    description="Detailed recent match records",
+                    emoji="📋",
+                    value="recent",
+                ),
+            ],
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
         if interaction.user.id != view.requester_id:
-            await interaction.response.send_message("This stats menu belongs to the person who requested it.", ephemeral=True)
+            await interaction.response.send_message(
+                "This stats menu belongs to the person who requested it.",
+                ephemeral=True,
+            )
             return
+
         if self.values[0] == "recent":
-            await interaction.response.edit_message(embed=build_recent_embed(view.player_name, view.rows), attachments=[], view=view)
+            await interaction.response.edit_message(
+                embed=build_recent_embed(view.player_name, view.rows),
+                attachments=[],
+                view=view,
+            )
         else:
-            await interaction.response.edit_message(embed=build_overview_embed(view.player_name, view.rows), attachments=[], view=view)
+            await interaction.response.edit_message(
+                embed=build_overview_embed(view.player_name, view.rows),
+                attachments=[],
+                view=view,
+            )
 
 
 class StatsView(discord.ui.View):
@@ -262,7 +778,7 @@ class StatsView(discord.ui.View):
         self.add_item(StatsSelect())
 
 
-# Leaderboard definitions: (key, label, category, sort-descending)
+# Existing leaderboard metric definitions.
 LB_METRICS = [
     ("runs", "Runs", "Batting", True),
     ("bat_avg", "Batting Average", "Batting", True),
@@ -278,109 +794,348 @@ LB_METRICS = [
 ]
 
 
+# ============================================================
+# STATS COG AND COMMANDS
+# ============================================================
+
 class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db = bot.db
 
+        # A separate table avoids assumptions about the existing settings schema.
+        # IF NOT EXISTS does not delete or recreate existing tables or records.
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stats_design_settings (
+                guild_id INTEGER PRIMARY KEY,
+                design INTEGER NOT NULL DEFAULT 1
+                    CHECK (design IN (1, 2))
+            )
+            """
+        )
+        self.db.commit()
+
+    def get_selected_design(self, guild_id):
+        row = self.db.execute(
+            "SELECT design FROM stats_design_settings WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        return int(row[0]) if row else 1
+
     def admin(self, ctx):
-        return ctx.guild is not None and ctx.author.guild_permissions.administrator
+        return (
+            ctx.guild is not None
+            and ctx.author.guild_permissions.administrator
+        )
 
     async def replied_message(self, ctx):
         ref = ctx.message.reference
         if ref is None or ref.message_id is None:
             return None
+
         if isinstance(ref.resolved, discord.Message):
             return ref.resolved
+
         try:
-            channel = self.bot.get_channel(ref.channel_id) or await self.bot.fetch_channel(ref.channel_id)
+            channel = (
+                self.bot.get_channel(ref.channel_id)
+                or await self.bot.fetch_channel(ref.channel_id)
+            )
             return await channel.fetch_message(ref.message_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+            AttributeError,
+        ):
             return None
 
     def get_player_rows(self, guild_id, user_id):
         records = self.db.execute(
-            """SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
-                      p.runs_conceded, p.balls_bowled, p.wickets, p.not_out
-               FROM player_match_stats p JOIN stats_imports i ON i.source_message_id = p.source_message_id
-               WHERE i.guild_id = ? AND p.user_id = ?
-               ORDER BY i.imported_at ASC, p.source_message_id ASC""", (guild_id, user_id)
+            """
+            SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
+                   p.runs_conceded, p.balls_bowled, p.wickets, p.not_out
+            FROM player_match_stats p
+            JOIN stats_imports i
+              ON i.source_message_id = p.source_message_id
+            WHERE i.guild_id = ? AND p.user_id = ?
+            ORDER BY i.imported_at ASC, p.source_message_id ASC
+            """,
+            (guild_id, user_id),
         ).fetchall()
         return [dict(row) for row in records]
 
     @commands.command(name="as", aliases=["addstats"])
     async def add_stats(self, ctx):
         if not self.admin(ctx):
-            await ctx.reply("Administrator permission is required.", mention_author=False)
+            await ctx.reply(
+                "Administrator permission is required.",
+                mention_author=False,
+            )
             return
+
         source = await self.replied_message(ctx)
-        if source is None or source.guild is None or source.guild.id != ctx.guild.id:
-            await ctx.reply("Reply directly to the raw-statistics message with `+as`.", mention_author=False)
+        if (
+            source is None
+            or source.guild is None
+            or source.guild.id != ctx.guild.id
+        ):
+            await ctx.reply(
+                "Reply directly to the raw-statistics message with `+as`.",
+                mention_author=False,
+            )
             return
+
         try:
             rows = parse_raw_stats(source.content)
         except ValueError as exc:
             await ctx.reply(f"❌ {exc}", mention_author=False)
             return
+
         try:
             with self.db:
                 self.db.execute(
-                    "INSERT INTO stats_imports (source_message_id, guild_id, imported_by, imported_at) VALUES (?, ?, ?, ?)",
-                    (source.id, ctx.guild.id, ctx.author.id, datetime.now(timezone.utc).timestamp()))
+                    """
+                    INSERT INTO stats_imports
+                        (source_message_id, guild_id, imported_by, imported_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        source.id,
+                        ctx.guild.id,
+                        ctx.author.id,
+                        datetime.now(timezone.utc).timestamp(),
+                    ),
+                )
                 self.db.executemany(
-                    """INSERT INTO player_match_stats (source_message_id, user_id, runs, balls_faced,
-                       runs_conceded, balls_bowled, wickets, not_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [(source.id, *row) for row in rows])
+                    """
+                    INSERT INTO player_match_stats
+                        (source_message_id, user_id, runs, balls_faced,
+                         runs_conceded, balls_bowled, wickets, not_out)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [(source.id, *row) for row in rows],
+                )
         except Exception as exc:
-            if "UNIQUE constraint failed" in str(exc) or "PRIMARY KEY" in str(exc):
-                await ctx.reply("❌ These raw statistics have already been imported.", mention_author=False)
+            if (
+                "UNIQUE constraint failed" in str(exc)
+                or "PRIMARY KEY" in str(exc)
+            ):
+                await ctx.reply(
+                    "❌ These raw statistics have already been imported.",
+                    mention_author=False,
+                )
             else:
-                await ctx.reply(f"❌ Import failed; no rows were saved. Error: `{type(exc).__name__}`", mention_author=False)
+                await ctx.reply(
+                    f"❌ Import failed; no rows were saved. "
+                    f"Error: `{type(exc).__name__}`",
+                    mention_author=False,
+                )
             return
-        await ctx.reply(f"✅ Imported statistics for **{len(rows)} players**.\nMatch record: `{source.id}`", mention_author=False)
+
+        await ctx.reply(
+            f"✅ Imported statistics for **{len(rows)} players**.\n"
+            f"Match record: `{source.id}`",
+            mention_author=False,
+        )
 
     @commands.command(name="rs", aliases=["removestats"])
     async def remove_stats(self, ctx):
         if not self.admin(ctx):
-            await ctx.reply("Administrator permission is required.", mention_author=False)
+            await ctx.reply(
+                "Administrator permission is required.",
+                mention_author=False,
+            )
             return
+
         source = await self.replied_message(ctx)
-        if source is None or source.guild is None or source.guild.id != ctx.guild.id:
-            await ctx.reply("Reply to the original raw-statistics message with `+rs`.", mention_author=False)
+        if (
+            source is None
+            or source.guild is None
+            or source.guild.id != ctx.guild.id
+        ):
+            await ctx.reply(
+                "Reply to the original raw-statistics message with `+rs`.",
+                mention_author=False,
+            )
             return
-        record = self.db.execute("SELECT source_message_id FROM stats_imports WHERE source_message_id=? AND guild_id=?", (source.id, ctx.guild.id)).fetchone()
+
+        record = self.db.execute(
+            """
+            SELECT source_message_id
+            FROM stats_imports
+            WHERE source_message_id = ? AND guild_id = ?
+            """,
+            (source.id, ctx.guild.id),
+        ).fetchone()
+
         if record is None:
-            await ctx.reply("❌ That message has not been imported, or it was already removed.", mention_author=False)
+            await ctx.reply(
+                "❌ That message has not been imported, or it was already removed.",
+                mention_author=False,
+            )
             return
+
         with self.db:
-            self.db.execute("DELETE FROM player_match_stats WHERE source_message_id=?", (source.id,))
-            self.db.execute("DELETE FROM stats_imports WHERE source_message_id=?", (source.id,))
-        await ctx.reply("✅ Removed that match's imported statistics. Other match records remain unchanged.", mention_author=False)
+            self.db.execute(
+                "DELETE FROM player_match_stats WHERE source_message_id = ?",
+                (source.id,),
+            )
+            self.db.execute(
+                "DELETE FROM stats_imports WHERE source_message_id = ?",
+                (source.id,),
+            )
+
+        await ctx.reply(
+            "✅ Removed that match's imported statistics. "
+            "Other match records remain unchanged.",
+            mention_author=False,
+        )
+
+    # New administrator-only design selector.
+    @commands.command(name="setdesign")
+    async def set_design(self, ctx, design_number: str = None):
+        if not self.admin(ctx):
+            await ctx.reply(
+                "Administrator permission is required.",
+                mention_author=False,
+            )
+            return
+
+        if design_number not in ("1", "2"):
+            await ctx.reply(
+                "Invalid design number. Use `+setdesign 1` or `+setdesign 2`.",
+                mention_author=False,
+            )
+            return
+
+        design = int(design_number)
+
+        # Validate Design 2's background BEFORE changing the saved setting.
+        if design == 2:
+            background_path = Path(__file__).resolve().with_name(
+                "stats_design2_bg.png"
+            )
+
+            if not background_path.is_file():
+                await ctx.reply(
+                    "❌ Design 2 background is missing. Place "
+                    "`stats_design2_bg.png` in the same folder as "
+                    "`cogs/stats.py`. The saved design was not changed.",
+                    mention_author=False,
+                )
+                return
+
+            try:
+                with Image.open(background_path) as background:
+                    background.verify()
+            except Exception:
+                await ctx.reply(
+                    "❌ `stats_design2_bg.png` exists but is not a "
+                    "readable image. The saved design was not changed.",
+                    mention_author=False,
+                )
+                return
+
+        # Store the selection independently for each guild.
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO stats_design_settings (guild_id, design)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id)
+                DO UPDATE SET design = excluded.design
+                """,
+                (ctx.guild.id, design),
+            )
+
+        await ctx.reply(
+            f"✅ Stats design for this server is now **Design {design}**.",
+            mention_author=False,
+        )
 
     @commands.command(name="stats")
     async def player_stats(self, ctx, member: discord.Member = None):
         member = member or ctx.author
+
         rows = self.get_player_rows(ctx.guild.id, member.id)
         if not rows:
-            await ctx.reply(f"No imported stats found for {member.mention} yet. Import a match with `+as` first.", mention_author=False)
+            await ctx.reply(
+                f"No imported stats found for {member.mention} yet. "
+                "Import a match with `+as` first.",
+                mention_author=False,
+            )
             return
+
         avatar = guild_icon = None
+
         try:
-            avatar = await member.display_avatar.replace(size=256, static_format="png").read()
+            avatar = await member.display_avatar.replace(
+                size=256, static_format="png"
+            ).read()
         except Exception:
             pass
+
         try:
             if ctx.guild.icon:
-                guild_icon = await ctx.guild.icon.replace(size=128, static_format="png").read()
+                guild_icon = await ctx.guild.icon.replace(
+                    size=128, static_format="png"
+                ).read()
         except Exception:
             pass
-        image = make_stats_image(member, rows, guild_icon=guild_icon, avatar=avatar)
+
+        design = self.get_selected_design(ctx.guild.id)
+
+        try:
+            if design == 2:
+                image = make_stats_image_design2(
+                    member,
+                    rows,
+                    avatar=avatar,
+                )
+            else:
+                # Design 1 continues to use the original renderer.
+                image = make_stats_image(
+                    member,
+                    rows,
+                    guild_icon=guild_icon,
+                    avatar=avatar,
+                )
+        except FileNotFoundError:
+            await ctx.reply(
+                "❌ Design 2 background is missing. Ask a server "
+                "administrator to upload `stats_design2_bg.png` "
+                "beside `cogs/stats.py`.",
+                mention_author=False,
+            )
+            return
+        except Exception as exc:
+            await ctx.reply(
+                f"❌ Could not generate the stats image "
+                f"({type(exc).__name__}).",
+                mention_author=False,
+            )
+            return
+
         filename = f"player_{member.id}_stats.png"
         file = discord.File(image, filename=filename)
+
         embed = build_overview_embed(member.display_name, rows)
         embed.set_image(url=f"attachment://{filename}")
-        view = StatsView(ctx.author.id, member.display_name, rows)
-        await ctx.send(embed=embed, file=file, view=view, allowed_mentions=discord.AllowedMentions.none())
+
+        view = StatsView(
+            ctx.author.id,
+            member.display_name,
+            rows,
+        )
+
+        await ctx.send(
+            embed=embed,
+            file=file,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def setup(bot):
