@@ -176,10 +176,19 @@ class JoinRequestView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(content=f"Request **{decision}** by {interaction.user.name}.", embed=None, view=self)
-        if decision == "accepted" and interaction.guild:
-            member = interaction.guild.get_member(row["user_id"])
-            if member:
-                await self.cog._assign_team_role(interaction.guild, row["team_id"], member)
+        if decision == "accepted":
+            # Join requests are answered in the captain's DMs, so interaction.guild
+            # is normally None. Resolve the original server from the saved request.
+            guild = self.cog.bot.get_guild(row["guild_id"])
+            if guild is not None:
+                member = guild.get_member(row["user_id"])
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(row["user_id"])
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        member = None
+                if member is not None:
+                    await self.cog._assign_team_role(guild, row["team_id"], member)
         try:
             user = self.cog.bot.get_user(row["user_id"]) or await self.cog.bot.fetch_user(row["user_id"])
             await self.cog._dm(user, f"Your request to join **{row['team_name']}** was {'accepted' if decision == 'accepted' else 'denied'} by the captain.")
@@ -541,6 +550,55 @@ class TeamRegistration(commands.Cog):
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none()
         )
+
+    @commands.command(name="teamroles", aliases=["approvedteamroles", "listteamroles"])
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def list_approved_team_roles(self, ctx):
+        """List configured roles for all approved teams, showing role IDs without pinging."""
+        teams = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+            (ctx.guild.id,),
+        ).fetchall()
+        if not teams:
+            await ctx.reply("There are no approved teams in this server.", mention_author=False)
+            return
+
+        lines = []
+        for team in teams:
+            setting = self.db.execute(
+                "SELECT role_id, enabled FROM team_role_settings WHERE team_id=?", (team["id"],)
+            ).fetchone()
+            if not setting:
+                role_text = "Not configured"
+            else:
+                role = ctx.guild.get_role(setting["role_id"])
+                if role is None:
+                    role_text = f"Role not found (`{setting['role_id']}`)"
+                else:
+                    safe_name = discord.utils.escape_markdown(role.name).replace("@", "＠")
+                    state = "enabled" if setting["enabled"] else "disabled"
+                    role_text = f"{safe_name} (`{role.id}`) — {state}"
+            lines.append(f"**{discord.utils.escape_markdown(team['name'])}** — {role_text}")
+
+        # Split across multiple embeds/messages to stay within Discord's limits.
+        chunks, current = [], []
+        length = 0
+        for line in lines:
+            if length + len(line) + 1 > 3800:
+                chunks.append("\n".join(current))
+                current, length = [], 0
+            current.append(line)
+            length += len(line) + 1
+        if current:
+            chunks.append("\n".join(current))
+        for index, chunk in enumerate(chunks, start=1):
+            embed = discord.Embed(
+                title="Approved Team Roles" if len(chunks) == 1 else f"Approved Team Roles ({index}/{len(chunks)})",
+                description=chunk,
+                color=discord.Color.from_rgb(55, 150, 255),
+            )
+            await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="stopteamroles")
     @commands.guild_only()
