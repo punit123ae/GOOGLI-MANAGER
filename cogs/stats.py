@@ -560,8 +560,9 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         od2 = ImageDraw.Draw(image)
         od2.rounded_rectangle((x, 178, x + card_w, 222), radius=12,
                               fill=(17, 35, 57, 220), outline=(42, 80, 119, 170), width=1)
-        draw.text((x + 16, 187), label, font=load_font(12, True), fill=muted)
-        draw.text((x + card_w - 16, 184), str(value), font=load_font(24, True), fill=accent, anchor="rt")
+        card_center = x + card_w // 2
+        draw.text((card_center, 184), label, font=load_font(12, True), fill=muted, anchor="mt")
+        draw.text((card_center, 198), str(value), font=load_font(22, True), fill=accent, anchor="mt")
 
     # Left panel: batting statistics, with the high score alone on the final row.
     draw.rounded_rectangle((78, 280, 119, 287), radius=3, fill=lime)
@@ -585,10 +586,10 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         x, y = col_x[col], row_y[row]
         draw.rounded_rectangle((x - 7, y - 8, x + 190, y + 61), radius=10,
                                fill=(14, 31, 50, 145))
-        draw.text((x + 4, y), label, font=load_font(12, True), fill=muted)
-        # Only the ducks number is red; its label remains muted.
-        draw.text((x + 4, y + 23), str(value), font=load_font(25, True), fill=red if label == "DUCKS" else accent)
-    draw.line((300, 351, 300, 682), fill=divider, width=2)
+        draw.text((x + 4, y), label, font=load_font(13, True), fill=muted)
+        # All batting values are white except the ducks number, which is red.
+        draw.text((x + 4, y + 23), str(value), font=load_font(26, True), fill=red if label == "DUCKS" else white)
+    draw.line((292, 351, 292, 682), fill=divider, width=2)
 
     # High score is deliberately alone across the bottom of the batting panel.
     high_score = max((r["runs"] for r in rows), default=0)
@@ -638,11 +639,11 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
 
     # Impact values only: intentionally no progress bars/100-point lines.
     draw.rounded_rectangle((590, 664, 1010, 716), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
-    draw.text((610, 680), "BATTING IMPACT", font=load_font(13, True), fill=muted)
-    draw.text((988, 673), str(bat_impact), font=load_font(27, True), fill=lime, anchor="rt")
+    draw.text((800, 669), "BATTING IMPACT", font=load_font(13, True), fill=muted, anchor="mt")
+    draw.text((800, 684), str(bat_impact), font=load_font(25, True), fill=lime, anchor="mt")
     draw.rounded_rectangle((590, 731, 1010, 783), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
-    draw.text((610, 747), "BOWLING IMPACT", font=load_font(13, True), fill=muted)
-    draw.text((988, 740), str(bowl_impact), font=load_font(27, True), fill=cyan, anchor="rt")
+    draw.text((800, 736), "BOWLING IMPACT", font=load_font(13, True), fill=muted, anchor="mt")
+    draw.text((800, 751), str(bowl_impact), font=load_font(25, True), fill=cyan, anchor="mt")
 
     # Right panel: bowling stats with well-spaced paired columns.
     draw.rounded_rectangle((1105, 280, 1146, 287), radius=3, fill=cyan)
@@ -669,9 +670,10 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         x, y = bowl_col_x[col], bowl_row_y[row]
         draw.rounded_rectangle((x - 5, y - 8, x + 190, y + 61), radius=10,
                                fill=(14, 31, 50, 145))
-        draw.text((x + 5, y), label, font=load_font(12, True), fill=muted)
-        draw.text((x + 5, y + 23), str(value), font=load_font(25, True), fill=accent)
-    draw.line((1326, 351, 1326, 682), fill=divider, width=2)
+        draw.text((x + 5, y), label, font=load_font(13, True), fill=muted)
+        # All bowling values are white except the 5-wicket haul number, which is red.
+        draw.text((x + 5, y + 23), str(value), font=load_font(26, True), fill=red if label == "5W HAULS" else white)
+    draw.line((1320, 351, 1320, 682), fill=divider, width=2)
 
     draw.text((800, 862), "GOOGLI MANAGER  •  PLAYER PERFORMANCE FROM RECORDED MATCH STATS",
               font=load_font(12, True), fill=muted, anchor="mt")
