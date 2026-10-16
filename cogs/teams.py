@@ -627,10 +627,10 @@ class TeamRegistration(commands.Cog):
         embed.add_field(name="Captain", value=captain, inline=True)
         embed.add_field(name="Vice-Captain", value=vice, inline=True)
         roster = []
-        for uid in ids:
+        for index, uid in enumerate(ids, start=1):
             role = " (Captain)" if uid == team["captain_id"] else " (Vice-Captain)" if uid == team["vice_captain_id"] else ""
-            roster.append(f"• <@{uid}>{role}")
-        embed.add_field(name=f"Players ({len(set(ids))})", value="\\n".join(roster) if roster else "No players yet.", inline=False)
+            roster.append(f"{index}. <@{uid}>{role}")
+        embed.add_field(name=f"Players ({len(set(ids))})", value="\n".join(roster) if roster else "No players yet.", inline=False)
         if team["logo_url"]:
             embed.set_thumbnail(url=team["logo_url"])
         await ctx.send(embed=embed)
