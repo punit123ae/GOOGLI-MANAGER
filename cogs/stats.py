@@ -560,9 +560,13 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         od2 = ImageDraw.Draw(image)
         od2.rounded_rectangle((x, 178, x + card_w, 222), radius=12,
                               fill=(17, 35, 57, 220), outline=(42, 80, 119, 170), width=1)
-        card_center = x + card_w // 2
-        draw.text((card_center, 184), label, font=load_font(12, True), fill=muted, anchor="mt")
-        draw.text((card_center, 198), str(value), font=load_font(22, True), fill=accent, anchor="mt")
+        # Keep each snapshot label and its value on one horizontal line.
+        # Vertically centre both inside the card and align the value to the right.
+        card_mid_y = (178 + 222) // 2
+        draw.text((x + 16, card_mid_y), label, font=load_font(12, True),
+                  fill=muted, anchor="lm")
+        draw.text((x + card_w - 16, card_mid_y), str(value),
+                  font=load_font(22, True), fill=accent, anchor="rm")
 
     # Left panel: batting statistics, with the high score alone on the final row.
     draw.rounded_rectangle((78, 280, 119, 287), radius=3, fill=lime)
@@ -639,11 +643,17 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
 
     # Impact values only: intentionally no progress bars/100-point lines.
     draw.rounded_rectangle((590, 664, 1010, 716), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
-    draw.text((800, 669), "BATTING IMPACT", font=load_font(13, True), fill=muted, anchor="mt")
-    draw.text((800, 684), str(bat_impact), font=load_font(25, True), fill=lime, anchor="mt")
+    impact1_mid_y = (664 + 716) // 2
+    draw.text((610, impact1_mid_y), "BATTING IMPACT", font=load_font(14, True),
+              fill=muted, anchor="lm")
+    draw.text((990, impact1_mid_y), str(bat_impact), font=load_font(26, True),
+              fill=lime, anchor="rm")
     draw.rounded_rectangle((590, 731, 1010, 783), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
-    draw.text((800, 736), "BOWLING IMPACT", font=load_font(13, True), fill=muted, anchor="mt")
-    draw.text((800, 751), str(bowl_impact), font=load_font(25, True), fill=cyan, anchor="mt")
+    impact2_mid_y = (731 + 783) // 2
+    draw.text((610, impact2_mid_y), "BOWLING IMPACT", font=load_font(14, True),
+              fill=muted, anchor="lm")
+    draw.text((990, impact2_mid_y), str(bowl_impact), font=load_font(26, True),
+              fill=cyan, anchor="rm")
 
     # Right panel: bowling stats with well-spaced paired columns.
     draw.rounded_rectangle((1105, 280, 1146, 287), radius=3, fill=cyan)
