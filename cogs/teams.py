@@ -596,6 +596,135 @@ class TeamRegistration(commands.Cog):
         self.db.commit()
         await ctx.reply("Server-wide automatic team-role assignment is enabled. Team-specific settings still apply.", mention_author=False)
 
+    @commands.command(name="syncteamroles", aliases=["syncteamrole", "syncroles"])
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def sync_team_roles(self, ctx):
+        """Give existing team members their configured team roles when missing."""
+        guild = ctx.guild
+        global_setting = self.db.execute(
+            "SELECT enabled FROM server_team_role_settings WHERE guild_id=?", (guild.id,)
+        ).fetchone()
+        if global_setting and not global_setting["enabled"]:
+            await ctx.reply(
+                "Server-wide automatic team roles are still disabled. Run `+startallteamroles` first, then retry `+syncteamroles`.",
+                mention_author=False,
+            )
+            return
+
+        teams = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+            (guild.id,),
+        ).fetchall()
+        if not teams:
+            await ctx.reply("There are no approved teams to synchronise.", mention_author=False)
+            return
+
+        added, already, failed, skipped = [], [], [], []
+        for team in teams:
+            setting = self.db.execute(
+                "SELECT role_id, enabled FROM team_role_settings WHERE team_id=?", (team["id"],)
+            ).fetchone()
+            if not setting:
+                skipped.append(f"{team['name']} — no team role configured")
+                continue
+            if not setting["enabled"]:
+                skipped.append(f"{team['name']} — team role assignment is disabled")
+                continue
+            role = guild.get_role(setting["role_id"])
+            if role is None:
+                skipped.append(f"{team['name']} — configured role no longer exists")
+                continue
+
+            me = guild.me
+            if not me or not me.guild_permissions.manage_roles or role >= me.top_role:
+                failed.append(f"{team['name']} — bot cannot assign role **{discord.utils.escape_markdown(role.name)}** (check Manage Roles and role hierarchy)")
+                continue
+
+            user_ids = self._team_player_ids(team["id"])
+            for user_id in sorted(user_ids):
+                member = guild.get_member(user_id)
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except discord.NotFound:
+                        skipped.append(f"{user_id} — member not found (team: {team['name']})")
+                        continue
+                    except discord.Forbidden:
+                        failed.append(f"{user_id} — bot lacks permission to fetch member (team: {team['name']})")
+                        continue
+                    except discord.HTTPException as exc:
+                        failed.append(f"{user_id} — fetch error {type(exc).__name__} (team: {team['name']})")
+                        continue
+
+                if role in member.roles:
+                    already.append(f"{member.name} — {team['name']}")
+                    continue
+                try:
+                    await member.add_roles(role, reason=f"Team-role sync requested by {ctx.author}")
+                    added.append(f"{member.name} — {team['name']}")
+                except discord.Forbidden:
+                    failed.append(f"{member.name} — permission denied assigning {role.name} (team: {team['name']})")
+                except discord.HTTPException as exc:
+                    failed.append(f"{member.name} — role assignment error {type(exc).__name__} (team: {team['name']})")
+
+        # Remove configured team roles from members who are not on the corresponding team.
+        # This also cleans up stale roles left behind by older/manual role assignments.
+        removed, remove_failed = [], []
+        for team in teams:
+            setting = self.db.execute(
+                "SELECT role_id FROM team_role_settings WHERE team_id=?", (team["id"],)
+            ).fetchone()
+            if not setting:
+                continue
+            role = guild.get_role(setting["role_id"])
+            if role is None:
+                continue
+            me = guild.me
+            if not me or not me.guild_permissions.manage_roles or role >= me.top_role:
+                remove_failed.append(f"{team['name']} — bot cannot remove role **{discord.utils.escape_markdown(role.name)}** (check Manage Roles and role hierarchy)")
+                continue
+
+            current_team_ids = self._team_player_ids(team["id"])
+            for member in list(guild.members):
+                if role not in member.roles or member.id in current_team_ids:
+                    continue
+                try:
+                    await member.remove_roles(role, reason=f"Team-role sync: member is not on {team['name']}")
+                    removed.append(f"{member.name} — removed stale role for {team['name']}")
+                except discord.Forbidden:
+                    remove_failed.append(f"{member.name} — permission denied removing role for {team['name']}")
+                except discord.HTTPException as exc:
+                    remove_failed.append(f"{member.name} — removal error {type(exc).__name__} (team: {team['name']})")
+
+        failed.extend(remove_failed)
+
+        def format_sync_list(items):
+            if not items:
+                return "None"
+            # Keep each embed field under Discord's 1024-character field-value limit.
+            lines, length = [], 0
+            for item in items:
+                line = f"• {discord.utils.escape_markdown(str(item))}"
+                if length + len(line) + 1 > 1000:
+                    lines.append(f"…and {len(items) - len(lines)} more")
+                    break
+                lines.append(line)
+                length += len(line) + 1
+            return "\n".join(lines) or "None"
+
+        embed = discord.Embed(
+            title="Team role synchronisation complete",
+            description="Team roles were synchronised: missing roles were added to team members, and configured team roles were removed from members who are not on the corresponding team. Team membership was not changed.",
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        embed.add_field(name=f"Roles added ({len(added)})", value=format_sync_list(added), inline=False)
+        embed.add_field(name=f"Stale roles removed ({len(removed)})", value=format_sync_list(removed), inline=False)
+        embed.add_field(name=f"Already synced ({len(already)})", value=format_sync_list(already), inline=False)
+        embed.add_field(name=f"Failed ({len(failed)})", value=format_sync_list(failed), inline=False)
+        embed.add_field(name=f"Skipped ({len(skipped)})", value=format_sync_list(skipped), inline=False)
+        await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
     @commands.command(name="toggle")
     @commands.guild_only()
     @commands.has_guild_permissions(administrator=True)
