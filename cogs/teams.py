@@ -938,6 +938,130 @@ class TeamRegistration(commands.Cog):
         await ctx.reply(f"Added {member.name} to **{team['name']}**.", mention_author=False)
         await self._dm(member, f"You have been added by an administrator to **{team['name']}**.")
 
+    @commands.command(name="addallplayers")
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def add_all_players(self, ctx, *, team_name: str):
+        """Add every username in the message this command replies to, with the team's configured role."""
+        source = ctx.message.reference
+        if source is None or source.message_id is None:
+            await ctx.reply(
+                "Reply directly to the squad-list message and use `+addallplayers Team Name`.",
+                mention_author=False
+            )
+            return
+
+        team = self._team(ctx.guild.id, team_name)
+        if not team or team["status"] != "approved":
+            await ctx.reply("I couldn't find an approved team with that name. No players were added.", mention_author=False)
+            return
+
+        role_setting = self.db.execute(
+            "SELECT role_id FROM team_role_settings WHERE team_id=?", (team["id"],)
+        ).fetchone()
+        if not role_setting:
+            await ctx.reply(
+                f"No team role is configured for **{team['name']}**. Use `+setteamrole` first. No players were added.",
+                mention_author=False
+            )
+            return
+        role = ctx.guild.get_role(role_setting["role_id"])
+        if role is None:
+            await ctx.reply(
+                f"The configured role for **{team['name']}** no longer exists. Fix it with `+setteamrole`. No players were added.",
+                mention_author=False
+            )
+            return
+        me = ctx.guild.me
+        if not me or not me.guild_permissions.manage_roles or role >= me.top_role:
+            await ctx.reply(
+                f"I can't assign **{discord.utils.escape_markdown(role.name)}**. Give me Manage Roles and move my highest role above the team role. No players were added.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+            return
+
+        try:
+            squad_message = await ctx.channel.fetch_message(source.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await ctx.reply("I couldn't fetch the replied-to squad list. No players were added.", mention_author=False)
+            return
+
+        # Accept numbered lists such as `1. username (C)` and strip captain/vice-captain labels.
+        usernames = []
+        for line in squad_message.content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^\s*(?:\d+|[-*•])\s*[.)-]?\s*", "", line)
+            line = re.sub(r"\s*\((?:C|VC|CAPTAIN|VICE[- ]CAPTAIN)\)\s*$", "", line, flags=re.IGNORECASE)
+            line = line.strip().strip("`* ")
+            if not line or line.startswith(("http://", "https://")):
+                continue
+            # Ignore headings and prose; keep likely Discord usernames, mentions, or IDs.
+            if re.fullmatch(r"(?:<@!?\d+>|@?\d+|[\w.]{2,32})", line):
+                usernames.append(line)
+
+        if not usernames:
+            await ctx.reply("I couldn't find any usernames in the replied-to message. No players were added.", mention_author=False)
+            return
+
+        added_names, already_names, failed_names, full_names = [], [], [], []
+        seen = set()
+        for username in usernames:
+            lookup_key = username.casefold()
+            if lookup_key in seen:
+                continue
+            seen.add(lookup_key)
+            member = await self._get_member(ctx.guild, username)
+            if member is None:
+                failed_names.append(f"{username} — couldn't find/fetch member")
+                continue
+
+            current = self._membership(ctx.guild.id, member.id)
+            if current:
+                already_names.append(f"{member.name} — {current['name']}")
+                continue
+
+            if self._team_player_count(team["id"]) >= self._max_players(ctx.guild.id):
+                full_names.append(member.name)
+                continue
+
+            try:
+                # Assign the configured role first. If Discord rejects it, do not add the player to the database.
+                if role not in member.roles:
+                    await member.add_roles(role, reason=f"Bulk squad import for {team['name']} by {ctx.author}")
+                self.db.execute(
+                    "INSERT INTO team_players(team_id,user_id,added_by,added_at) VALUES(?,?,?,?)",
+                    (team["id"], member.id, ctx.author.id, datetime.now(timezone.utc).isoformat())
+                )
+                self.db.commit()
+                added_names.append(member.name)
+            except sqlite3.IntegrityError:
+                already_names.append(f"{member.name} — {team['name']}")
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                failed_names.append(f"{member.name} — role assignment failed ({type(exc).__name__})")
+            except Exception as exc:
+                failed_names.append(f"{member.name} — error ({type(exc).__name__})")
+
+        def format_names(names):
+            if not names:
+                return "None"
+            return "\n".join(f"• {discord.utils.escape_markdown(name)}" for name in names[:25]) + (f"\n…and {len(names) - 25} more." if len(names) > 25 else "")
+
+        embed = discord.Embed(
+            title=f"Squad import complete • {team['name']}",
+            description=f"Team: **{discord.utils.escape_markdown(team['name'])}**\nRole assigned: **{discord.utils.escape_markdown(role.name)}**",
+            color=discord.Color.from_rgb(55, 150, 255)
+        )
+        embed.add_field(name=f"Added successfully ({len(added_names)})", value=format_names(added_names), inline=False)
+        embed.add_field(name=f"Already in a team ({len(already_names)})", value=format_names(already_names), inline=False)
+        embed.add_field(name=f"Couldn't find/fetch or error ({len(failed_names)})", value=format_names(failed_names), inline=False)
+        if full_names:
+            embed.add_field(name=f"Not added — team full ({len(full_names)})", value=format_names(full_names), inline=False)
+        embed.set_footer(text=f"Roster: {self._team_player_count(team['id'])}/{self._max_players(ctx.guild.id)} players")
+        await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
     # bulkadd intentionally kept functionally unchanged from the user's supplied code.
     @commands.command(name="bulkadd")
     @commands.guild_only()
