@@ -403,251 +403,264 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
 # DESIGN 2 - PROVIDED BLUE BACKGROUND
 # ============================================================
 
-def make_stats_image_design2(member, rows, avatar=None):
-    """Generate the blue-background stats card for Design 2."""
+def get_player_team_name(member):
+    """Look up a player's team in the existing teams.db without modifying it."""
+    import sqlite3
+
+    db_path = Path(__file__).resolve().parent.parent / "teams.db"
+    if not db_path.is_file():
+        return "NO TEAM CONNECTED"
+
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "teams" not in tables:
+            return "NO TEAM CONNECTED"
+
+        team_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(teams)")
+        }
+        if not {"id", "name"}.issubset(team_columns):
+            return "NO TEAM CONNECTED"
+
+        user_id = int(member.id)
+        conditions = []
+        params = []
+        if "captain_id" in team_columns:
+            conditions.append("captain_id = ?")
+            params.append(user_id)
+        if "vc_id" in team_columns:
+            conditions.append("vc_id = ?")
+            params.append(user_id)
+        if "team_members" in tables:
+            member_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(team_members)")
+            }
+            if {"team_id", "user_id"}.issubset(member_columns):
+                conditions.append(
+                    "id IN (SELECT team_id FROM team_members WHERE user_id = ?)"
+                )
+                params.append(user_id)
+
+        if not conditions:
+            return "NO TEAM CONNECTED"
+
+        query = "SELECT name FROM teams WHERE (" + " OR ".join(conditions) + ")"
+        if "approved" in team_columns:
+            query += " AND approved = 1"
+        query += " ORDER BY name COLLATE NOCASE LIMIT 1"
+        row = connection.execute(query, params).fetchone()
+        return str(row["name"]) if row and row["name"] else "NO TEAM CONNECTED"
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return "NO TEAM CONNECTED"
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
+    """Render Design 2 using the supplied background and recorded match stats."""
     from PIL import ImageOps
 
     background_path = Path(__file__).resolve().with_name("stats_design2_bg.png")
-
     if not background_path.is_file():
         raise FileNotFoundError(
             f"Design 2 background image is missing: {background_path}"
         )
 
     width, height = 1600, 900
-
-    # Fit the supplied image to 16:9 without distorting its proportions.
     with Image.open(background_path) as source:
         background = ImageOps.fit(
-            source.convert("RGB"),
-            (width, height),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
+            source.convert("RGB"), (width, height),
+            method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
         )
-
     image = background.convert("RGBA")
 
-    # Translucent blue panels preserve the original background's visual style.
+    # Dark translucent surfaces keep the supplied blue background visible.
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
-
-    panel = (2, 14, 32, 218)
-    outline = (35, 126, 245, 235)
-
-    od.rounded_rectangle(
-        (55, 165, 515, 790),
-        radius=28, fill=panel, outline=outline, width=3,
-    )
-    od.rounded_rectangle(
-        (1085, 165, 1545, 790),
-        radius=28, fill=panel, outline=outline, width=3,
-    )
-    od.rounded_rectangle(
-        (565, 165, 1035, 790),
-        radius=28,
-        fill=(1, 11, 28, 190),
-        outline=(48, 145, 255, 210),
-        width=3,
-    )
-
+    panel = (4, 13, 26, 232)
+    panel_alt = (8, 20, 35, 235)
+    border = (35, 126, 245, 235)
+    od.rounded_rectangle((54, 150, 565, 845), radius=28, fill=panel, outline=border, width=3)
+    od.rounded_rectangle((595, 285, 1065, 685), radius=24, fill=panel_alt, outline=(35, 126, 245, 190), width=2)
+    od.rounded_rectangle((1085, 285, 1546, 685), radius=24, fill=panel_alt, outline=(35, 126, 245, 190), width=2)
+    od.rounded_rectangle((595, 165, 1546, 265), radius=20, fill=panel, outline=(35, 85, 135, 190), width=2)
     image = Image.alpha_composite(image, overlay)
     draw = ImageDraw.Draw(image)
 
     white = (245, 249, 255, 255)
-    muted = (167, 198, 231, 255)
+    muted = (159, 187, 215, 255)
     blue = (57, 151, 255, 255)
-    cyan = (91, 220, 255, 255)
-
-    guild_name = getattr(
-        getattr(member, "guild", None),
-        "name",
-        "DISCORD SERVER",
-    )
-
-    draw.text(
-        (60, 45), guild_name.upper()[:38],
-        font=load_font(24, True), fill=white,
-    )
-    draw.text(
-        (60, 82), "PLAYER PERFORMANCE  /  SEASON PROFILE",
-        font=load_font(17, True), fill=blue,
-    )
-    draw.line(
-        (60, 125, 1540, 125),
-        fill=(55, 125, 205, 220),
-        width=2,
-    )
+    lime = (194, 255, 51, 255)
+    cyan = (81, 218, 238, 255)
+    dim_line = (67, 102, 137, 190)
 
     t = totals(rows)
-
-    # Batting panel.
-    draw.text(
-        (88, 195), "BATTING",
-        font=load_font(27, True), fill=blue,
+    role = classify_player(t)
+    bat_impact, bowl_impact = impact_scores(t)
+    rating = round(
+        bat_impact * 0.55 + bowl_impact * 0.45
+        if role == "ALL-ROUNDER"
+        else (bat_impact if role == "BATSMAN" else bowl_impact)
     )
-    batting = [
-        ("MATCHES", t["matches"]),
-        ("RUNS", t["runs"]),
-        ("BALLS FACED", t["balls_faced"]),
-        ("AVERAGE", fmt(t["bat_avg"])),
-        ("STRIKE RATE", fmt(t["strike_rate"])),
-    ]
+    guild = getattr(member, "guild", None)
+    guild_name = getattr(guild, "name", "DISCORD SERVER").upper()
+    team_name = get_player_team_name(member).upper()
 
-    for i, (label, value) in enumerate(batting):
-        y = 260 + i * 98
-        draw.rounded_rectangle(
-            (82, y, 488, y + 75),
-            radius=13,
-            fill=(3, 24, 49, 225),
-            outline=(30, 86, 145, 210),
-            width=1,
-        )
-        draw.text(
-            (102, y + 11), label,
-            font=load_font(14, True), fill=muted,
-        )
-        draw.text(
-            (102, y + 34), str(value),
-            font=load_font(26, True), fill=white,
-        )
+    # Header: the server icon and name are centred as one identity lockup.
+    logo_size = 58
+    logo_y = 25
+    logo_left_x, logo_right_x = 490, 1052
+    if guild_icon:
+        try:
+            logo = Image.open(io.BytesIO(guild_icon)).convert("RGBA")
+            logo = ImageOps.fit(logo, (logo_size, logo_size), method=Image.Resampling.LANCZOS)
+            mask = Image.new("L", (logo_size, logo_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, logo_size - 1, logo_size - 1), fill=255)
+            image.paste(logo, (logo_left_x, logo_y), mask)
+            image.paste(logo, (logo_right_x, logo_y), mask)
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((logo_left_x, logo_y, logo_left_x + logo_size, logo_y + logo_size), outline=blue, width=3)
+            draw.ellipse((logo_right_x, logo_y, logo_right_x + logo_size, logo_y + logo_size), outline=blue, width=3)
+        except Exception:
+            pass
 
-    # Bowling panel.
-    draw.text(
-        (1118, 195), "BOWLING",
-        font=load_font(27, True), fill=cyan,
-    )
-    bowling = [
-        ("WICKETS", t["wickets"]),
-        ("RUNS CONCEDED", t["runs_conceded"]),
-        ("BALLS BOWLED", t["balls_bowled"]),
-        ("BOWLING AVERAGE", fmt(t["bowl_avg"])),
-        ("ECONOMY", fmt(t["economy"])),
-    ]
+    header_font_size = 34
+    header_font = load_font(header_font_size, True)
+    while draw.textbbox((0, 0), guild_name, font=header_font)[2] > 500 and header_font_size > 20:
+        header_font_size -= 1
+        header_font = load_font(header_font_size, True)
+    draw.text((800, 37), guild_name, font=header_font, fill=white, anchor="mt")
+    draw.text((800, 83), "PLAYER PERFORMANCE  /  SEASON PROFILE", font=load_font(16, True), fill=blue, anchor="mt")
+    draw.line((55, 120, 1545, 120), fill=(55, 125, 205, 210), width=2)
+    draw.rounded_rectangle((55, 117, 300, 122), radius=2, fill=blue)
 
-    for i, (label, value) in enumerate(bowling):
-        y = 260 + i * 98
-        draw.rounded_rectangle(
-            (1112, y, 1518, y + 75),
-            radius=13,
-            fill=(3, 24, 49, 225),
-            outline=(30, 86, 145, 210),
-            width=1,
-        )
-        draw.text(
-            (1132, y + 11), label,
-            font=load_font(14, True), fill=muted,
-        )
-        draw.text(
-            (1132, y + 34), str(value),
-            font=load_font(26, True), fill=white,
-        )
+    # Left identity card: rating, player role, avatar, username, team and impacts.
+    draw.text((84, 174), "OVERALL RATING", font=load_font(17, True), fill=blue)
+    draw.text((80, 194), str(rating), font=load_font(78, True), fill=white)
+    draw.text((207, 240), "/100", font=load_font(20, True), fill=muted)
+    pill_width = 190 if role != "ALL-ROUNDER" else 225
+    pill_x = 330
+    draw.rounded_rectangle((pill_x, 181, pill_x + pill_width, 222), radius=18, fill=(12, 42, 76, 255), outline=(29, 88, 151, 255), width=1)
+    draw.text((pill_x + pill_width // 2, 192), role, font=load_font(16, True), fill=blue, anchor="mt")
 
-    # Centered Discord avatar.
-    avatar_size = 210
-    avatar_x = (width - avatar_size) // 2
-    avatar_y = 270
-
-    draw.ellipse(
-        (
-            avatar_x - 9,
-            avatar_y - 9,
-            avatar_x + avatar_size + 9,
-            avatar_y + avatar_size + 9,
-        ),
-        fill=(2, 17, 38, 255),
-        outline=blue,
-        width=5,
-    )
-
+    avatar_size = 230
+    avatar_x = 170
+    avatar_y = 290
+    draw.ellipse((avatar_x - 8, avatar_y - 8, avatar_x + avatar_size + 8, avatar_y + avatar_size + 8), fill=(1, 11, 25, 255), outline=white, width=5)
     pasted_avatar = False
-
     if avatar:
         try:
             av = Image.open(io.BytesIO(avatar)).convert("RGB")
-            av = av.resize(
-                (avatar_size, avatar_size),
-                Image.Resampling.LANCZOS,
-            )
+            av = ImageOps.fit(av, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
             mask = Image.new("L", (avatar_size, avatar_size), 0)
-            ImageDraw.Draw(mask).ellipse(
-                (0, 0, avatar_size - 1, avatar_size - 1),
-                fill=255,
-            )
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
             image.paste(av, (avatar_x, avatar_y), mask)
             pasted_avatar = True
         except Exception:
-            pasted_avatar = False
-
+            pass
     draw = ImageDraw.Draw(image)
-
     if not pasted_avatar:
-        initials = (
-            getattr(member, "display_name", "?")[:1] or "?"
-        ).upper()
-        draw.text(
-            (width // 2, avatar_y + 65),
-            initials,
-            font=load_font(72, True),
-            fill=white,
-            anchor="mt",
-        )
+        initials = (getattr(member, "display_name", "?")[:1] or "?").upper()
+        draw.text((avatar_x + avatar_size // 2, avatar_y + 65), initials, font=load_font(76, True), fill=white, anchor="mt")
+    draw.ellipse((avatar_x - 8, avatar_y - 8, avatar_x + avatar_size + 8, avatar_y + avatar_size + 8), outline=blue, width=5)
 
-    draw.ellipse(
-        (
-            avatar_x - 9,
-            avatar_y - 9,
-            avatar_x + avatar_size + 9,
-            avatar_y + avatar_size + 9,
-        ),
-        outline=blue,
-        width=5,
-    )
-
-    # Username, kept within the center column.
     username = getattr(member, "display_name", "Player")
-    name_font_size = 27
-    name_font = load_font(name_font_size, True)
+    username_size = 31
+    username_font = load_font(username_size, True)
+    while draw.textbbox((0, 0), username, font=username_font)[2] > 445 and username_size > 17:
+        username_size -= 1
+        username_font = load_font(username_size, True)
+    draw.text((309, 548), username, font=username_font, fill=white, anchor="mt")
 
-    while (
-        draw.textbbox((0, 0), username, font=name_font)[2] > 420
-        and name_font_size > 16
-    ):
-        name_font_size -= 1
-        name_font = load_font(name_font_size, True)
+    team_font_size = 17
+    team_font = load_font(team_font_size, True)
+    while draw.textbbox((0, 0), team_name, font=team_font)[2] > 445 and team_font_size > 11:
+        team_font_size -= 1
+        team_font = load_font(team_font_size, True)
+    draw.text((309, 592), team_name, font=team_font, fill=muted, anchor="mt")
+    draw.line((83, 632, 535, 632), fill=(55, 75, 95, 200), width=1)
 
-    draw.text(
-        (width // 2, 520),
-        username,
-        font=name_font,
-        fill=white,
-        anchor="mt",
+    # Impact bars.
+    draw.text((84, 651), "BATTING IMPACT", font=load_font(15, True), fill=muted)
+    draw.text((526, 643), str(bat_impact), font=load_font(24, True), fill=white, anchor="ra")
+    draw.rounded_rectangle((84, 680, 526, 691), radius=5, fill=(38, 48, 59, 255))
+    draw.rounded_rectangle((84, 680, 84 + int(442 * bat_impact / 100), 691), radius=5, fill=lime)
+    draw.text((84, 713), "BOWLING IMPACT", font=load_font(15, True), fill=muted)
+    draw.text((526, 705), str(bowl_impact), font=load_font(24, True), fill=white, anchor="ra")
+    draw.rounded_rectangle((84, 742, 526, 753), radius=5, fill=(38, 48, 59, 255))
+    draw.rounded_rectangle((84, 742, 84 + int(442 * bowl_impact / 100), 753), radius=5, fill=cyan)
+    draw.text((84, 790), f"{t['matches']} MATCHES RECORDED", font=load_font(14, True), fill=muted)
+
+    # Snapshot cards above the batting/bowling panels.
+    draw.text((620, 143), "SEASON SNAPSHOT", font=load_font(17, True), fill=white)
+    snapshot = [("MATCHES", t["matches"], blue), ("RUNS", t["runs"], lime), ("WICKETS", t["wickets"], cyan), ("RATING", rating, blue)]
+    card_w, card_gap = 218, 18
+    for i, (label, value, accent) in enumerate(snapshot):
+        x = 610 + i * (card_w + card_gap)
+        draw.text((x + 16, 184), label, font=load_font(13, True), fill=muted)
+        draw.ellipse((x + card_w - 25, 185, x + card_w - 13, 197), fill=accent)
+        draw.text((x + 16, 215), str(value), font=load_font(29, True), fill=accent if label != "MATCHES" else white)
+
+    # Batting panel in the requested order and paired columns.
+    draw.rounded_rectangle((622, 303, 665, 310), radius=3, fill=lime)
+    draw.text((622, 324), "BATTING", font=load_font(20, True), fill=lime)
+    draw.text((1035, 329), "AT THE CREASE", font=load_font(11, True), fill=muted, anchor="ra")
+    batting = [
+        ("INNINGS", t["matches"]), ("STRIKE RATE", fmt(t["strike_rate"])),
+        ("RUNS", t["runs"]), ("AVERAGE", fmt(t["bat_avg"])),
+        ("FIFTIES", sum(50 <= r["runs"] < 100 for r in rows)),
+        ("HUNDREDS", sum(r["runs"] >= 100 for r in rows)),
+        ("NOT OUTS", t["not_outs"]),
+        ("DUCKS", sum(r["runs"] == 0 and not r["not_out"] for r in rows)),
+        ("HIGH SCORE", max((r["runs"] for r in rows), default=0)),
+    ]
+    for i, (label, value) in enumerate(batting):
+        col, row = i % 2, i // 2
+        x = 627 + col * 216
+        y = 365 + row * 68
+        if col == 1:
+            draw.line((835, y - 1, 835, y + 48), fill=dim_line, width=1)
+        draw.text((x, y), label, font=load_font(12, True), fill=muted)
+        draw.text((x, y + 20), str(value), font=load_font(23, True), fill=white)
+
+    # Bowling panel with innings, overs, averages, economy, SR, BBF and haul counts.
+    draw.rounded_rectangle((1112, 303, 1155, 310), radius=3, fill=cyan)
+    draw.text((1112, 324), "BOWLING", font=load_font(20, True), fill=cyan)
+    draw.text((1517, 329), "WITH THE BALL", font=load_font(11, True), fill=muted, anchor="ra")
+    best = max(
+        ((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0),
+        default=(0, 0),
     )
-    draw.text(
-        (width // 2, 570),
-        "PLAYER PROFILE",
-        font=load_font(16, True),
-        fill=cyan,
-        anchor="mt",
-    )
-    draw.rounded_rectangle(
-        (640, 625, 960, 631),
-        radius=3,
-        fill=(29, 80, 130, 255),
-    )
-    draw.text(
-        (width // 2, 662),
-        f"{t['matches']} MATCHES RECORDED",
-        font=load_font(16, True),
-        fill=muted,
-        anchor="mt",
-    )
-    draw.text(
-        (width // 2, 840),
-        "GOOGLI MANAGER  •  PLAYER STATS",
-        font=load_font(15, True),
-        fill=muted,
-        anchor="mt",
-    )
+    bowling = [
+        ("INNINGS", sum(r["balls_bowled"] > 0 for r in rows)),
+        ("OVERS", fmt(t["overs"])),
+        ("AVERAGE", fmt(t["bowl_avg"])),
+        ("ECONOMY", fmt(t["economy"])),
+        ("STRIKE RATE", fmt(t["bowl_sr"])),
+        ("BEST FIGURES", f"{best[0]}/{-best[1]}"),
+        ("3W HAULS", sum(3 <= r["wickets"] < 5 for r in rows)),
+        ("5W HAULS", sum(r["wickets"] >= 5 for r in rows)),
+    ]
+    for i, (label, value) in enumerate(bowling):
+        col, row = i % 2, i // 2
+        x = 1117 + col * 210
+        y = 365 + row * 76
+        if col == 1:
+            draw.line((1325, y - 1, 1325, y + 49), fill=dim_line, width=1)
+        draw.text((x, y), label, font=load_font(12, True), fill=muted)
+        draw.text((x, y + 22), str(value), font=load_font(23, True), fill=white)
+
+    draw.text((800, 865), "GOOGLI MANAGER  •  PLAYER PERFORMANCE FROM RECORDED MATCH STATS", font=load_font(12, True), fill=muted, anchor="mt")
 
     output = io.BytesIO()
     image.convert("RGB").save(output, format="PNG", optimize=True)
@@ -1093,6 +1106,7 @@ class Stats(commands.Cog):
                     member,
                     rows,
                     avatar=avatar,
+                    guild_icon=guild_icon,
                 )
             else:
                 # Design 1 continues to use the original renderer.
