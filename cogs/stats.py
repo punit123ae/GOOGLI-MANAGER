@@ -1,9 +1,11 @@
 
+import asyncio
 import io
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from functools import lru_cache
 
 import discord
 from discord.ext import commands
@@ -35,6 +37,7 @@ def fmt(value, digits=2):
     return str(value)
 
 
+@lru_cache(maxsize=64)
 def load_font(size, bold=False):
     candidates = [
         "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
@@ -394,7 +397,7 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
         fill=muted,
     )
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
+    image.save(output, format="PNG", optimize=False, compress_level=2)
     output.seek(0)
     return output
 
@@ -469,8 +472,9 @@ def get_player_team_name(member):
             connection.close()
 
 
-def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
-    """Render Design 2: batting left, player profile centre, bowling right."""
+@lru_cache(maxsize=1)
+def _cached_design2_background():
+    """Load and resize the static Design 2 background once per process."""
     from PIL import ImageOps
 
     background_path = Path(__file__).resolve().with_name("stats_design2_bg.png")
@@ -478,14 +482,18 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         raise FileNotFoundError(
             f"Design 2 background image is missing: {background_path}"
         )
-
-    width, height = 1600, 900
     with Image.open(background_path) as source:
-        background = ImageOps.fit(
-            source.convert("RGB"), (width, height),
+        return ImageOps.fit(
+            source.convert("RGB"), (1600, 900),
             method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
         )
-    image = background.convert("RGBA")
+
+
+def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
+    """Render Design 2: batting left, player profile centre, bowling right."""
+    width, height = 1600, 900
+    # Cached pre-resized background avoids disk I/O and resampling per request.
+    image = _cached_design2_background().copy().convert("RGBA")
 
     # Semi-transparent panels add depth while keeping the blue background visible.
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -692,7 +700,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
               font=load_font(12, True), fill=muted, anchor="mt")
 
     output = io.BytesIO()
-    image.convert("RGB").save(output, format="PNG", optimize=True)
+    image.convert("RGB").save(output, format="PNG", optimize=False, compress_level=2)
     output.seek(0)
     return output
 
@@ -1131,7 +1139,9 @@ class Stats(commands.Cog):
 
         try:
             if design == 2:
-                image = make_stats_image_design2(
+                # Pillow rendering is CPU-bound; keep it off Discord's event loop.
+                image = await asyncio.to_thread(
+                    make_stats_image_design2,
                     member,
                     rows,
                     avatar=avatar,
@@ -1139,7 +1149,8 @@ class Stats(commands.Cog):
                 )
             else:
                 # Design 1 continues to use the original renderer.
-                image = make_stats_image(
+                image = await asyncio.to_thread(
+                    make_stats_image,
                     member,
                     rows,
                     guild_icon=guild_icon,
