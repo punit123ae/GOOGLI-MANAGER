@@ -404,62 +404,65 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
 # ============================================================
 
 def get_player_team_name(member):
-    """Look up a player's team in the existing teams.db without modifying it."""
+    """Look up the player's approved team from TeamRegistration's database."""
     import sqlite3
 
-    db_path = Path(__file__).resolve().parent.parent / "teams.db"
+    # teams.py stores teams in team_registration.db, not teams.db.
+    db_path = Path(__file__).resolve().parent.parent / "team_registration.db"
     if not db_path.is_file():
+        return "NO TEAM CONNECTED"
+
+    guild = getattr(member, "guild", None)
+    if guild is None:
         return "NO TEAM CONNECTED"
 
     connection = None
     try:
-        connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        connection = sqlite3.connect(
+            f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3
+        )
         connection.row_factory = sqlite3.Row
         tables = {
-            row[0]
+            row["name"]
             for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
+                "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        if "teams" not in tables:
+        if not {"registered_teams", "team_players"}.issubset(tables):
             return "NO TEAM CONNECTED"
 
-        team_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(teams)")
-        }
-        if not {"id", "name"}.issubset(team_columns):
-            return "NO TEAM CONNECTED"
-
-        user_id = int(member.id)
-        conditions = []
-        params = []
-        if "captain_id" in team_columns:
-            conditions.append("captain_id = ?")
-            params.append(user_id)
-        if "vc_id" in team_columns:
-            conditions.append("vc_id = ?")
-            params.append(user_id)
-        if "team_members" in tables:
-            member_columns = {
-                row[1]
-                for row in connection.execute("PRAGMA table_info(team_members)")
-            }
-            if {"team_id", "user_id"}.issubset(member_columns):
-                conditions.append(
-                    "id IN (SELECT team_id FROM team_members WHERE user_id = ?)"
-                )
-                params.append(user_id)
-
-        if not conditions:
-            return "NO TEAM CONNECTED"
-
-        query = "SELECT name FROM teams WHERE (" + " OR ".join(conditions) + ")"
-        if "approved" in team_columns:
-            query += " AND approved = 1"
-        query += " ORDER BY name COLLATE NOCASE LIMIT 1"
-        row = connection.execute(query, params).fetchone()
+        # First check accepted roster membership. Only approved teams in this
+        # Discord server should appear on the player's stats card.
+        row = connection.execute(
+            """
+            SELECT t.name
+            FROM registered_teams AS t
+            LEFT JOIN team_players AS p ON p.team_id = t.id
+            WHERE t.guild_id = ?
+              AND t.status = 'approved'
+              AND (
+                    p.user_id = ?
+                    OR t.captain_id = ?
+                    OR t.vice_captain_id = ?
+              )
+            ORDER BY
+              CASE WHEN t.captain_id = ? THEN 0
+                   WHEN t.vice_captain_id = ? THEN 1
+                   ELSE 2 END,
+              t.name COLLATE NOCASE
+            LIMIT 1
+            """,
+            (
+                int(guild.id),
+                int(member.id),
+                int(member.id),
+                int(member.id),
+                int(member.id),
+                int(member.id),
+            ),
+        ).fetchone()
         return str(row["name"]) if row and row["name"] else "NO TEAM CONNECTED"
-    except (sqlite3.Error, OSError, ValueError, TypeError):
+    except (sqlite3.Error, OSError, ValueError, TypeError, AttributeError):
         return "NO TEAM CONNECTED"
     finally:
         if connection is not None:
