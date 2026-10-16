@@ -9,7 +9,7 @@ from functools import lru_cache
 
 import discord
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 def parse_raw_stats(content):
