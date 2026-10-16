@@ -774,25 +774,53 @@ def build_recent_embed(player_name, rows):
     return embed
 
 
+def make_recent_matches_image(player_name, rows):
+    """Render recent match records as an image so the command never sends stats text."""
+    width, height = 1600, 900
+    image = _cached_design2_background().copy().convert("RGBA")
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.rounded_rectangle((55, 65, 1545, 835), radius=28,
+                         fill=(4, 13, 27, 232), outline=(39, 133, 247, 235), width=3)
+    image = Image.alpha_composite(image, overlay)
+    draw = ImageDraw.Draw(image)
+    white = (245, 249, 255, 255)
+    muted = (159, 187, 215, 255)
+    blue = (61, 151, 255, 255)
+    draw.text((800, 100), "RECENT MATCHES", font=load_font(42, True), fill=white, anchor="mt")
+    draw.text((800, 157), player_name.upper(), font=load_font(23, True), fill=blue, anchor="mt")
+    recent = list(reversed(rows[-5:]))
+    if not recent:
+        draw.text((800, 430), "NO RECENT MATCH DATA", font=load_font(28, True), fill=muted, anchor="mm")
+    else:
+        gap = 16
+        top = 220
+        card_h = min(108, (580 - gap * (len(recent) - 1)) // len(recent))
+        for i, row in enumerate(recent, start=1):
+            y = top + (i - 1) * (card_h + gap)
+            draw.rounded_rectangle((95, y, 1505, y + card_h), radius=17,
+                                   fill=(10, 25, 43, 242), outline=(39, 133, 247, 210), width=2)
+            draw.text((125, y + 18), f"MATCH {i}", font=load_font(22, True), fill=blue)
+            status = "NOT OUT" if row["not_out"] else "OUT"
+            draw.text((125, y + 54), status, font=load_font(16, True), fill=muted)
+            draw.text((520, y + card_h // 2), f"{row['runs']} RUNS  •  {row['balls_faced']} BALLS",
+                      font=load_font(22, True), fill=white, anchor="lm")
+            draw.text((1030, y + card_h // 2),
+                      f"{row['wickets']} WKTS  •  {row['runs_conceded']} RUNS  •  {row['balls_bowled']} BALLS",
+                      font=load_font(19, True), fill=white, anchor="lm")
+    output = io.BytesIO()
+    image.convert("RGB").save(output, format="PNG", optimize=False, compress_level=2)
+    output.seek(0)
+    return output
+
+
 class StatsSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
-            placeholder="Choose a stats view...",
-            min_values=1,
-            max_values=1,
+            placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=[
-                discord.SelectOption(
-                    label="Overall Performance",
-                    description="Career totals and averages",
-                    emoji="📊",
-                    value="overall",
-                ),
-                discord.SelectOption(
-                    label="Recent 5 Matches",
-                    description="Detailed recent match records",
-                    emoji="📋",
-                    value="recent",
-                ),
+                discord.SelectOption(label="Overall Stats", description="Full generated player stats image", emoji="📊", value="overall", default=True),
+                discord.SelectOption(label="Recent Matches", description="Recent five matches as an image", emoji="📋", value="recent"),
             ],
         )
 
@@ -800,31 +828,31 @@ class StatsSelect(discord.ui.Select):
         view = self.view
         if interaction.user.id != view.requester_id:
             await interaction.response.send_message(
-                "This stats menu belongs to the person who requested it.",
-                ephemeral=True,
+                "This stats menu belongs to the person who requested it.", ephemeral=True
             )
             return
-
         if self.values[0] == "recent":
-            await interaction.response.edit_message(
-                embed=build_recent_embed(view.player_name, view.rows),
-                attachments=[],
-                view=view,
-            )
+            image = await asyncio.to_thread(make_recent_matches_image, view.player_name, view.rows)
+            filename = f"player_{view.member_id}_recent_matches.png"
         else:
-            await interaction.response.edit_message(
-                embed=build_overview_embed(view.player_name, view.rows),
-                attachments=[],
-                view=view,
-            )
+            image = io.BytesIO(view.overall_image)
+            filename = f"player_{view.member_id}_stats.png"
+        image.seek(0)
+        file = discord.File(image, filename=filename)
+        for option in self.options:
+            option.default = (option.value == self.values[0])
+        # Update the attachment itself; no stats embed or text is sent.
+        await interaction.response.edit_message(content=None, embed=None, attachments=[file], view=view)
 
 
 class StatsView(discord.ui.View):
-    def __init__(self, requester_id, player_name, rows):
+    def __init__(self, requester_id, player_name, rows, member_id, overall_image):
         super().__init__(timeout=600)
         self.requester_id = requester_id
         self.player_name = player_name
         self.rows = rows
+        self.member_id = member_id
+        self.overall_image = overall_image
         self.add_item(StatsSelect())
 
 
@@ -1173,19 +1201,20 @@ class Stats(commands.Cog):
             return
 
         filename = f"player_{member.id}_stats.png"
-        file = discord.File(image, filename=filename)
-
-        embed = build_overview_embed(member.display_name, rows)
-        embed.set_image(url=f"attachment://{filename}")
+        image.seek(0)
+        overall_image = image.getvalue()
+        file = discord.File(io.BytesIO(overall_image), filename=filename)
 
         view = StatsView(
             ctx.author.id,
             member.display_name,
             rows,
+            member.id,
+            overall_image,
         )
 
+        # Send only the generated image and its dropdown; no stats embed/text.
         await ctx.send(
-            embed=embed,
             file=file,
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
