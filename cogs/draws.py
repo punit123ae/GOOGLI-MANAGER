@@ -96,6 +96,10 @@ class LiveDraws(commands.Cog):
     @commands.guild_only()
     async def setup_live_draws(self, ctx):
         """Interactively save a live-draw setting for this server."""
+        if ctx.author.id != OWNER_ID:
+            await ctx.send("You are not authorized to use live-draw commands.")
+            return
+
         try:
             teams = self._approved_teams(ctx.guild.id)
         except (sqlite3.Error, FileNotFoundError) as exc:
@@ -161,6 +165,10 @@ class LiveDraws(commands.Cog):
     @commands.guild_only()
     async def start_live_draw(self, ctx, *, setting_name: str):
         """Draw one team at a time, retaining the complete draw in each new message."""
+        if ctx.author.id != OWNER_ID:
+            await ctx.send("You are not authorized to use live-draw commands.")
+            return
+
         key = self._setting_key(setting_name)
         setting = self.db.execute(
             "SELECT * FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
