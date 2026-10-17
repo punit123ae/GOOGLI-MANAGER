@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import math
 import sqlite3
+import asyncio
 from collections import defaultdict
 from typing import Any
 from pathlib import Path
@@ -42,6 +43,12 @@ ICE = (65, 199, 255)
 GOLD = (255, 190, 61)
 WHITE = (238, 246, 255)
 MUTED = (151, 185, 217)
+
+# Keep the decoded background and recently downloaded avatars in memory. This
+# avoids decoding a 2 MB PNG and re-downloading the same avatars on every +lb.
+_BACKGROUND_CACHE: Image.Image | None = None
+_AVATAR_CACHE: dict[tuple[int, str], bytes | None] = {}
+_AVATAR_CACHE_LIMIT = 100
 
 
 def _font(size: int, bold: bool = False):
@@ -136,14 +143,27 @@ def _background(width: int, height: int) -> Image.Image:
         raise FileNotFoundError(
             "kt_lb_background.png is missing. Keep the supplied background image beside lb.py."
         )
-    return Image.open(asset).convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
+    global _BACKGROUND_CACHE
+    if _BACKGROUND_CACHE is None:
+        with Image.open(asset) as source:
+            _BACKGROUND_CACHE = source.convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
+    # Each render needs its own writable canvas; reuse the decoded master.
+    return _BACKGROUND_CACHE.copy()
 
 
 async def _avatar_bytes(member: discord.abc.User) -> bytes | None:
+    avatar_key = (member.id, str(member.display_avatar))
+    if avatar_key in _AVATAR_CACHE:
+        return _AVATAR_CACHE[avatar_key]
     try:
-        return await member.display_avatar.replace(size=128).read()
+        data = await member.display_avatar.replace(size=64).read()
     except Exception:
-        return None
+        data = None
+    # Keep the cache bounded so a busy server cannot grow RAM forever.
+    if len(_AVATAR_CACHE) >= _AVATAR_CACHE_LIMIT:
+        _AVATAR_CACHE.pop(next(iter(_AVATAR_CACHE)))
+    _AVATAR_CACHE[avatar_key] = data
+    return data
 
 
 def _paste_avatar(im: Image.Image, avatar_data: bytes | None, x: int, y: int, size: int, fallback: str):
@@ -197,18 +217,28 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
     rank_map = {p["id"]: i + 1 for i, p in enumerate(computed)}
     requester = next((p for p in computed if p["id"] == requester_id), None)
 
+    # Resolve any uncached members concurrently rather than making up to 11
+    # sequential Discord API requests during every render.
+    member_ids = {p["id"] for p in top}
+    if requester is not None:
+        member_ids.add(requester_id)
+    async def resolve_member(uid: int):
+        member = guild.get_member(uid)
+        if member is not None:
+            return uid, member
+        try:
+            return uid, await guild.fetch_member(uid)
+        except Exception:
+            return uid, None
+    resolved_members = dict(await asyncio.gather(*(resolve_member(uid) for uid in member_ids)))
+
     # Coordinates match the ten empty blue rows in the supplied template.
     row_centers = [343, 425, 508, 591, 674, 757, 840, 923, 1006, 1089]
     for i, player in enumerate(top):
         cy = row_centers[i]
         rank = i + 1
         uid = player["id"]
-        member = guild.get_member(uid)
-        if member is None:
-            try:
-                member = await guild.fetch_member(uid)
-            except Exception:
-                member = None
+        member = resolved_members.get(uid)
         # Use the Discord username, not the server nickname/display name.
         username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
         avatar_data = await _avatar_bytes(member) if member else None
@@ -240,12 +270,7 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
     panel_top, panel_bottom = 1229, 1328
     if requester:
         own_rank = rank_map[requester_id]
-        own_member = guild.get_member(requester_id)
-        if own_member is None:
-            try:
-                own_member = await guild.fetch_member(requester_id)
-            except Exception:
-                own_member = None
+        own_member = resolved_members.get(requester_id)
         own_name = own_member.name if own_member else f"Unknown player ({str(requester_id)[-4:]})"
         own_avatar = await _avatar_bytes(own_member) if own_member else None
         _paste_avatar(im, own_avatar, 105, 1257, 57, own_name)
@@ -324,11 +349,16 @@ class LeaderboardView(discord.ui.View):
         # while the leaderboard image and avatars are being rendered.
         await interaction.response.defer()
         self._rebuild_items()
-        png = await self.cog.render(self.ctx.guild, self.metric_key, self.category, self.metric_label, self.owner_id)
-        file = discord.File(io.BytesIO(png), filename="leaderboard.png")
-        embed = discord.Embed(color=discord.Colour.from_rgb(*BLUE))
-        embed.set_image(url="attachment://leaderboard.png")
-        await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
+        try:
+            png = await self.cog.render(self.ctx.guild, self.metric_key, self.category, self.metric_label, self.owner_id)
+            file = discord.File(io.BytesIO(png), filename="leaderboard.png")
+            embed = discord.Embed(color=discord.Colour.from_rgb(*BLUE))
+            embed.set_image(url="attachment://leaderboard.png")
+            # For component interactions, edit the message containing the menu.
+            await interaction.message.edit(embed=embed, attachments=[file], view=self)
+        except Exception as exc:
+            print(f"[lb] Menu refresh failed: {type(exc).__name__}: {exc}")
+            await interaction.followup.send("Couldn't update the leaderboard. Check the bot console for the error.", ephemeral=True)
 
 
 class LeaderboardCog(commands.Cog):
