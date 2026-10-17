@@ -35,7 +35,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.points_table",
             "cogs.teams",
             "cogs.predictions",
-            "congs.draws",
+            "cogs.draws",
         ):
             await self.load_extension(extension)
 
@@ -46,7 +46,7 @@ class GoogIManagerBot(commands.Bot):
 
 
 bot = GoogIManagerBot(
-    command_prefix=("!", "+"),
+    command_prefix=("+"),
     intents=intents,
 )
 
