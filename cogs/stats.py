@@ -9,7 +9,6 @@ from functools import lru_cache
 
 import discord
 from discord.ext import commands
-from cogs.utility import is_bot_admin
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
@@ -902,9 +901,13 @@ class Stats(commands.Cog):
         ).fetchone()
         return int(row[0]) if row else 1
 
-    def admin(self, ctx):
-        # Administrator-only stats commands are controlled by the bot whitelist.
-        return is_bot_admin(ctx)
+    async def command_allowed(self, ctx, command_name):
+        """Use the shared utility cog for command whitelist/lock checks."""
+        utility = self.bot.get_cog("Utility")
+        if utility is None:
+            # Fail closed until the shared permission system is loaded.
+            return False
+        return await utility.command_allowed(ctx, command_name)
 
     async def replied_message(self, ctx):
         ref = ctx.message.reference
@@ -945,9 +948,9 @@ class Stats(commands.Cog):
 
     @commands.command(name="as", aliases=["addstats"])
     async def add_stats(self, ctx):
-        if not self.admin(ctx):
+        if not await self.command_allowed(ctx, "as"):
             await ctx.reply(
-                "Administrator permission is required.",
+                "You are not allowed to use this command.",
                 mention_author=False,
             )
             return
@@ -1019,9 +1022,9 @@ class Stats(commands.Cog):
 
     @commands.command(name="rs", aliases=["removestats"])
     async def remove_stats(self, ctx):
-        if not self.admin(ctx):
+        if not await self.command_allowed(ctx, "rs"):
             await ctx.reply(
-                "Administrator permission is required.",
+                "You are not allowed to use this command.",
                 mention_author=False,
             )
             return
@@ -1073,9 +1076,9 @@ class Stats(commands.Cog):
     # New administrator-only design selector.
     @commands.command(name="setdesign")
     async def set_design(self, ctx, design_number: str = None):
-        if not self.admin(ctx):
+        if not await self.command_allowed(ctx, "setdesign"):
             await ctx.reply(
-                "Administrator permission is required.",
+                "You are not allowed to use this command.",
                 mention_author=False,
             )
             return

@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
-from cogs.utility import is_bot_admin
 
 CAPTAIN_EMOJI = "<:captain:1560220118422659123>"
 VICE_CAPTAIN_EMOJI = "<:VC:1560220622703824966>"
@@ -27,9 +26,8 @@ class ConfirmDeleteAllView(discord.ui.View):
 
     @discord.ui.button(label="Confirm deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
-        # Confirm button is protected by the command whitelist used to open this view.
-        if not is_bot_admin(type("Ctx", (), {"guild": interaction.guild, "author": interaction.user, "bot": self.cog.bot, "command": type("Cmd", (), {"name": "deleteallteams"})()})()):
-            await interaction.response.send_message("You are not whitelisted for `deleteallteams`.", ephemeral=True)
+        if not await self.cog._command_allowed(interaction, "deleteallteams"):
+            await interaction.response.send_message("You are not allowed to use this command.", ephemeral=True)
             return
         count = self.cog.db.execute(
             "SELECT COUNT(*) FROM registered_teams WHERE guild_id=?", (self.guild_id,)
@@ -68,7 +66,7 @@ class TeamApprovalView(discord.ui.View):
             await interaction.response.send_message("This is not a valid approval channel.", ephemeral=True)
             return False
         perms = interaction.channel.permissions_for(interaction.user)
-        if not (perms.view_channel and (perms.send_messages or perms.manage_messages)):
+        if not (perms.view_channel and (perms.send_messages or perms.manage_messages or interaction.user.guild_permissions.administrator)):
             await interaction.response.send_message("You don't have permission to review applications in this channel.", ephemeral=True)
             return False
         return True
@@ -346,8 +344,13 @@ class TeamRegistration(commands.Cog):
     def _team_player_count(self, team_id):
         return len(self._team_player_ids(team_id))
 
-    def _is_admin(self, ctx):
-        return is_bot_admin(ctx)
+    async def _command_allowed(self, ctx, command_name):
+        """Delegate command permissions to the shared utility cog."""
+        utility = self.bot.get_cog("Utility")
+        if utility is None:
+            # Fail closed until the shared permission system is loaded.
+            return False
+        return await utility.command_allowed(ctx, command_name)
 
     async def _get_member(self, guild, value):
         value = value.strip()
@@ -472,8 +475,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setmaxplayers")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def set_max_players(self, ctx, maximum: int):
+        if not await self._command_allowed(ctx, "setmaxplayers"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         if not 1 <= maximum <= 100:
             await ctx.reply("Choose a maximum between 1 and 100 players per team.", mention_author=False)
             return
@@ -490,8 +495,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setcaptain")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def set_captain(self, ctx, target: str, *, team_name: str):
+        if not await self._command_allowed(ctx, "setcaptain"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
             await ctx.reply("I couldn't find an approved team with that name.", mention_author=False)
@@ -523,8 +530,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setteamrole", aliases=["setteamroles"])
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def set_team_role(self, ctx, *, arguments: str):
+        if not await self._command_allowed(ctx, "setteamrole"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         parts = arguments.rsplit(maxsplit=1)
         if len(parts) != 2 or not parts[1].isdigit():
             await ctx.reply("Usage: `+setteamrole Team Name ROLE_ID`", mention_author=False)
@@ -555,9 +564,11 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="teamroles", aliases=["approvedteamroles", "listteamroles"])
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def list_approved_team_roles(self, ctx):
         """List configured roles for all approved teams, showing role IDs without pinging."""
+        if not await self._command_allowed(ctx, "teamroles"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         teams = self.db.execute(
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
             (ctx.guild.id,),
@@ -604,8 +615,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="stopteamroles")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def stop_team_roles(self, ctx, *, team_name: str):
+        if not await self._command_allowed(ctx, "stopteamroles"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
             await ctx.reply("I couldn't find an approved team.", mention_author=False)
@@ -620,8 +633,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="startteamroles")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def start_team_roles(self, ctx, *, team_name: str):
+        if not await self._command_allowed(ctx, "startteamroles"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
             await ctx.reply("I couldn't find an approved team.", mention_author=False)
@@ -636,8 +651,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="stopallteamroles")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def stop_all_team_roles(self, ctx):
+        if not await self._command_allowed(ctx, "stopallteamroles"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         self.db.execute(
             "INSERT INTO server_team_role_settings(guild_id,enabled) VALUES(?,0) "
             "ON CONFLICT(guild_id) DO UPDATE SET enabled=0", (ctx.guild.id,)
@@ -647,8 +664,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="startallteamroles")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def start_all_team_roles(self, ctx):
+        if not await self._command_allowed(ctx, "startallteamroles"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         self.db.execute(
             "INSERT INTO server_team_role_settings(guild_id,enabled) VALUES(?,1) "
             "ON CONFLICT(guild_id) DO UPDATE SET enabled=1", (ctx.guild.id,)
@@ -658,9 +677,11 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="syncteamroles", aliases=["syncteamrole", "syncroles"])
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def sync_team_roles(self, ctx):
         """Give existing team members their configured team roles when missing."""
+        if not await self._command_allowed(ctx, "syncteamroles"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         guild = ctx.guild
         global_setting = self.db.execute(
             "SELECT enabled FROM server_team_role_settings WHERE guild_id=?", (guild.id,)
@@ -787,8 +808,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="toggle")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def toggle_feature(self, ctx, feature: str):
+        if not await self._command_allowed(ctx, "toggle"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         feature = feature.casefold()
         if feature not in ("jointeam", "leaveteam", "createteam"):
             await ctx.reply("Usage: `+toggle jointeam`, `+toggle leaveteam`, or `+toggle createteam`.", mention_author=False)
@@ -804,8 +827,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="deleteallteams")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def delete_all_teams(self, ctx):
+        if not await self._command_allowed(ctx, "deleteallteams"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         count = self.db.execute("SELECT COUNT(*) FROM registered_teams WHERE guild_id=?", (ctx.guild.id,)).fetchone()[0]
         if not count:
             await ctx.reply("There are no teams to delete.", mention_author=False)
@@ -872,8 +897,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="cancelrequests")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def cancel_requests(self, ctx, user_id: str):
+        if not await self._command_allowed(ctx, "cancelrequests"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         match = re.fullmatch(r"<@!?(\d+)>|(\d+)", user_id.strip())
         if not match:
             await ctx.reply("Usage: `+cancelrequests USER_ID`", mention_author=False)
@@ -911,8 +938,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="disbandteam")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def disband_team(self, ctx, *, team_name: str):
+        if not await self._command_allowed(ctx, "disbandteam"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         team = self._team(ctx.guild.id, team_name)
         if not team:
             await ctx.reply("I couldn't find a team with that name.", mention_author=False)
@@ -931,8 +960,10 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setteamapproval")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def set_team_approval(self, ctx, channel: discord.TextChannel):
+        if not await self._command_allowed(ctx, "setteamapproval"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         self.db.execute(
             "INSERT INTO team_settings(guild_id,approval_channel_id) VALUES(?,?) "
             "ON CONFLICT(guild_id) DO UPDATE SET approval_channel_id=excluded.approval_channel_id",
@@ -1096,8 +1127,8 @@ class TeamRegistration(commands.Cog):
     @commands.command(name="addplayer")
     @commands.guild_only()
     async def add_player(self, ctx, target: str, *, team_name: str):
-        if not self._is_admin(ctx):
-            await ctx.reply("Only server administrators can use this command.", mention_author=False)
+        if not await self._command_allowed(ctx, "addplayer"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
             return
         member = await self._get_member(ctx.guild, target)
         if member is None:
@@ -1129,9 +1160,11 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="addallplayers")
     @commands.guild_only()
-    @commands.check(is_bot_admin)
     async def add_all_players(self, ctx, *, team_name: str):
         """Add every username in the message this command replies to, with the team's configured role."""
+        if not await self._command_allowed(ctx, "addallplayers"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
         source = ctx.message.reference
         if source is None or source.message_id is None:
             await ctx.reply(
@@ -1255,8 +1288,8 @@ class TeamRegistration(commands.Cog):
     @commands.command(name="bulkadd")
     @commands.guild_only()
     async def bulk_add(self, ctx, *, arguments: str):
-        if not self._is_admin(ctx):
-            await ctx.reply("Only server administrators can use this command.", mention_author=False)
+        if not await self._command_allowed(ctx, "bulkadd"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
             return
         parts = arguments.rsplit(maxsplit=1)
         if len(parts) != 2 or not parts[1].isdigit():
@@ -1366,8 +1399,8 @@ class TeamRegistration(commands.Cog):
     @commands.command(name="kickplayer")
     @commands.guild_only()
     async def kick_player(self, ctx, target: str, *, team_name: str):
-        if not self._is_admin(ctx):
-            await ctx.reply("Only server administrators can use this command.", mention_author=False)
+        if not await self._command_allowed(ctx, "kickplayer"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
             return
         member = await self._get_member(ctx.guild, target)
         if member is None:
