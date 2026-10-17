@@ -2,6 +2,8 @@ import re
 import discord
 from discord.ext import commands
 
+BOT_OWNER_ID = 1014568928682459198
+
 RECOVERY_COMMANDS = {
     "toggleall", "untoggleall", "whitelist", "unwhitelist", "whitelistlist",
     "enableall", "enablechannel",
@@ -103,6 +105,8 @@ class Utility(commands.Cog):
         channel_id = getattr(ctx_or_interaction, "channel_id", None) or getattr(channel, "id", None)
         name = _normalise_command_name(command_name)
 
+        if member is not None and int(getattr(member, "id", 0)) == BOT_OWNER_ID:
+            return True
         if not guild_id or member is None:
             return False
         if self.is_channel_disabled(guild_id, channel_id) and name not in RECOVERY_COMMANDS:
@@ -113,6 +117,8 @@ class Utility(commands.Cog):
 
     async def global_command_check(self, ctx):
         if not ctx.guild:
+            return True
+        if int(ctx.author.id) == BOT_OWNER_ID:
             return True
         name = _normalise_command_name(getattr(ctx.command, "name", ""))
         if self.is_channel_disabled(ctx.guild.id, ctx.channel.id):
@@ -135,6 +141,8 @@ class Utility(commands.Cog):
 
         if interaction.guild_id is None:
             return True
+        if int(interaction.user.id) == BOT_OWNER_ID:
+            return True
         command = getattr(interaction, "command", None)
         name = _normalise_command_name(getattr(command, "name", ""))
         if self.is_channel_disabled(interaction.guild_id, interaction.channel_id):
@@ -144,9 +152,9 @@ class Utility(commands.Cog):
         return True
 
     async def _can_manage_utility(self, guild_id, member):
-        if self.is_locked(guild_id):
-            return has_any_whitelisted_role(self.bot, guild_id, member)
-        return bool(getattr(getattr(member, "guild_permissions", None), "administrator", False))
+        # Only the configured bot owner may change whitelist and lock settings.
+        # Discord Administrator permission does not grant this access.
+        return member is not None and int(getattr(member, "id", 0)) == BOT_OWNER_ID
 
     async def _require_manager(self, ctx):
         if await self._can_manage_utility(ctx.guild.id, ctx.author):
