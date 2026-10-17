@@ -287,7 +287,9 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
 
     # Keep the background's lower branding unobstructed; no new branding text is drawn.
     out = io.BytesIO()
-    im.save(out, format="PNG", optimize=True)
+    # PNG optimization is CPU-heavy for this large transparent artwork and can block
+    # Discord heartbeats. Encode without optimization in a worker thread instead.
+    await asyncio.to_thread(im.save, out, format="PNG", optimize=False)
     return out.getvalue()
 
 
@@ -348,9 +350,11 @@ class LeaderboardView(discord.ui.View):
         # Acknowledge the menu interaction immediately so Discord does not time out
         # while the leaderboard image and avatars are being rendered.
         await interaction.response.defer()
-        self._rebuild_items()
         try:
             png = await self.cog.render(self.ctx.guild, self.metric_key, self.category, self.metric_label, self.owner_id)
+            # Rebuild controls only after rendering, not while Discord is dispatching
+            # the selected component callback.
+            self._rebuild_items()
             file = discord.File(io.BytesIO(png), filename="leaderboard.png")
             embed = discord.Embed(color=discord.Colour.from_rgb(*BLUE))
             embed.set_image(url="attachment://leaderboard.png")
