@@ -35,7 +35,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.points_table",
             "cogs.teams",
             "cogs.predictions",
-            "draws",
+            "congs.draws",
         ):
             await self.load_extension(extension)
 
