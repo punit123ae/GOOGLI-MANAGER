@@ -21,6 +21,7 @@ if not GUILD_ID:
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+intents.reactions = True
 
 
 class GoogIManagerBot(commands.Bot):
@@ -34,6 +35,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.points_table",
             "cogs.teams",
             "cogs.predictions",
+            "draws",
         ):
             await self.load_extension(extension)
 
