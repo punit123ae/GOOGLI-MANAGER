@@ -130,28 +130,13 @@ def _make_trophy(draw: ImageDraw.ImageDraw, cx: int, cy: int, scale: float = 1.0
 
 
 def _background(width: int, height: int) -> Image.Image:
-    """Load the fixed Kashmir Titans artwork, then clear the live-data area."""
+    """Load the supplied clean blue leaderboard template without the old design."""
     asset = Path(__file__).with_name("kt_lb_background.png")
-    if asset.exists():
-        im = Image.open(asset).convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-    else:
-        # Fallback if the artwork file has not been copied beside lb.py.
-        im = Image.new("RGB", (width, height), NAVY)
-        px = im.load()
-        for y in range(height):
-            for x in range(width):
-                dx = (x-width*0.5)/(width*0.75)
-                dy = (y-height*0.16)/(height*0.7)
-                glow = max(0.0, 1.0-math.sqrt(dx*dx+dy*dy))
-                px[x, y] = (3, int(12+20*glow), int(29+48*glow))
-
-    # Keep the artwork around the outside and the upper crest, while replacing
-    # all pre-rendered sample UI with a clean live-data panel.
-    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlay)
-    od.rounded_rectangle((78, 238, 946, 1310), radius=28, fill=(2, 13, 29, 255), outline=(20, 117, 255, 255), width=3)
-    im = Image.alpha_composite(im.convert("RGBA"), overlay)
-    return im.convert("RGB")
+    if not asset.exists():
+        raise FileNotFoundError(
+            "kt_lb_background.png is missing. Keep the supplied background image beside lb.py."
+        )
+    return Image.open(asset).convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
 
 
 async def _avatar_bytes(member: discord.abc.User) -> bytes | None:
@@ -184,14 +169,11 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
     im = _background(width, height)
     d = ImageDraw.Draw(im)
 
-    # The fixed Kashmir Titans background asset is not edited. Live UI is drawn
-    # on top of its central content area, with a fixed grid for every row.
-    d.text((width // 2, 264), "LEADERBOARD", font=_font(60, True), fill=WHITE,
-           anchor="mm", stroke_width=2, stroke_fill=(0, 20, 48))
-    d.text((width // 2, 316), "TOP PERFORMERS", font=_font(25, True), fill=ICE, anchor="mm")
-    d.line((235, 344, 789, 344), fill=BLUE, width=3)
-    d.text((width // 2, 375), f"{category.upper()}  /  {metric_label.upper()}",
-           font=_font(27, True), fill=GOLD, anchor="mm")
+    # Use the supplied blue template as-is. Draw only live leaderboard text and avatars.
+    d.text((width // 2, 128), "LEADERBOARD", font=_font(58, True), fill=WHITE,
+           anchor="mm", stroke_width=1, stroke_fill=(0, 35, 90))
+    d.text((width // 2, 184), f"{category.upper()}  -  {metric_label.upper()}",
+           font=_font(27, True), fill=ICE, anchor="mm")
 
     computed = []
     for uid, player_rows in rows_by_user.items():
@@ -215,42 +197,11 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
     rank_map = {p["id"]: i + 1 for i, p in enumerate(computed)}
     requester = next((p for p in computed if p["id"] == requester_id), None)
 
-    # Main leaderboard: shifted upward and expanded. Column anchors are fixed:
-    # rank x=132, avatar x=184, username x=330, score right edge x=916.
-    left, right, table_top, table_bottom = 66, 958, 408, 1152
-    d.rounded_rectangle((left, table_top, right, table_bottom), radius=26,
-                        fill=(4, 20, 41), outline=BLUE, width=3)
-    d.rounded_rectangle((82, 424, 942, 470), radius=12,
-                        fill=(7, 39, 72), outline=(25, 107, 180), width=1)
-    d.text((132, 447), "#", font=_font(22, True), fill=MUTED, anchor="mm")
-    d.text((330, 447), "PLAYER", font=_font(22, True), fill=MUTED, anchor="lm")
-    d.text((916, 447), metric_label.upper()[:16], font=_font(21, True), fill=MUTED, anchor="rm")
-
-    row_top = 472
-    row_h = 67
-    avatar_x = 184
-    avatar_size = 58
-    username_x = 330
-    score_right = 916
-    name_max_width = 540
-
+    # Coordinates match the ten empty blue rows in the supplied template.
+    row_centers = [343, 425, 508, 591, 674, 757, 840, 923, 1006, 1089]
     for i, player in enumerate(top):
-        y = row_top + i * row_h
-        row_bottom = y + row_h
-        if i % 2 == 0:
-            d.rectangle((84, y, 940, row_bottom), fill=(9, 38, 67))
-        # Thin, consistent separators across the entire row.
-        d.line((84, row_bottom, 940, row_bottom), fill=(20, 70, 111), width=1)
+        cy = row_centers[i]
         rank = i + 1
-        rank_color = GOLD if rank == 1 else (205, 226, 245) if rank == 2 else (255, 153, 91) if rank == 3 else ICE
-        if rank <= 3:
-            medal_r = 20
-            d.ellipse((132-medal_r, y + row_h//2-medal_r, 132+medal_r, y + row_h//2+medal_r),
-                      fill=rank_color, outline=(255, 228, 154), width=2)
-            d.text((132, y + row_h//2), str(rank), font=_font(22, True), fill=(4, 20, 40), anchor="mm")
-        else:
-            d.text((132, y + row_h//2), f"{rank}.", font=_font(25, True), fill=rank_color, anchor="mm")
-
         uid = player["id"]
         member = guild.get_member(uid)
         if member is None:
@@ -258,52 +209,56 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
                 member = await guild.fetch_member(uid)
             except Exception:
                 member = None
+        # Use the Discord username, not the server nickname/display name.
+        username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
         avatar_data = await _avatar_bytes(member) if member else None
-        username = member.display_name if member else f"Unknown player ({str(uid)[-4:]})"
-        _paste_avatar(im, avatar_data, avatar_x, y + (row_h-avatar_size)//2, avatar_size, username)
+        avatar_size = 68 if rank == 1 else 48
+        avatar_x = 145 if rank == 1 else 155
+        _paste_avatar(im, avatar_data, avatar_x, cy - avatar_size // 2, avatar_size, username)
         d = ImageDraw.Draw(im)
 
-        # Keep every username on the same column regardless of avatar or name.
-        name_font = _font(29, True)
-        while d.textbbox((0, 0), username, font=name_font)[2] > name_max_width and getattr(name_font, "size", 29) > 17:
-            name_font = _font(getattr(name_font, "size", 29)-1, True)
-        d.text((username_x, y + row_h//2), username, font=name_font, fill=WHITE, anchor="lm")
-        value_text = _display_value(metric_key, player["value"])
-        score_font = _font(31, True)
-        while d.textbbox((0, 0), value_text, font=score_font)[2] > 115 and getattr(score_font, "size", 31) > 22:
-            score_font = _font(getattr(score_font, "size", 31)-1, True)
-        d.text((score_right, y + row_h//2), value_text, font=score_font,
-               fill=GOLD if rank == 1 else WHITE, anchor="rm")
+        rank_color = GOLD if rank == 1 else (205, 226, 245) if rank == 2 else (255, 173, 91) if rank == 3 else ICE
+        d.text((105, cy), f"{rank}.", font=_font(29 if rank == 1 else 25, True),
+               fill=rank_color, anchor="mm", stroke_width=1, stroke_fill=(0, 20, 55))
 
-    # Personal-rank panel remains below the table, with the same fixed columns.
-    panel_y = 1166
-    d.rounded_rectangle((66, panel_y, 958, 1300), radius=25,
-                        fill=(4, 26, 51), outline=(28, 145, 255), width=3)
-    d.text((96, panel_y + 30), "YOUR RANK", font=_font(19, True), fill=ICE)
+        name_x = 230 if rank == 1 else 220
+        name_max_width = 590
+        name_font = _font(30 if rank == 1 else 27, True)
+        while d.textbbox((0, 0), username, font=name_font)[2] > name_max_width and getattr(name_font, "size", 27) > 16:
+            name_font = _font(getattr(name_font, "size", 27) - 1, True)
+        d.text((name_x, cy), username, font=name_font, fill=WHITE, anchor="lm",
+               stroke_width=1, stroke_fill=(0, 20, 55))
+
+        value_text = _display_value(metric_key, player["value"])
+        score_font = _font(31 if rank == 1 else 28, True)
+        while d.textbbox((0, 0), value_text, font=score_font)[2] > 115 and getattr(score_font, "size", 28) > 18:
+            score_font = _font(getattr(score_font, "size", 28) - 1, True)
+        d.text((908, cy), value_text, font=score_font, fill=GOLD if rank == 1 else ICE,
+               anchor="rm", stroke_width=1, stroke_fill=(0, 20, 55))
+
+    # The final standalone box is always the person who ran +lb.
+    panel_top, panel_bottom = 1229, 1328
     if requester:
         own_rank = rank_map[requester_id]
-        d.text((96, panel_y + 83), f"#{own_rank}", font=_font(42, True), fill=GOLD)
         own_member = guild.get_member(requester_id)
         if own_member is None:
             try:
                 own_member = await guild.fetch_member(requester_id)
             except Exception:
                 own_member = None
-        own_name = own_member.display_name if own_member else f"Unknown player ({str(requester_id)[-4:]})"
+        own_name = own_member.name if own_member else f"Unknown player ({str(requester_id)[-4:]})"
         own_avatar = await _avatar_bytes(own_member) if own_member else None
-        _paste_avatar(im, own_avatar, 238, panel_y + 29, 76, own_name)
+        _paste_avatar(im, own_avatar, 105, 1257, 57, own_name)
         d = ImageDraw.Draw(im)
+        d.text((181, 1285), f"#{own_rank}", font=_font(24, True), fill=GOLD, anchor="lm")
         own_font = _font(25, True)
-        while d.textbbox((0, 0), own_name, font=own_font)[2] > 390 and getattr(own_font, "size", 25) > 17:
-            own_font = _font(getattr(own_font, "size", 25)-1, True)
-        d.text((330, panel_y + 56), own_name, font=own_font, fill=WHITE, anchor="lm")
-        d.text((330, panel_y + 91), "PERSONAL LEADERBOARD POSITION", font=_font(12), fill=MUTED, anchor="lm")
-        d.line((752, panel_y + 18, 752, panel_y + 116), fill=(26, 106, 178), width=2)
-        d.text((916, panel_y + 67), _display_value(metric_key, requester["value"]),
-               font=_font(35, True), fill=ICE, anchor="rm")
+        while d.textbbox((0, 0), own_name, font=own_font)[2] > 450 and getattr(own_font, "size", 25) > 15:
+            own_font = _font(getattr(own_font, "size", 25) - 1, True)
+        d.text((270, 1285), own_name, font=own_font, fill=WHITE, anchor="lm")
+        d.text((910, 1285), _display_value(metric_key, requester["value"]),
+               font=_font(33, True), fill=GOLD, anchor="rm")
     else:
-        d.text((96, panel_y + 83), "Unranked", font=_font(30, True), fill=GOLD)
-        d.text((238, panel_y + 70), "No qualifying record for this statistic yet", font=_font(17), fill=WHITE, anchor="lm")
+        d.text((512, 1290), "No qualifying score yet", font=_font(22, True), fill=WHITE, anchor="mm")
 
     # Keep the background's lower branding unobstructed; no new branding text is drawn.
     out = io.BytesIO()
