@@ -13,7 +13,21 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 def parse_raw_stats(content):
-    """Parse valid seven-integer rows; blank lines/code fences are ignored."""
+    """Parse only the first Python code block after the raw-statistics heading."""
+    heading = re.search(r"Raw statistics of the match\s*:", content, re.IGNORECASE)
+    if heading:
+        content = content[heading.end():]
+
+    # Match the first Python-fenced block only. Any later code blocks or text
+    # (for example, extra player rows pasted after the main block) are ignored.
+    code_block = re.search(r"```python\s*\n(.*?)```", content, re.IGNORECASE | re.DOTALL)
+    if code_block:
+        content = code_block.group(1)
+    else:
+        # Also support messages where the heading is followed by plain rows,
+        # but stop at the next fenced block so trailing stats aren't imported.
+        content = re.split(r"```", content, maxsplit=1)[0]
+
     rows = []
     for line in content.splitlines():
         line = line.strip().strip("`").strip()
@@ -25,7 +39,7 @@ def parse_raw_stats(content):
             raise ValueError(f"Invalid final flag for user {user_id}; expected 0 or 1.")
         rows.append((user_id, runs, balls_faced, runs_conceded, balls_bowled, wickets, not_out))
     if not rows:
-        raise ValueError("No valid player-stat rows found. Reply to the raw-statistics message.")
+        raise ValueError("No valid player-stat rows found in the Python block after 'Raw statistics of the match:'.")
     if len({row[0] for row in rows}) != len(rows):
         raise ValueError("Duplicate player IDs found in the raw statistics.")
     return rows
