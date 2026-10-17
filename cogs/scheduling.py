@@ -6,17 +6,16 @@ from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from cogs.utility import is_interaction_bot_admin
 
 IST = ZoneInfo("Asia/Kolkata")
 MATCH_EMOJI = "<a:emoji_57:1559610804389675048>"
 VS_EMOJI = "<:VS128:1559620966709993472>"
 
 
-def is_admin(interaction):
-    return (
-        interaction.guild is not None
-        and interaction.user.guild_permissions.administrator
-    )
+def is_admin(interaction, command_name=None):
+    # Bot-level role whitelist; Discord Administrator permission alone is not enough.
+    return bool(command_name and is_interaction_bot_admin(interaction.client, interaction, command_name))
 
 
 class Scheduling(commands.Cog):
@@ -175,8 +174,8 @@ class Scheduling(commands.Cog):
     @app_commands.command(name="set_match_logs", description="Set the channel for private match logs.")
     @app_commands.describe(channel="Channel where match IDs and admin details are logged")
     async def set_match_logs(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not is_admin(interaction):
-            await interaction.response.send_message("Administrator permission is required.", ephemeral=True)
+        if not is_admin(interaction, "set_match_logs"):
+            await interaction.response.send_message("You are not whitelisted for `set_match_logs`.", ephemeral=True)
             return
         self.db.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
@@ -202,8 +201,8 @@ class Scheduling(commands.Cog):
             if interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Only the admin who created this preview can confirm it.", ephemeral=True)
                 return False
-            if not is_admin(interaction):
-                await interaction.response.send_message("Administrator permission is required.", ephemeral=True)
+            if not is_admin(interaction, "match_schedule"):
+                await interaction.response.send_message("You are not whitelisted for `match_schedule`.", ephemeral=True)
                 return False
             return True
 
@@ -313,8 +312,8 @@ class Scheduling(commands.Cog):
         time="Time in 24-hour HH:MM format, India time"
     )
     async def match_schedule(self, interaction: discord.Interaction, team_a: discord.Role, team_b: discord.Role, channel: discord.TextChannel, date: str, time: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("Administrator permission is required.", ephemeral=True)
+        if not is_admin(interaction, "match_schedule"):
+            await interaction.response.send_message("You are not whitelisted for `match_schedule`.", ephemeral=True)
             return
         if team_a.id == team_b.id:
             await interaction.response.send_message("Choose two different team roles.", ephemeral=True)
@@ -364,8 +363,8 @@ class Scheduling(commands.Cog):
     @app_commands.command(name="match_info", description="View a match by its ID.")
     @app_commands.describe(match_id="Match ID from the logs channel")
     async def match_info(self, interaction: discord.Interaction, match_id: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("Administrator permission is required.", ephemeral=True)
+        if not is_admin(interaction, "match_info"):
+            await interaction.response.send_message("You are not whitelisted for `match_info`.", ephemeral=True)
             return
         row = self.get_match(match_id)
         if not row or row["guild_id"] != interaction.guild_id:
@@ -384,8 +383,8 @@ class Scheduling(commands.Cog):
     @app_commands.command(name="match_delete", description="Cancel a scheduled match by its ID.")
     @app_commands.describe(match_id="Match ID from the logs channel")
     async def match_delete(self, interaction: discord.Interaction, match_id: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("Administrator permission is required.", ephemeral=True)
+        if not is_admin(interaction, "match_delete"):
+            await interaction.response.send_message("You are not whitelisted for `match_delete`.", ephemeral=True)
             return
         row = self.get_match(match_id)
         if not row or row["guild_id"] != interaction.guild_id:

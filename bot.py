@@ -27,6 +27,7 @@ class GoogIManagerBot(commands.Bot):
     async def setup_hook(self):
         # Load each feature as a separate module.
         for extension in (
+            "cogs.utility",
             "cogs.scheduling",
             "cogs.stats",
             "cogs.lb",

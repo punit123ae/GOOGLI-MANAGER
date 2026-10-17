@@ -9,6 +9,7 @@ from functools import lru_cache
 
 import discord
 from discord.ext import commands
+from cogs.utility import is_bot_admin
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
@@ -902,10 +903,8 @@ class Stats(commands.Cog):
         return int(row[0]) if row else 1
 
     def admin(self, ctx):
-        return (
-            ctx.guild is not None
-            and ctx.author.guild_permissions.administrator
-        )
+        # Administrator-only stats commands are controlled by the bot whitelist.
+        return is_bot_admin(ctx)
 
     async def replied_message(self, ctx):
         ref = ctx.message.reference

@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
+from cogs.utility import is_bot_admin
 
 CAPTAIN_EMOJI = "<:captain:1560220118422659123>"
 VICE_CAPTAIN_EMOJI = "<:VC:1560220622703824966>"
@@ -26,8 +27,9 @@ class ConfirmDeleteAllView(discord.ui.View):
 
     @discord.ui.button(label="Confirm deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction, button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Administrator permissions are required.", ephemeral=True)
+        # Confirm button is protected by the command whitelist used to open this view.
+        if not is_bot_admin(type("Ctx", (), {"guild": interaction.guild, "author": interaction.user, "bot": self.cog.bot, "command": type("Cmd", (), {"name": "deleteallteams"})()})()):
+            await interaction.response.send_message("You are not whitelisted for `deleteallteams`.", ephemeral=True)
             return
         count = self.cog.db.execute(
             "SELECT COUNT(*) FROM registered_teams WHERE guild_id=?", (self.guild_id,)
@@ -66,7 +68,7 @@ class TeamApprovalView(discord.ui.View):
             await interaction.response.send_message("This is not a valid approval channel.", ephemeral=True)
             return False
         perms = interaction.channel.permissions_for(interaction.user)
-        if not (perms.view_channel and (perms.send_messages or perms.manage_messages or interaction.user.guild_permissions.administrator)):
+        if not (perms.view_channel and (perms.send_messages or perms.manage_messages)):
             await interaction.response.send_message("You don't have permission to review applications in this channel.", ephemeral=True)
             return False
         return True
@@ -345,7 +347,7 @@ class TeamRegistration(commands.Cog):
         return len(self._team_player_ids(team_id))
 
     def _is_admin(self, ctx):
-        return bool(ctx.guild and isinstance(ctx.author, discord.Member) and ctx.author.guild_permissions.administrator)
+        return is_bot_admin(ctx)
 
     async def _get_member(self, guild, value):
         value = value.strip()
@@ -470,7 +472,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setmaxplayers")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def set_max_players(self, ctx, maximum: int):
         if not 1 <= maximum <= 100:
             await ctx.reply("Choose a maximum between 1 and 100 players per team.", mention_author=False)
@@ -488,7 +490,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setcaptain")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def set_captain(self, ctx, target: str, *, team_name: str):
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
@@ -521,7 +523,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setteamrole", aliases=["setteamroles"])
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def set_team_role(self, ctx, *, arguments: str):
         parts = arguments.rsplit(maxsplit=1)
         if len(parts) != 2 or not parts[1].isdigit():
@@ -553,7 +555,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="teamroles", aliases=["approvedteamroles", "listteamroles"])
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def list_approved_team_roles(self, ctx):
         """List configured roles for all approved teams, showing role IDs without pinging."""
         teams = self.db.execute(
@@ -602,7 +604,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="stopteamroles")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def stop_team_roles(self, ctx, *, team_name: str):
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
@@ -618,7 +620,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="startteamroles")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def start_team_roles(self, ctx, *, team_name: str):
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
@@ -634,7 +636,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="stopallteamroles")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def stop_all_team_roles(self, ctx):
         self.db.execute(
             "INSERT INTO server_team_role_settings(guild_id,enabled) VALUES(?,0) "
@@ -645,7 +647,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="startallteamroles")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def start_all_team_roles(self, ctx):
         self.db.execute(
             "INSERT INTO server_team_role_settings(guild_id,enabled) VALUES(?,1) "
@@ -656,7 +658,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="syncteamroles", aliases=["syncteamrole", "syncroles"])
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def sync_team_roles(self, ctx):
         """Give existing team members their configured team roles when missing."""
         guild = ctx.guild
@@ -785,7 +787,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="toggle")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def toggle_feature(self, ctx, feature: str):
         feature = feature.casefold()
         if feature not in ("jointeam", "leaveteam", "createteam"):
@@ -802,7 +804,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="deleteallteams")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def delete_all_teams(self, ctx):
         count = self.db.execute("SELECT COUNT(*) FROM registered_teams WHERE guild_id=?", (ctx.guild.id,)).fetchone()[0]
         if not count:
@@ -870,7 +872,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="cancelrequests")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def cancel_requests(self, ctx, user_id: str):
         match = re.fullmatch(r"<@!?(\d+)>|(\d+)", user_id.strip())
         if not match:
@@ -909,7 +911,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="disbandteam")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def disband_team(self, ctx, *, team_name: str):
         team = self._team(ctx.guild.id, team_name)
         if not team:
@@ -929,7 +931,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="setteamapproval")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def set_team_approval(self, ctx, channel: discord.TextChannel):
         self.db.execute(
             "INSERT INTO team_settings(guild_id,approval_channel_id) VALUES(?,?) "
@@ -1127,7 +1129,7 @@ class TeamRegistration(commands.Cog):
 
     @commands.command(name="addallplayers")
     @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
+    @commands.check(is_bot_admin)
     async def add_all_players(self, ctx, *, team_name: str):
         """Add every username in the message this command replies to, with the team's configured role."""
         source = ctx.message.reference
