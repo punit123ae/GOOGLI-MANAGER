@@ -44,11 +44,8 @@ GOLD = (255, 190, 61)
 WHITE = (238, 246, 255)
 MUTED = (151, 185, 217)
 
-# Keep the decoded background and recently downloaded avatars in memory. This
-# avoids decoding a 2 MB PNG and re-downloading the same avatars on every +lb.
+# Keep one decoded copy of the static background. No avatars are downloaded or drawn.
 _BACKGROUND_CACHE: Image.Image | None = None
-_AVATAR_CACHE: dict[tuple[int, str], bytes | None] = {}
-_AVATAR_CACHE_LIMIT = 100
 
 
 def _font(size: int, bold: bool = False):
@@ -137,51 +134,17 @@ def _make_trophy(draw: ImageDraw.ImageDraw, cx: int, cy: int, scale: float = 1.0
 
 
 def _background(width: int, height: int) -> Image.Image:
-    """Load the supplied clean blue leaderboard template without the old design."""
-    asset = Path(__file__).with_name("kt_lb_background.png")
+    """Load the user's new leaderboard template; rank numbers are baked into it."""
+    asset = Path(__file__).with_name("kt_lb_background.jpeg")
     if not asset.exists():
         raise FileNotFoundError(
-            "kt_lb_background.png is missing. Keep the supplied background image beside lb.py."
+            "kt_lb_background.jpeg is missing. Keep the supplied background image beside lb.py."
         )
     global _BACKGROUND_CACHE
     if _BACKGROUND_CACHE is None:
         with Image.open(asset) as source:
-            _BACKGROUND_CACHE = source.convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
-    # Each render needs its own writable canvas; reuse the decoded master.
+            _BACKGROUND_CACHE = source.convert("RGB").resize((width, height), Image.Resampling.BILINEAR)
     return _BACKGROUND_CACHE.copy()
-
-
-async def _avatar_bytes(member: discord.abc.User) -> bytes | None:
-    avatar_key = (member.id, str(member.display_avatar))
-    if avatar_key in _AVATAR_CACHE:
-        return _AVATAR_CACHE[avatar_key]
-    try:
-        data = await member.display_avatar.replace(size=64).read()
-    except Exception:
-        data = None
-    # Keep the cache bounded so a busy server cannot grow RAM forever.
-    if len(_AVATAR_CACHE) >= _AVATAR_CACHE_LIMIT:
-        _AVATAR_CACHE.pop(next(iter(_AVATAR_CACHE)))
-    _AVATAR_CACHE[avatar_key] = data
-    return data
-
-
-def _paste_avatar(im: Image.Image, avatar_data: bytes | None, x: int, y: int, size: int, fallback: str):
-    d = ImageDraw.Draw(im)
-    if avatar_data:
-        try:
-            avatar = Image.open(io.BytesIO(avatar_data)).convert("RGBA").resize((size, size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (size, size), 0)
-            ImageDraw.Draw(mask).ellipse((1, 1, size-2, size-2), fill=255)
-            # blue outer ring
-            d.ellipse((x-3, y-3, x+size+3, y+size+3), fill=ICE)
-            im.paste(avatar, (x, y), mask)
-            return
-        except Exception:
-            pass
-    d.ellipse((x-3, y-3, x+size+3, y+size+3), fill=ICE)
-    d.ellipse((x, y, x+size, y+size), fill=(11, 55, 96))
-    d.text((x+size//2, y+size//2), fallback[:2].upper(), font=_font(size//3, True), fill=WHITE, anchor="mm")
 
 
 async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, list[dict]], metric_key: str, category: str, metric_label: str, requester_id: int) -> bytes:
@@ -189,11 +152,12 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
     im = _background(width, height)
     d = ImageDraw.Draw(im)
 
-    # Use the supplied blue template as-is. Draw only live leaderboard text and avatars.
-    d.text((width // 2, 128), "LEADERBOARD", font=_font(58, True), fill=WHITE,
-           anchor="mm", stroke_width=1, stroke_fill=(0, 35, 90))
-    d.text((width // 2, 184), f"{category.upper()}  -  {metric_label.upper()}",
-           font=_font(27, True), fill=ICE, anchor="mm")
+    # The new template already contains ranks 1-10 and all row outlines.
+    # Only add the heading, category, usernames, scores, and requester's rank.
+    d.text((width // 2, 185), "LEADERBOARD", font=_font(54, True), fill=WHITE,
+           anchor="mm", stroke_width=1, stroke_fill=(0, 20, 70))
+    d.text((width // 2, 222), f"{category.upper()}  -  {metric_label.upper()}",
+           font=_font(25, True), fill=GOLD, anchor="mm", stroke_width=1, stroke_fill=(0, 20, 70))
 
     computed = []
     for uid, player_rows in rows_by_user.items():
@@ -217,78 +181,61 @@ async def make_leaderboard_image(guild: discord.Guild, rows_by_user: dict[int, l
     rank_map = {p["id"]: i + 1 for i, p in enumerate(computed)}
     requester = next((p for p in computed if p["id"] == requester_id), None)
 
-    # Resolve any uncached members concurrently rather than making up to 11
-    # sequential Discord API requests during every render.
+    # Resolve only usernames (no avatar HTTP requests). Use cached guild members first,
+    # and fetch missing members concurrently to avoid serial API waits.
     member_ids = {p["id"] for p in top}
     if requester is not None:
         member_ids.add(requester_id)
-    async def resolve_member(uid: int):
+
+    async def resolve_name(uid: int):
         member = guild.get_member(uid)
         if member is not None:
-            return uid, member
+            return uid, member.name
         try:
-            return uid, await guild.fetch_member(uid)
+            member = await guild.fetch_member(uid)
+            return uid, member.name
         except Exception:
-            return uid, None
-    resolved_members = dict(await asyncio.gather(*(resolve_member(uid) for uid in member_ids)))
+            return uid, f"Unknown player ({str(uid)[-4:]})"
 
-    # Coordinates match the ten empty blue rows in the supplied template.
-    row_centers = [343, 425, 508, 591, 674, 757, 840, 923, 1006, 1089]
+    names = dict(await asyncio.gather(*(resolve_name(uid) for uid in member_ids))) if member_ids else {}
+
+    # Centers align with the ten numbered rows printed into the new background.
+    row_centers = [325, 407, 489, 571, 653, 735, 817, 899, 981, 1063]
+    name_left, name_right = 270, 650  # roughly 40% of the left side of each row
     for i, player in enumerate(top):
         cy = row_centers[i]
-        rank = i + 1
-        uid = player["id"]
-        member = resolved_members.get(uid)
-        # Use the Discord username, not the server nickname/display name.
-        username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
-        avatar_data = await _avatar_bytes(member) if member else None
-        avatar_size = 68 if rank == 1 else 48
-        avatar_x = 145 if rank == 1 else 155
-        _paste_avatar(im, avatar_data, avatar_x, cy - avatar_size // 2, avatar_size, username)
-        d = ImageDraw.Draw(im)
-
-        rank_color = GOLD if rank == 1 else (205, 226, 245) if rank == 2 else (255, 173, 91) if rank == 3 else ICE
-        d.text((105, cy), f"{rank}.", font=_font(29 if rank == 1 else 25, True),
-               fill=rank_color, anchor="mm", stroke_width=1, stroke_fill=(0, 20, 55))
-
-        name_x = 230 if rank == 1 else 220
-        name_max_width = 590
-        name_font = _font(30 if rank == 1 else 27, True)
-        while d.textbbox((0, 0), username, font=name_font)[2] > name_max_width and getattr(name_font, "size", 27) > 16:
-            name_font = _font(getattr(name_font, "size", 27) - 1, True)
-        d.text((name_x, cy), username, font=name_font, fill=WHITE, anchor="lm",
-               stroke_width=1, stroke_fill=(0, 20, 55))
+        username = names.get(player["id"], f"Unknown player ({str(player['id'])[-4:]})")
+        name_font = _font(29, True)
+        while d.textbbox((0, 0), username, font=name_font)[2] > name_right - name_left and getattr(name_font, "size", 29) > 15:
+            name_font = _font(getattr(name_font, "size", 29) - 1, True)
+        d.text(((name_left + name_right) // 2, cy), username, font=name_font,
+               fill=WHITE, anchor="mm", stroke_width=1, stroke_fill=(0, 20, 70))
 
         value_text = _display_value(metric_key, player["value"])
-        score_font = _font(31 if rank == 1 else 28, True)
-        while d.textbbox((0, 0), value_text, font=score_font)[2] > 115 and getattr(score_font, "size", 28) > 18:
-            score_font = _font(getattr(score_font, "size", 28) - 1, True)
-        d.text((908, cy), value_text, font=score_font, fill=GOLD if rank == 1 else ICE,
-               anchor="rm", stroke_width=1, stroke_fill=(0, 20, 55))
+        score_font = _font(31, True)
+        while d.textbbox((0, 0), value_text, font=score_font)[2] > 130 and getattr(score_font, "size", 31) > 17:
+            score_font = _font(getattr(score_font, "size", 31) - 1, True)
+        d.text((895, cy), value_text, font=score_font, fill=GOLD,
+               anchor="rm", stroke_width=1, stroke_fill=(0, 20, 70))
 
-    # The final standalone box is always the person who ran +lb.
-    panel_top, panel_bottom = 1229, 1328
+    # Bottom panel: show the user who ran +lb and their overall rank for this metric.
     if requester:
         own_rank = rank_map[requester_id]
-        own_member = resolved_members.get(requester_id)
-        own_name = own_member.name if own_member else f"Unknown player ({str(requester_id)[-4:]})"
-        own_avatar = await _avatar_bytes(own_member) if own_member else None
-        _paste_avatar(im, own_avatar, 105, 1257, 57, own_name)
-        d = ImageDraw.Draw(im)
-        d.text((181, 1285), f"#{own_rank}", font=_font(24, True), fill=GOLD, anchor="lm")
-        own_font = _font(25, True)
-        while d.textbbox((0, 0), own_name, font=own_font)[2] > 450 and getattr(own_font, "size", 25) > 15:
-            own_font = _font(getattr(own_font, "size", 25) - 1, True)
-        d.text((270, 1285), own_name, font=own_font, fill=WHITE, anchor="lm")
-        d.text((910, 1285), _display_value(metric_key, requester["value"]),
-               font=_font(33, True), fill=GOLD, anchor="rm")
+        own_name = names.get(requester_id, f"Unknown player ({str(requester_id)[-4:]})")
+        d.text((155, 1250), f"#{own_rank}", font=_font(35, True), fill=GOLD,
+               anchor="mm", stroke_width=1, stroke_fill=(0, 20, 70))
+        own_font = _font(30, True)
+        while d.textbbox((0, 0), own_name, font=own_font)[2] > name_right - name_left and getattr(own_font, "size", 30) > 15:
+            own_font = _font(getattr(own_font, "size", 30) - 1, True)
+        d.text(((name_left + name_right) // 2, 1250), own_name, font=own_font,
+               fill=WHITE, anchor="mm", stroke_width=1, stroke_fill=(0, 20, 70))
+        d.text((895, 1250), _display_value(metric_key, requester["value"]),
+               font=_font(33, True), fill=GOLD, anchor="rm", stroke_width=1, stroke_fill=(0, 20, 70))
     else:
-        d.text((512, 1290), "No qualifying score yet", font=_font(22, True), fill=WHITE, anchor="mm")
+        d.text((512, 1250), "No qualifying score yet", font=_font(24, True), fill=WHITE, anchor="mm")
 
-    # Keep the background's lower branding unobstructed; no new branding text is drawn.
     out = io.BytesIO()
-    # PNG optimization is CPU-heavy for this large transparent artwork and can block
-    # Discord heartbeats. Encode without optimization in a worker thread instead.
+    # The static background is cached; JPEG input and no avatars keep rendering light.
     await asyncio.to_thread(im.save, out, format="PNG", optimize=False)
     return out.getvalue()
 
