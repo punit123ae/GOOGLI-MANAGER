@@ -205,53 +205,60 @@ class LiveDraws(commands.Cog):
         random.shuffle(random_teams)
         self.active_guilds.add(ctx.guild.id)
         try:
-            await ctx.send(f"Rolling randomly **{len(random_teams)} teams** for **{discord.utils.escape_markdown(setting['setting_name'])}**...")
-            # Distribute in order A, B, C... then cycle back to A.
+            total = len(random_teams)
             for drawn_count, team_name in enumerate(random_teams, 1):
+                remaining_before_draw = total - drawn_count + 1
+                rolling = await ctx.send(
+                    f"Randomly drawing a team from **{remaining_before_draw} teams** in **3 seconds...**"
+                )
+                for seconds in (2, 1):
+                    await asyncio.sleep(1)
+                    await rolling.edit(
+                        content=f"Randomly drawing a team from **{remaining_before_draw} teams** in **{seconds} second{'s' if seconds != 1 else ''}...**"
+                    )
+                await asyncio.sleep(1)
+
+                # Distribute in order A, B, C... then cycle back to A.
                 group_index = (drawn_count - 1) % group_count
                 groups[group_index].append(team_name)
-                content = self._format_results(setting["setting_name"], groups, drawn_count, len(random_teams))
-                message = await ctx.send(content)
-                try:
-                    await message.add_reaction(TICK)
-                    await message.add_reaction(CROSS)
-                except discord.HTTPException:
-                    await ctx.send("I couldn't add the tick/cross reactions. Check the bot's Add Reactions permission.")
-                    return
+                content = self._format_results(setting["setting_name"], groups, drawn_count, total)
+                await rolling.edit(content=content)
 
-                def check(reaction, user):
+                if drawn_count >= total:
+                    break
+
+                def check(message):
                     return (
-                        user.id == OWNER_ID
-                        and reaction.message.id == message.id
-                        and str(reaction.emoji) in (TICK, CROSS)
+                        message.author.id == OWNER_ID
+                        and message.channel.id == ctx.channel.id
+                        and message.guild is not None
+                        and message.guild.id == ctx.guild.id
+                        and message.content.strip().casefold() in {"next", "next draw"}
                     )
 
                 try:
-                    reaction, _user = await self.bot.wait_for("reaction_add", check=check)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    # Do not silently continue if the reaction wait fails.
-                    await ctx.send(f"Draw stopped because I couldn't read the owner's reaction ({type(exc).__name__}).")
+                    await self.bot.wait_for("message", check=check, timeout=300)
+                except asyncio.TimeoutError:
+                    await ctx.send(
+                        f"Live draw **{setting['setting_name']}** ended due to 5 minutes of inactivity. "
+                        f"**{drawn_count}/{total} teams drawn.**"
+                    )
                     return
 
-                if str(reaction.emoji) == CROSS:
-                    await ctx.send(f"Live draw **{discord.utils.escape_markdown(setting['setting_name'])}** stopped by the owner after {drawn_count}/{len(random_teams)} teams.")
-                    return
-                # Tick: move to the next team; the following message includes all prior teams.
-
-            await ctx.send(f"Live draw **{discord.utils.escape_markdown(setting['setting_name'])}** is complete — **{len(random_teams)}/{len(random_teams)} teams drawn**.")
+            await ctx.send(
+                f"Live draw **{setting['setting_name']}** is complete — **{total}/{total} teams drawn**."
+            )
         finally:
             self.active_guilds.discard(ctx.guild.id)
 
     @staticmethod
     def _format_results(setting_name, groups, drawn_count, total):
         letters = [chr(ord("A") + i) if i < 26 else f"{i + 1}" for i in range(len(groups))]
-        lines = [f"## {discord.utils.escape_markdown(setting_name)}", ""]
+        lines = [f"## {setting_name}", ""]
         for index, teams in enumerate(groups):
             lines.append(f"**__GROUP - {letters[index]}__**")
             if teams:
-                lines.extend(f"{number}. {discord.utils.escape_markdown(name)}" for number, name in enumerate(teams, 1))
+                lines.extend(f"{number}. **__{name}__**" for number, name in enumerate(teams, 1))
             else:
                 lines.append("No teams yet.")
             lines.append("")
