@@ -1137,14 +1137,15 @@ class TeamRegistration(commands.Cog):
                     if isinstance(channel, discord.TextChannel) and channel.guild.id == int(interaction.guild_id):
                         approved = self.db.execute(
                             "SELECT id, name, captain_id, logo_url, team_number FROM registered_teams "
-                            "WHERE guild_id=? AND status='approved' ORDER BY team_number ASC",
+                            "WHERE guild_id=? AND status='approved' ORDER BY team_number ASC, created_at ASC, id ASC",
                             (int(interaction.guild_id),),
                         ).fetchall()
-                        number_row = self.db.execute(
-                            "SELECT team_number FROM registered_teams WHERE id=? AND guild_id=?",
-                            (int(team_id), int(interaction.guild_id)),
-                        ).fetchone()
-                        number = int(number_row["team_number"]) if number_row and number_row["team_number"] is not None else len(approved)
+                        # Match +teamlist numbering: position among approved teams only.
+                        number = next(
+                            (index for index, approved_team in enumerate(approved, start=1)
+                             if int(approved_team["id"]) == int(team_id)),
+                            len(approved),
+                        )
                         safe_name = discord.utils.escape_markdown(str(row["name"] or "Unknown Team"))
                         captain_id = int(row["captain_id"])
                         logo_url = str(row["logo_url"] or "").strip()

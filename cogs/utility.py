@@ -451,7 +451,7 @@ class Utility(commands.Cog):
         # Use the permanent team number assigned at creation, not the team's
         # alphabetical position or the count of posts in this channel.
         posted = 0
-        for team in rows:
+        for number, team in enumerate(rows, start=1):
             conn = sqlite3.connect("team_registration.db")
             exists = conn.execute(
                 "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND channel_id=? AND team_id=?",
@@ -460,7 +460,7 @@ class Utility(commands.Cog):
             conn.close()
             if exists:
                 continue
-            number = int(team["team_number"] or team["id"])
+            # Match +teamlist: number approved teams in their displayed order.
             name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
             captain_id = int(team["captain_id"])
             logo_url = str(team["logo_url"] or "").strip()
@@ -531,12 +531,19 @@ class Utility(commands.Cog):
                         (current, int(row["id"]))
                     )
             conn.commit()
-            team = conn.execute(
+            approved_teams = conn.execute(
                 "SELECT id, name, captain_id, logo_url, team_number FROM registered_teams "
-                "WHERE guild_id=? AND status='approved' AND name=? COLLATE NOCASE "
-                "ORDER BY team_number ASC LIMIT 1",
-                (ctx.guild.id, team_name.strip()),
-            ).fetchone()
+                "WHERE guild_id=? AND status='approved' ORDER BY team_number ASC, created_at ASC, id ASC",
+                (ctx.guild.id,),
+            ).fetchall()
+            team = next(
+                (row for row in approved_teams if str(row["name"]).casefold() == team_name.strip().casefold()),
+                None,
+            )
+            team_number = next(
+                (index for index, row in enumerate(approved_teams, start=1) if team is not None and int(row["id"]) == int(team["id"])),
+                None,
+            )
         except sqlite3.Error as exc:
             await ctx.reply(f"Couldn't read `team_registration.db` ({type(exc).__name__}).", mention_author=False)
             return
@@ -551,7 +558,7 @@ class Utility(commands.Cog):
             )
             return
 
-        number = int(team["team_number"] or team["id"])
+        number = team_number
         name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
         captain_id = int(team["captain_id"])
         logo_url = str(team["logo_url"] or "").strip()
