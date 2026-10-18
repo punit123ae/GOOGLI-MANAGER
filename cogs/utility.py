@@ -450,13 +450,8 @@ class Utility(commands.Cog):
                 embed.set_thumbnail(url=logo_url)
                 embed.set_image(url=logo_url)
             try:
-                # Mentions inside embed descriptions are display-only in Discord.
-                # Put the captain mention in message content as well so it actually pings.
-                message = await channel.send(
-                    content=f"<@{captain_id}>",
-                    embed=embed,
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                )
+                # Captain mention is shown inside the embed only; no separate ping message.
+                message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
                 conn = sqlite3.connect("team_registration.db")
                 conn.execute(
                     "INSERT OR IGNORE INTO approved_team_posted(guild_id, team_id, message_id) VALUES(?,?,?)",
@@ -468,6 +463,41 @@ class Utility(commands.Cog):
             except discord.HTTPException as exc:
                 return posted, f"Discord returned {type(exc).__name__}."
         return posted, None
+
+    @commands.command(name="setapprovedteamschannel", aliases=["setteamannouncechannel"])
+    @commands.guild_only()
+    async def set_approved_teams_channel(self, ctx, channel: discord.TextChannel):
+        """Owner-only: choose the one channel for future approved-team announcements."""
+        if ctx.author.id != BOT_OWNER_ID:
+            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+            return
+        if channel.guild.id != ctx.guild.id:
+            await ctx.reply("Choose a text channel from this server.", mention_author=False)
+            return
+        import sqlite3
+        conn = None
+        try:
+            conn = sqlite3.connect("team_registration.db")
+            conn.execute("""CREATE TABLE IF NOT EXISTS approved_team_post_settings (
+                guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
+            )""")
+            conn.execute(
+                "INSERT INTO approved_team_post_settings(guild_id, channel_id) VALUES(?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id",
+                (ctx.guild.id, channel.id),
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            await ctx.reply(f"Couldn't save the channel ({type(exc).__name__}).", mention_author=False)
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+        await ctx.reply(
+            f"Newly approved teams will be posted in {channel.mention} only. "
+            "This setting is saved across bot restarts.",
+            mention_author=False,
+        )
 
     @commands.command(name="postapprovedteams", aliases=["postteams"])
     @commands.guild_only()
