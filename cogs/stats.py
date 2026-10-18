@@ -109,66 +109,88 @@ def classify_player(t):
 
 
 
+
 def fantasy_raw_points(rows, t=None):
     """Return batting raw points, bowling raw points and total fantasy points."""
     t = t or totals(rows)
 
+    # Batting statistics
     fifties = sum(50 <= r["runs"] < 100 for r in rows)
     hundreds = sum(r["runs"] >= 100 for r in rows)
     ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
 
-    # Batting Fantasy Points
-    run_bonus = t["runs"] / 10
-
-    batting_raw = (
-        50
-        + (t["bat_avg"] * 2)
-        + run_bonus
-        + (fifties * 5)
-        + (hundreds * 10)
-        - (ducks * 10)
-        - (t["balls_faced"] * 0.1)
-    )
-
-    # Bowling Fantasy Points
-    three_wicket_hauls = sum(3 <= r["wickets"] < 5 for r in rows)
-    five_wicket_hauls = sum(5 <= r["wickets"] < 7 for r in rows)
-    seven_wicket_hauls = sum(r["wickets"] >= 7 for r in rows)
-
-    haul_bonus = (
-        (three_wicket_hauls * 7)
-        + (five_wicket_hauls * 15)
-        + (seven_wicket_hauls * 25)
-    )
-
-    economy_penalty = (
-        max(0, t["economy"] - 5) * 2
-        if t["balls_bowled"]
+    # Batting average = total runs / times dismissed
+    times_dismissed = sum(not r["not_out"] for r in rows)
+    bat_avg = (
+        t["runs"] / times_dismissed
+        if times_dismissed > 0
         else 0
     )
 
-    bowling_raw = (
-        70
-        - (t["bowl_avg"] / 2)
-        + (t["wickets"] * 2)
-        - economy_penalty
-        + haul_bonus
+    batting_raw = (
+        50
+        + (bat_avg * 2)
+        + (t["runs"] * 0.1)
+        - (t["balls_faced"] * 0.1)
+        - (ducks * 10)
+        + (fifties * 5)
+        + (hundreds * 10)
     )
 
-    # Total Fantasy Points
+    # Bowling statistics
+    balls_bowled = t["balls_bowled"]
+
+    if not balls_bowled:
+        bowling_raw = 0
+    else:
+        three_wicket_hauls = sum(
+            3 <= r["wickets"] < 5 for r in rows
+        )
+        five_wicket_hauls = sum(
+            5 <= r["wickets"] < 7 for r in rows
+        )
+        seven_wicket_hauls = sum(
+            r["wickets"] >= 7 for r in rows
+        )
+
+        haul_bonus = (
+            (three_wicket_hauls * 7)
+            + (five_wicket_hauls * 15)
+            + (seven_wicket_hauls * 25)
+        )
+
+        bowling_raw = (
+            70
+            - (t["bowl_avg"] / 2)
+            + (t["wickets"] * 2)
+            - (max(0, t["economy"] - 5) * 2)
+            + haul_bonus
+        )
+
     total_raw = batting_raw + bowling_raw
 
     return batting_raw, bowling_raw, total_raw
 
 
 def impact_scores(rows, t=None):
-    """Return batting and bowling impact ratings, bounded from 0 to 99."""
+    """Return batting and bowling ratings, each bounded from 0 to 99."""
     batting_raw, bowling_raw, _ = fantasy_raw_points(rows, t)
 
     bat_score = max(0, min(99, round(batting_raw)))
     bowl_score = max(0, min(99, round(bowling_raw)))
 
     return bat_score, bowl_score
+
+
+def overall_rating(bat_score, bowl_score):
+    """Calculate overall rating using the batting and bowling ratings."""
+    if bat_score >= 75 and bowl_score >= 75:
+        rating = (bat_score + bowl_score) / 2
+    else:
+        rating = max(bat_score, bowl_score)
+
+    return max(0, min(99, round(rating)))
+
 
 
 
