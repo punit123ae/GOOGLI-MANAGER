@@ -138,7 +138,7 @@ def fantasy_raw_points(rows, t=None):
     )
 
     
-    # Bowling Fantasy Points
+    # Bowling statistics
     balls_bowled = sum(r.get("balls_bowled", 0) for r in rows)
 
     if balls_bowled <= 0:
