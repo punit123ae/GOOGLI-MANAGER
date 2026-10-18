@@ -1346,8 +1346,8 @@ class Stats(commands.Cog):
         for index, row in enumerate(recent_rows, start=1):
             status = "*" if row["not_out"] else ""
             recent_lines.append(
-                f"**{index}.** 🏏 `{row['runs']}{status} ({row['balls_faced']})`  ·  "
-                f"🎯 `{row['wickets']}/{row['runs_conceded']}`"
+                f"**{index}.** <:cricketbat:1561294474951393360> `{row['runs']}{status} ({row['balls_faced']})`  ·  "
+                f"<:cricketball:1561294577392951338> `{row['wickets']}/{row['runs_conceded']}`"
             )
         recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
         best_batting_text = (
@@ -1363,8 +1363,7 @@ class Stats(commands.Cog):
             title=f"{member.display_name} stats for `KASHMIR TITANS S1` — Deep Stats",
             description=(
                 f"**MATCHES RECORDED:** `{t['matches']}`\n\n"
-                f"**🕘 RECENT 5 MATCH SCORES**\n{recent_text}\n\n"
-                "*Batting score is runs (balls faced); `*` means not out. Bowling is wickets/runs conceded.*"
+                f"<:recent:1561311937843957801>  **__RECENT 5 MATCH SCORES__**\n{recent_text}"
             ),
             colour=discord.Colour.blurple(),
         )
