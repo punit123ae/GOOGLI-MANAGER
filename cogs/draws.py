@@ -207,22 +207,25 @@ class LiveDraws(commands.Cog):
         try:
             total = len(random_teams)
             for drawn_count, team_name in enumerate(random_teams, 1):
-                remaining_before_draw = total - drawn_count + 1
                 rolling = await ctx.send(
-                    f"Randomly drawing a team from **{remaining_before_draw} teams** in **3 seconds...**"
+                    f"Randomly rolling a team from **{total} teams** in **3 seconds...**"
                 )
                 for seconds in (2, 1):
                     await asyncio.sleep(1)
                     await rolling.edit(
-                        content=f"Randomly drawing a team from **{remaining_before_draw} teams** in **{seconds} second{'s' if seconds != 1 else ''}...**"
+                        content=f"Randomly rolling a team from **{total} teams** in **{seconds} second{'s' if seconds != 1 else ''}...**"
                     )
                 await asyncio.sleep(1)
+
+                await rolling.edit(
+                    content=f"🎲 Randomly rolled **{discord.utils.escape_markdown(team_name)}** from **{total} teams**."
+                )
 
                 # Distribute in order A, B, C... then cycle back to A.
                 group_index = (drawn_count - 1) % group_count
                 groups[group_index].append(team_name)
                 content = self._format_results(setting["setting_name"], groups, drawn_count, total)
-                await rolling.edit(content=content)
+                await ctx.send(content)
 
                 if drawn_count >= total:
                     break
