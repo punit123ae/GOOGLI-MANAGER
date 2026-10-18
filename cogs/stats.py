@@ -137,10 +137,11 @@ def fantasy_raw_points(rows, t=None):
         + (hundreds * 10)
     )
 
-    # Bowling statistics
-    balls_bowled = t["balls_bowled"]
+    
+    # Bowling Fantasy Points
+    balls_bowled = sum(r.get("balls_bowled", 0) for r in rows)
 
-    if not balls_bowled:
+    if balls_bowled <= 0:
         bowling_raw = 0
     else:
         three_wicket_hauls = sum(
@@ -154,9 +155,9 @@ def fantasy_raw_points(rows, t=None):
         )
 
         haul_bonus = (
-            (three_wicket_hauls * 7)
-            + (five_wicket_hauls * 15)
-            + (seven_wicket_hauls * 25)
+            three_wicket_hauls * 7
+            + five_wicket_hauls * 15
+            + seven_wicket_hauls * 25
         )
 
         bowling_raw = (
@@ -167,9 +168,6 @@ def fantasy_raw_points(rows, t=None):
             + haul_bonus
         )
 
-    total_raw = batting_raw + bowling_raw
-
-    return batting_raw, bowling_raw, total_raw
 
 
 def impact_scores(rows, t=None):
