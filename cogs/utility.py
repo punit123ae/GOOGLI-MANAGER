@@ -41,6 +41,54 @@ def has_command_whitelist(bot, guild_id, member, command_name):
     return bool(role_ids(member) & allowed)
 
 
+class PostApprovedTeamsView(discord.ui.View):
+    """Owner-only confirmation before publishing approved team embeds."""
+    def __init__(self, cog, guild_id, channel_id, author_id):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author_id or interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message(
+                "Only the bot owner who started this action can confirm it.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm and post", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction, button):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("Only the bot owner can do this.", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Posting approved team embeds… please wait.", view=self
+        )
+        count, error = await self.cog._post_approved_team_embeds(
+            self.guild_id, self.channel_id
+        )
+        try:
+            await interaction.edit_original_response(
+                content=(f"✅ Posted **{count}** approved team embed(s)." if error is None
+                         else f"⚠️ Posted **{count}** team embed(s), then stopped: {error}"),
+                view=self,
+            )
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Cancelled. No team embeds were posted.", view=self
+        )
+
+
 class Utility(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -320,6 +368,99 @@ class Utility(commands.Cog):
         )
         self.db.commit()
         await ctx.reply("🔊 Bot commands are enabled in all channels again.", mention_author=False)
+
+
+    async def _post_approved_team_embeds(self, guild_id, channel_id):
+        """Read approved teams from team_registration.db and post one embed per team."""
+        import sqlite3
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return 0, "I couldn't access the selected channel."
+        if not isinstance(channel, discord.TextChannel) or channel.guild.id != guild_id:
+            return 0, "The selected channel is not a text channel in this server."
+
+        conn = None
+        try:
+            conn = sqlite3.connect("team_registration.db")
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT name, captain_id, logo_url FROM registered_teams "
+                "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+                (guild_id,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            return 0, f"Couldn't read `team_registration.db` ({type(exc).__name__})."
+        finally:
+            if conn is not None:
+                conn.close()
+
+        if not rows:
+            return 0, "No approved teams were found in this server."
+
+        posted = 0
+        for number, team in enumerate(rows, start=1):
+            name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
+            captain_id = int(team["captain_id"])
+            logo_url = str(team["logo_url"] or "").strip()
+            embed = discord.Embed(
+                title="Kashmir Titans S1",
+                description=(
+                    f"{number}. **__Team name:__** **`{name}`**\n"
+                    f"**__Team captain:__** <@{captain_id}>"
+                ),
+                color=discord.Color.from_rgb(55, 150, 255),
+            )
+            if logo_url.startswith(("https://", "http://")):
+                # Thumbnail on the right and the full-size image at the bottom.
+                embed.set_thumbnail(url=logo_url)
+                embed.set_image(url=logo_url)
+            try:
+                await channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                )
+                posted += 1
+            except discord.HTTPException as exc:
+                return posted, f"Discord returned {type(exc).__name__}."
+        return posted, None
+
+    @commands.command(name="postapprovedteams", aliases=["postteams"])
+    @commands.guild_only()
+    async def post_approved_teams(self, ctx, channel: discord.TextChannel):
+        """Owner-only: preview and confirm posting every approved team to a channel."""
+        if ctx.author.id != BOT_OWNER_ID:
+            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+            return
+
+        import sqlite3
+        conn = None
+        try:
+            conn = sqlite3.connect("team_registration.db")
+            count = conn.execute(
+                "SELECT COUNT(*) FROM registered_teams WHERE guild_id=? AND status='approved'",
+                (ctx.guild.id,),
+            ).fetchone()[0]
+        except sqlite3.Error as exc:
+            await ctx.reply(f"Couldn't read `team_registration.db` ({type(exc).__name__}).", mention_author=False)
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+
+        if count == 0:
+            await ctx.reply("There are no approved teams to post.", mention_author=False)
+            return
+        view = PostApprovedTeamsView(self, ctx.guild.id, channel.id, ctx.author.id)
+        await ctx.reply(
+            f"**Confirm posting {count} approved team embed(s)** in {channel.mention}?\n"
+            "Each team gets one embed with its logo as both the right-side thumbnail and the full-size image at the bottom.",
+            view=view,
+            mention_author=False,
+        )
 
 
 async def setup(bot):
