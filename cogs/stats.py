@@ -168,6 +168,8 @@ def fantasy_raw_points(rows, t=None):
             + haul_bonus
         )
 
+    total_raw = batting_raw + bowling_raw
+    return batting_raw, bowling_raw, total_raw
 
 
 def impact_scores(rows, t=None):
