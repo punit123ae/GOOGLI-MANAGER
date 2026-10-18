@@ -387,8 +387,17 @@ class Utility(commands.Cog):
         try:
             conn = sqlite3.connect("team_registration.db")
             conn.row_factory = sqlite3.Row
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS approved_team_post_settings (
+                    guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS approved_team_posted (
+                    guild_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
+                    message_id INTEGER, PRIMARY KEY(guild_id, team_id)
+                );
+            """)
             rows = conn.execute(
-                "SELECT name, captain_id, logo_url FROM registered_teams "
+                "SELECT id, name, captain_id, logo_url FROM registered_teams "
                 "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
                 (guild_id,),
             ).fetchall()
@@ -401,8 +410,30 @@ class Utility(commands.Cog):
         if not rows:
             return 0, "No approved teams were found in this server."
 
+        # Persist the chosen channel so later approvals can be announced automatically.
+        try:
+            conn = sqlite3.connect("team_registration.db")
+            conn.execute(
+                "INSERT INTO approved_team_post_settings(guild_id, channel_id) VALUES(?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id",
+                (guild_id, channel_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
         posted = 0
-        for number, team in enumerate(rows, start=1):
+        for team in rows:
+            conn = sqlite3.connect("team_registration.db")
+            exists = conn.execute(
+                "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND team_id=?",
+                (guild_id, int(team["id"])),
+            ).fetchone()
+            conn.close()
+            if exists:
+                continue
+            # Number based on current approved-team order, including already-posted teams.
+            number = 1 + next(i for i, item in enumerate(rows) if int(item["id"]) == int(team["id"]))
             name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
             captain_id = int(team["captain_id"])
             logo_url = str(team["logo_url"] or "").strip()
@@ -419,10 +450,20 @@ class Utility(commands.Cog):
                 embed.set_thumbnail(url=logo_url)
                 embed.set_image(url=logo_url)
             try:
-                await channel.send(
+                # Mentions inside embed descriptions are display-only in Discord.
+                # Put the captain mention in message content as well so it actually pings.
+                message = await channel.send(
+                    content=f"<@{captain_id}>",
                     embed=embed,
                     allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
+                conn = sqlite3.connect("team_registration.db")
+                conn.execute(
+                    "INSERT OR IGNORE INTO approved_team_posted(guild_id, team_id, message_id) VALUES(?,?,?)",
+                    (guild_id, int(team["id"]), message.id),
+                )
+                conn.commit()
+                conn.close()
                 posted += 1
             except discord.HTTPException as exc:
                 return posted, f"Discord returned {type(exc).__name__}."
