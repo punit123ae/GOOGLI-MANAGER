@@ -491,6 +491,92 @@ class Utility(commands.Cog):
                 return posted, f"Discord returned {type(exc).__name__}."
         return posted, None
 
+    @commands.command(name="sendteam")
+    @commands.guild_only()
+    async def send_single_approved_team(self, ctx, *, team_name: str):
+        """Owner-only: post one approved team's announcement embed in this channel."""
+        if ctx.author.id != BOT_OWNER_ID:
+            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+            return
+
+        import sqlite3
+        conn = None
+        try:
+            conn = sqlite3.connect("team_registration.db")
+            conn.row_factory = sqlite3.Row
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(registered_teams)").fetchall()]
+            if not columns:
+                await ctx.reply("The registered teams table wasn't found in `team_registration.db`.", mention_author=False)
+                return
+
+            # Ensure permanent creation-order numbering exists for older databases.
+            if "team_number" not in columns:
+                conn.execute("ALTER TABLE registered_teams ADD COLUMN team_number INTEGER")
+            guild_ids = [row[0] for row in conn.execute(
+                "SELECT DISTINCT guild_id FROM registered_teams"
+            ).fetchall()]
+            for guild_id in guild_ids:
+                current = conn.execute(
+                    "SELECT COALESCE(MAX(team_number), 0) FROM registered_teams WHERE guild_id=?",
+                    (guild_id,),
+                ).fetchone()[0]
+                missing = conn.execute(
+                    "SELECT id FROM registered_teams WHERE guild_id=? AND team_number IS NULL "
+                    "ORDER BY created_at ASC, id ASC", (guild_id,)
+                ).fetchall()
+                for row in missing:
+                    current += 1
+                    conn.execute(
+                        "UPDATE registered_teams SET team_number=? WHERE id=?",
+                        (current, int(row["id"]))
+                    )
+            conn.commit()
+            team = conn.execute(
+                "SELECT id, name, captain_id, logo_url, team_number FROM registered_teams "
+                "WHERE guild_id=? AND status='approved' AND name=? COLLATE NOCASE "
+                "ORDER BY team_number ASC LIMIT 1",
+                (ctx.guild.id, team_name.strip()),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            await ctx.reply(f"Couldn't read `team_registration.db` ({type(exc).__name__}).", mention_author=False)
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+
+        if team is None:
+            await ctx.reply(
+                f"I couldn't find an approved team named **{discord.utils.escape_markdown(team_name)}**. Check the spelling and try again.",
+                mention_author=False,
+            )
+            return
+
+        number = int(team["team_number"] or team["id"])
+        name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
+        captain_id = int(team["captain_id"])
+        logo_url = str(team["logo_url"] or "").strip()
+        embed = discord.Embed(
+            title="Kashmir Titans S1",
+            description=(
+                f"{number}. **__Team name:__** **`{name}`**\n"
+                f"**__Team captain:__** <@{captain_id}>"
+            ),
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        if logo_url.startswith(("https://", "http://")):
+            embed.set_thumbnail(url=logo_url)
+            embed.set_image(url=logo_url)
+
+        try:
+            await ctx.channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as exc:
+            await ctx.reply(f"Couldn't send the team embed ({type(exc).__name__}).", mention_author=False)
+            return
+        await ctx.reply(f"Posted the embed for **{name}** in this channel.", mention_author=False)
+
     @commands.command(name="setapprovedteamschannel", aliases=["setteamannouncechannel"])
     @commands.guild_only()
     async def set_approved_teams_channel(self, ctx, channel: discord.TextChannel):
