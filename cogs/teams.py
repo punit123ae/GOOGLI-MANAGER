@@ -289,6 +289,29 @@ class TeamRegistration(commands.Cog):
             guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
         );
         """)
+        # Assign each team a permanent sequence number based on its creation time.
+        # Existing teams are numbered oldest-first once; future teams receive the next number.
+        team_columns = [r[1] for r in self.db.execute("PRAGMA table_info(registered_teams)").fetchall()]
+        if "team_number" not in team_columns:
+            self.db.execute("ALTER TABLE registered_teams ADD COLUMN team_number INTEGER")
+        guild_ids = [r[0] for r in self.db.execute("SELECT DISTINCT guild_id FROM registered_teams").fetchall()]
+        for guild_id in guild_ids:
+            existing = self.db.execute(
+                "SELECT id FROM registered_teams WHERE guild_id=? AND team_number IS NOT NULL",
+                (guild_id,),
+            ).fetchall()
+            next_number = max((int(r[0]) for r in existing), default=0) + 1
+            missing = self.db.execute(
+                "SELECT id FROM registered_teams WHERE guild_id=? AND team_number IS NULL ORDER BY created_at ASC, id ASC",
+                (guild_id,),
+            ).fetchall()
+            for team_row in missing:
+                self.db.execute(
+                    "UPDATE registered_teams SET team_number=? WHERE id=? AND team_number IS NULL",
+                    (next_number, int(team_row["id"])),
+                )
+                next_number += 1
+
         # Migrate announcement tracking to be channel-specific. This allows a
         # previous test-channel post to be repeated in the real announcement channel.
         posted_columns = [r[1] for r in self.db.execute("PRAGMA table_info(approved_team_posted)").fetchall()]
@@ -1041,10 +1064,14 @@ class TeamRegistration(commands.Cog):
                 await logo_msg.channel.send("I couldn't recognize that as an image. Upload an image or send a direct image URL, then run `+createteam` again.")
                 return
             try:
+                next_team_number = self.db.execute(
+                    "SELECT COALESCE(MAX(team_number), 0) + 1 FROM registered_teams WHERE guild_id=?",
+                    (ctx.guild.id,),
+                ).fetchone()[0]
                 cur = self.db.execute(
-                    "INSERT INTO registered_teams(guild_id,name,name_key,captain_id,logo_url,status,applicant_id,approval_channel_id,created_at) "
-                    "VALUES(?,?,?,?,?,'pending',?,?,?)",
-                    (ctx.guild.id, name, self._key(name), ctx.author.id, logo_url, ctx.author.id, approval_channel.id, datetime.now(timezone.utc).isoformat())
+                    "INSERT INTO registered_teams(guild_id,name,name_key,captain_id,logo_url,status,applicant_id,approval_channel_id,created_at,team_number) "
+                    "VALUES(?,?,?,?,?,'pending',?,?,?,?)",
+                    (ctx.guild.id, name, self._key(name), ctx.author.id, logo_url, ctx.author.id, approval_channel.id, datetime.now(timezone.utc).isoformat(), next_team_number)
                 )
                 team_id = cur.lastrowid
                 self.db.commit()
@@ -1108,11 +1135,15 @@ class TeamRegistration(commands.Cog):
                         channel = await self.bot.fetch_channel(int(settings["channel_id"]))
                     if isinstance(channel, discord.TextChannel) and channel.guild.id == int(interaction.guild_id):
                         approved = self.db.execute(
-                            "SELECT id, name, captain_id, logo_url FROM registered_teams "
-                            "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+                            "SELECT id, name, captain_id, logo_url, team_number FROM registered_teams "
+                            "WHERE guild_id=? AND status='approved' ORDER BY team_number ASC",
                             (int(interaction.guild_id),),
                         ).fetchall()
-                        number = next((i for i, item in enumerate(approved, 1) if int(item["id"]) == int(team_id)), len(approved))
+                        number_row = self.db.execute(
+                            "SELECT team_number FROM registered_teams WHERE id=? AND guild_id=?",
+                            (int(team_id), int(interaction.guild_id)),
+                        ).fetchone()
+                        number = int(number_row["team_number"]) if number_row and number_row["team_number"] is not None else len(approved)
                         safe_name = discord.utils.escape_markdown(str(row["name"] or "Unknown Team"))
                         captain_id = int(row["captain_id"])
                         logo_url = str(row["logo_url"] or "").strip()

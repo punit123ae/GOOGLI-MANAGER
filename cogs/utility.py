@@ -404,9 +404,27 @@ class Utility(commands.Cog):
             # Legacy test posts have no reliable channel-specific record; don't let
             # them block posting in the selected channel.
             conn.execute("DROP TABLE IF EXISTS approved_team_posted_legacy")
+            # Ensure old databases have permanent creation-order team numbers.
+            team_columns = [r[1] for r in conn.execute("PRAGMA table_info(registered_teams)").fetchall()]
+            if "team_number" not in team_columns:
+                conn.execute("ALTER TABLE registered_teams ADD COLUMN team_number INTEGER")
+            guild_ids = [r[0] for r in conn.execute("SELECT DISTINCT guild_id FROM registered_teams").fetchall()]
+            for existing_guild_id in guild_ids:
+                current = conn.execute(
+                    "SELECT COALESCE(MAX(team_number), 0) FROM registered_teams WHERE guild_id=?",
+                    (existing_guild_id,),
+                ).fetchone()[0]
+                missing = conn.execute(
+                    "SELECT id FROM registered_teams WHERE guild_id=? AND team_number IS NULL ORDER BY created_at ASC, id ASC",
+                    (existing_guild_id,),
+                ).fetchall()
+                for missing_row in missing:
+                    current += 1
+                    conn.execute("UPDATE registered_teams SET team_number=? WHERE id=?", (current, int(missing_row["id"])))
+            conn.commit()
             rows = conn.execute(
-                "SELECT id, name, captain_id, logo_url FROM registered_teams "
-                "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+                "SELECT id, name, captain_id, logo_url, team_number FROM registered_teams "
+                "WHERE guild_id=? AND status='approved' ORDER BY team_number ASC, created_at ASC, id ASC",
                 (guild_id,),
             ).fetchall()
         except sqlite3.Error as exc:
@@ -430,15 +448,8 @@ class Utility(commands.Cog):
         finally:
             conn.close()
 
-        # Continue numbering after the teams already posted, instead of numbering
-        # by alphabetical position (which could label a newly posted team "3").
-        conn = sqlite3.connect("team_registration.db")
-        already_posted = conn.execute(
-            "SELECT COUNT(*) FROM approved_team_posted WHERE guild_id=? AND channel_id=?",
-            (guild_id, channel_id),
-        ).fetchone()[0]
-        conn.close()
-
+        # Use the permanent team number assigned at creation, not the team's
+        # alphabetical position or the count of posts in this channel.
         posted = 0
         for team in rows:
             conn = sqlite3.connect("team_registration.db")
@@ -449,8 +460,7 @@ class Utility(commands.Cog):
             conn.close()
             if exists:
                 continue
-            # The next new embed gets the next sequential number in the channel.
-            number = already_posted + posted + 1
+            number = int(team["team_number"] or team["id"])
             name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
             captain_id = int(team["captain_id"])
             logo_url = str(team["logo_url"] or "").strip()
