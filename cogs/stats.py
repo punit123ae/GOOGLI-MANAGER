@@ -1293,7 +1293,7 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="<:cricketball:1561294577392951338> `\BOWLING",
+            name="<:cricketball:1561294577392951338> `__**BOWLING**__`",
             value=(
                 f"**Innings:** `{bowling_innings}`\n"
                 f"**Overs bowled:** `{overs_text}`\n"
