@@ -474,7 +474,8 @@ class TeamRegistration(commands.Cog):
     def make_teamlist_embed(self, guild_id, page):
         rows = self.db.execute(
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' "
-            "ORDER BY name COLLATE NOCASE LIMIT 10 OFFSET ?", (guild_id, page * 10)
+            "ORDER BY team_number ASC, created_at ASC, id ASC LIMIT 10 OFFSET ?",
+            (guild_id, page * 10)
         ).fetchall()
         total = self.db.execute(
             "SELECT COUNT(*) FROM registered_teams WHERE guild_id=? AND status='approved'", (guild_id,)
