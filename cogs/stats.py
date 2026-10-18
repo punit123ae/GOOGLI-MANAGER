@@ -888,6 +888,7 @@ class StatsSelect(discord.ui.Select):
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=[
+                discord.SelectOption(label="Overview", description="Show batting, bowling, and fantasy stats in an embed", emoji="📊", value="overview", default=True),
                 discord.SelectOption(label="Image", description="Show the generated stats image", emoji="🖼️", value="image"),
             ],
         )
@@ -899,18 +900,33 @@ class StatsSelect(discord.ui.Select):
                 "This stats menu belongs to the person who requested it.", ephemeral=True
             )
             return
+
+        if self.values[0] == "overview":
+            # Keep the original stats embed available as the Overview menu option.
+            for option in self.options:
+                option.default = option.value == "overview"
+            await interaction.response.edit_message(
+                content=None, embed=view.overview_embed, attachments=[], view=view
+            )
+            return
+
+        for option in self.options:
+            option.default = option.value == "image"
         image = io.BytesIO(view.overall_image)
         image.seek(0)
         file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
-        await interaction.response.edit_message(content=None, embed=None, attachments=[file], view=view)
+        await interaction.response.edit_message(
+            content=None, embed=None, attachments=[file], view=view
+        )
 
 
 class StatsView(discord.ui.View):
-    def __init__(self, requester_id, member_id, overall_image):
+    def __init__(self, requester_id, member_id, overall_image, overview_embed):
         super().__init__(timeout=600)
         self.requester_id = requester_id
         self.member_id = member_id
         self.overall_image = overall_image
+        self.overview_embed = overview_embed
         self.add_item(StatsSelect())
 
 
@@ -1274,7 +1290,7 @@ class Stats(commands.Cog):
         overs_remainder = t["balls_bowled"] % 6
         overs_text = f"{overs_whole}.{overs_remainder}"
         embed = discord.Embed(
-            title=f"{member.display_name} — Stats Overview",
+            title=f"{member.display_name} stats for `KASHMIR TITANS S1`",
             colour=discord.Colour.blurple(),
         )
         embed.set_thumbnail(url=member.display_avatar.url)
@@ -1308,7 +1324,7 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(name="<:Crown:1561296003104243803> **__TOTAL FANTASY POINTS__**", value=f"**`{total_points:.2f}`**", inline=False)
-        view = StatsView(ctx.author.id, member.id, overall_image)
+        view = StatsView(ctx.author.id, member.id, overall_image, embed)
 
         # First response is a stats overview embed; the Image menu option swaps it for the generated image.
         await ctx.send(
