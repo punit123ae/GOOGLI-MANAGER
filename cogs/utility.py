@@ -422,6 +422,15 @@ class Utility(commands.Cog):
         finally:
             conn.close()
 
+        # Continue numbering after the teams already posted, instead of numbering
+        # by alphabetical position (which could label a newly posted team "3").
+        conn = sqlite3.connect("team_registration.db")
+        already_posted = conn.execute(
+            "SELECT COUNT(*) FROM approved_team_posted WHERE guild_id=?",
+            (guild_id,),
+        ).fetchone()[0]
+        conn.close()
+
         posted = 0
         for team in rows:
             conn = sqlite3.connect("team_registration.db")
@@ -432,8 +441,8 @@ class Utility(commands.Cog):
             conn.close()
             if exists:
                 continue
-            # Number based on current approved-team order, including already-posted teams.
-            number = 1 + next(i for i, item in enumerate(rows) if int(item["id"]) == int(team["id"]))
+            # The next new embed gets the next sequential number in the channel.
+            number = already_posted + posted + 1
             name = discord.utils.escape_markdown(str(team["name"] or "Unknown Team"))
             captain_id = int(team["captain_id"])
             logo_url = str(team["logo_url"] or "").strip()
