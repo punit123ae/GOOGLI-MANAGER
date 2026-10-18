@@ -888,7 +888,8 @@ class StatsSelect(discord.ui.Select):
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=[
-                discord.SelectOption(label="Overview", description="Show batting, bowling, and fantasy stats in an embed", emoji="📊", value="overview", default=True),
+                discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="📊", value="overview", default=True),
+                discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="📈", value="deep"),
                 discord.SelectOption(label="Image", description="Show the generated stats image", emoji="🖼️", value="image"),
             ],
         )
@@ -901,17 +902,22 @@ class StatsSelect(discord.ui.Select):
             )
             return
 
-        if self.values[0] == "overview":
-            # Keep the original stats embed available as the Overview menu option.
-            for option in self.options:
-                option.default = option.value == "overview"
+        selected = self.values[0]
+        for option in self.options:
+            option.default = option.value == selected
+
+        if selected == "overview":
             await interaction.response.edit_message(
                 content=None, embed=view.overview_embed, attachments=[], view=view
             )
             return
 
-        for option in self.options:
-            option.default = option.value == "image"
+        if selected == "deep":
+            await interaction.response.edit_message(
+                content=None, embed=view.deep_embed, attachments=[], view=view
+            )
+            return
+
         image = io.BytesIO(view.overall_image)
         image.seek(0)
         file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
@@ -921,12 +927,13 @@ class StatsSelect(discord.ui.Select):
 
 
 class StatsView(discord.ui.View):
-    def __init__(self, requester_id, member_id, overall_image, overview_embed):
+    def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed):
         super().__init__(timeout=600)
         self.requester_id = requester_id
         self.member_id = member_id
         self.overall_image = overall_image
         self.overview_embed = overview_embed
+        self.deep_embed = deep_embed
         self.add_item(StatsSelect())
 
 
@@ -1291,6 +1298,7 @@ class Stats(commands.Cog):
         overs_text = f"{overs_whole}.{overs_remainder}"
         embed = discord.Embed(
             title=f"{member.display_name} stats for `KASHMIR TITANS S1`",
+            description=f"**MATCHES RECORDED:** `{t['matches']}`",
             colour=discord.Colour.blurple(),
         )
         embed.set_thumbnail(url=member.display_avatar.url)
@@ -1324,9 +1332,83 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(name="<:Crown:1561296003104243803> **__TOTAL FANTASY POINTS__**", value=f"**`{total_points:.2f}`**", inline=False)
-        view = StatsView(ctx.author.id, member.id, overall_image, embed)
 
-        # First response is a stats overview embed; the Image menu option swaps it for the generated image.
+        # Extended stats use the same recorded match rows and existing fantasy formula.
+        best_batting = max(rows, key=lambda r: (r["runs"], r["balls_faced"]), default=None)
+        bowling_rows = [r for r in rows if r["balls_bowled"] > 0]
+        best_bowling = max(
+            bowling_rows,
+            key=lambda r: (r["wickets"], -r["runs_conceded"]),
+            default=None,
+        )
+        recent_rows = list(reversed(rows[-5:]))
+        recent_lines = []
+        for index, row in enumerate(recent_rows, start=1):
+            status = "*" if row["not_out"] else ""
+            recent_lines.append(
+                f"**{index}.** 🏏 `{row['runs']}{status} ({row['balls_faced']})`  ·  "
+                f"🎯 `{row['wickets']}/{row['runs_conceded']}`"
+            )
+        recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
+        best_batting_text = (
+            f"{best_batting['runs']} ({best_batting['balls_faced']})"
+            f"{'*' if best_batting['not_out'] else ''}"
+            if best_batting else "0 (0)"
+        )
+        best_bowling_text = (
+            f"{best_bowling['wickets']}/{best_bowling['runs_conceded']}"
+            if best_bowling else "0/0"
+        )
+        deep_embed = discord.Embed(
+            title=f"{member.display_name} stats for `KASHMIR TITANS S1` — Deep Stats",
+            description=(
+                f"**MATCHES RECORDED:** `{t['matches']}`\n\n"
+                f"**🕘 RECENT 5 MATCH SCORES**\n{recent_text}\n\n"
+                "*Batting score is runs (balls faced); `*` means not out. Bowling is wickets/runs conceded.*"
+            ),
+            colour=discord.Colour.blurple(),
+        )
+        deep_embed.set_thumbnail(url=member.display_avatar.url)
+        deep_embed.add_field(
+            name="<:cricketbat:1561294474951393360> **__BATTING__**",
+            value=(
+                f"**Innings:** `{t['matches']}`\n"
+                f"**Runs:** `{t['runs']}`\n"
+                f"**Balls played:** `{t['balls_faced']}`\n"
+                f"**Strike rate:** `{t['strike_rate']:.2f}`\n"
+                f"**Average:** `{t['bat_avg']:.2f}`\n"
+                f"**50s:** `{fifties}`\n"
+                f"**100s:** `{hundreds}`\n"
+                f"**Not outs:** `{t['not_outs']}`\n"
+                f"**Best batting figures:** `{best_batting_text}`\n"
+                f"**Fantasy points:** `{batting_points:.2f}`"
+            ),
+            inline=True,
+        )
+        deep_embed.add_field(
+            name="<:cricketball:1561294577392951338> **__BOWLING__**",
+            value=(
+                f"**Innings:** `{bowling_innings}`\n"
+                f"**Wickets:** `{t['wickets']}`\n"
+                f"**Balls bowled:** `{t['balls_bowled']}`\n"
+                f"**Average:** `{t['bowl_avg']:.2f}`\n"
+                f"**Economy:** `{t['economy']:.2f}`\n"
+                f"**3W hauls:** `{sum(3 <= r['wickets'] < 5 for r in rows)}`\n"
+                f"**5W hauls:** `{sum(5 <= r['wickets'] < 7 for r in rows)}`\n"
+                f"**Runs conceded:** `{t['runs_conceded']}`\n"
+                f"**Best bowling figures:** `{best_bowling_text}`\n"
+                f"**Fantasy points:** `{bowling_points:.2f}`"
+            ),
+            inline=True,
+        )
+        deep_embed.add_field(
+            name="<:Crown:1561296003104243803> **__TOTAL FANTASY POINTS__**",
+            value=f"**`{total_points:.2f}`**",
+            inline=False,
+        )
+        view = StatsView(ctx.author.id, member.id, overall_image, embed, deep_embed)
+
+        # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
         await ctx.send(
             embed=embed,
             view=view,
