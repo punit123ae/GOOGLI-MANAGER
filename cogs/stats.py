@@ -108,31 +108,47 @@ def classify_player(t):
     return "BATSMAN" if t["runs"] >= t["wickets"] * 10 else "BOWLER"
 
 
-def impact_scores(t):
-    """Simple repeatable 0-100 impact indicators derived from recorded stats."""
-    bat_score = min(
-        100,
-        round(
-            min(t["runs"] / 5, 55)
-            + min(t["strike_rate"] / 4, 25)
-            + min(t["bat_avg"] / 5, 20)
-        ),
+def fantasy_raw_points(rows, t=None):
+    """Return batting raw points, bowling raw points and total fantasy points.
+
+    Run bonus is 1 point per 10 runs. Haul bonuses: 3 wickets = 7,
+    5 wickets = 15, and 7+ wickets = 25 per match (highest applicable only).
+    """
+    t = t or totals(rows)
+    fifties = sum(50 <= r["runs"] < 100 for r in rows)
+    hundreds = sum(r["runs"] >= 100 for r in rows)
+    ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
+    run_bonus = t["runs"] / 10
+    batting_raw = (
+        50 + (t["bat_avg"] * 2) + run_bonus + (hundreds * 10)
+        + (fifties * 5) - (ducks * 10) - (t["balls_faced"] * 0.1)
     )
-    wickets_component = min(55, t["wickets"] * 8)
-    economy_component = (
-        max(0, min(25, 25 - max(0, t["economy"] - 4) * 2))
-        if t["balls_bowled"]
-        else 0
+
+    haul_bonus = 0
+    for row in rows:
+        wkts = row["wickets"]
+        if wkts >= 7:
+            haul_bonus += 25
+        elif wkts >= 5:
+            haul_bonus += 15
+        elif wkts >= 3:
+            haul_bonus += 7
+
+    bowling_raw = (
+        70 - (t["bowl_avg"] / 2) + (t["wickets"] * 2)
+        - (max(0, t["economy"] - 5) * 2 if t["balls_bowled"] else 0)
+        + haul_bonus
     )
-    bowling_score = min(
-        100,
-        round(
-            wickets_component
-            + economy_component
-            + min(20, t["balls_bowled"] / 6)
-        ),
-    )
-    return bat_score, bowling_score
+    return batting_raw, bowling_raw, batting_raw + bowling_raw
+
+
+def impact_scores(rows, t=None):
+    """Convert raw points to impact ratings from 0 to 99, preserving order."""
+    batting_raw, bowling_raw, _ = fantasy_raw_points(rows, t)
+    # Clamp raw points directly: negative/low raw points stay low; 99 is the cap.
+    bat_score = max(0, min(99, round(batting_raw)))
+    bowl_score = max(0, min(99, round(bowling_raw)))
+    return bat_score, bowl_score
 
 
 # ============================================================
@@ -144,7 +160,7 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
     """Player performance card. Every displayed statistic is computed from imported DB rows."""
     t = totals(rows)
     role = classify_player(t)
-    bat_impact, bowl_impact = impact_scores(t)
+    bat_impact, bowl_impact = impact_scores(rows, t)
     rating = round(
         (bat_impact * 0.55 + bowl_impact * 0.45)
         if role == "ALL-ROUNDER"
@@ -523,7 +539,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     draw = ImageDraw.Draw(image)
 
     white = (245, 249, 255, 255)
-    muted = (159, 187, 215, 255)
+    muted = (205, 224, 242, 255)
     blue = (61, 151, 255, 255)
     lime = (190, 255, 48, 255)
     cyan = (64, 220, 235, 255)
@@ -534,12 +550,8 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
 
     t = totals(rows)
     role = classify_player(t)
-    bat_impact, bowl_impact = impact_scores(t)
-    rating = round(
-        bat_impact * 0.55 + bowl_impact * 0.45
-        if role == "ALL-ROUNDER"
-        else (bat_impact if role == "BATSMAN" else bowl_impact)
-    )
+    bat_impact, bowl_impact = impact_scores(rows, t)
+    _, _, fantasy_points = fantasy_raw_points(rows, t)
     guild = getattr(member, "guild", None)
     guild_name = getattr(guild, "name", "DISCORD SERVER").upper()
     team_name = get_player_team_name(member).upper()
@@ -571,13 +583,13 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     draw.line((55, 119, 1545, 119), fill=(55, 125, 205, 210), width=2)
     draw.rounded_rectangle((55, 116, 300, 122), radius=3, fill=blue)
 
-    # Season snapshot. Overall rating is shown here, not over the avatar.
+    # Season snapshot. Total fantasy points are shown here, not over the avatar.
     draw.text((78, 155), "SEASON SNAPSHOT", font=load_font(14, True), fill=muted)
     snapshot = [
         ("MATCHES", t["matches"], blue),
         ("RUNS", t["runs"], gold),
         ("WICKETS", t["wickets"], cyan),
-        ("OVERALL RATING", rating, violet),
+        ("FANTASY POINTS", fmt(fantasy_points), violet),
     ]
     start_x, card_w, card_gap = 72, 350, 18
     for i, (label, value, accent) in enumerate(snapshot):
@@ -588,7 +600,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         # Keep each snapshot label and its value on one horizontal line.
         # Vertically centre both inside the card and align the value to the right.
         card_mid_y = (178 + 222) // 2
-        draw.text((x + 16, card_mid_y), label, font=load_font(12, True),
+        draw.text((x + 16, card_mid_y), label, font=load_font(15, True),
                   fill=muted, anchor="lm")
         draw.text((x + card_w - 16, card_mid_y), str(value),
                   font=load_font(22, True), fill=accent, anchor="rm")
@@ -596,7 +608,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     # Left panel: batting statistics, with the high score alone on the final row.
     draw.rounded_rectangle((78, 280, 119, 287), radius=3, fill=lime)
     draw.text((78, 300), "BATTING", font=load_font(21, True), fill=lime)
-    draw.text((494, 306), "AT THE CREASE", font=load_font(10, True), fill=muted, anchor="ra")
+    draw.text((494, 306), "AT THE CREASE", font=load_font(12, True), fill=muted, anchor="ra")
     batting = [
         ("INNINGS", t["matches"], blue),
         ("STRIKE RATE", fmt(t["strike_rate"]), gold),
@@ -615,7 +627,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         x, y = col_x[col], row_y[row]
         draw.rounded_rectangle((x - 7, y - 8, x + 190, y + 61), radius=10,
                                fill=(14, 31, 50, 145))
-        draw.text((x + 4, y), label, font=load_font(13, True), fill=muted)
+        draw.text((x + 4, y), label, font=load_font(16, True), fill=muted)
         # All batting values are white except the ducks number, which is red.
         draw.text((x + 4, y + 23), str(value), font=load_font(26, True), fill=red if label == "DUCKS" else white)
     draw.line((292, 351, 292, 682), fill=divider, width=2)
@@ -623,7 +635,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     # High score is deliberately alone across the bottom of the batting panel.
     high_score = max((r["runs"] for r in rows), default=0)
     draw.rounded_rectangle((82, 713, 492, 775), radius=12, fill=(14, 31, 50, 175), outline=(44, 82, 120, 150), width=1)
-    draw.text((98, 722), "HIGH SCORE", font=load_font(12, True), fill=muted)
+    draw.text((98, 722), "HIGH SCORE", font=load_font(14, True), fill=muted)
     draw.text((98, 741), str(high_score), font=load_font(25, True), fill=gold)
 
     # Centre profile: avatar, username, team and role. No rating here.
@@ -669,13 +681,13 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     # Impact values only: intentionally no progress bars/100-point lines.
     draw.rounded_rectangle((590, 664, 1010, 716), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
     impact1_mid_y = (664 + 716) // 2
-    draw.text((610, impact1_mid_y), "BATTING IMPACT", font=load_font(14, True),
+    draw.text((610, impact1_mid_y), "BATTING IMPACT", font=load_font(16, True),
               fill=muted, anchor="lm")
     draw.text((990, impact1_mid_y), str(bat_impact), font=load_font(26, True),
               fill=lime, anchor="rm")
     draw.rounded_rectangle((590, 731, 1010, 783), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
     impact2_mid_y = (731 + 783) // 2
-    draw.text((610, impact2_mid_y), "BOWLING IMPACT", font=load_font(14, True),
+    draw.text((610, impact2_mid_y), "BOWLING IMPACT", font=load_font(16, True),
               fill=muted, anchor="lm")
     draw.text((990, impact2_mid_y), str(bowl_impact), font=load_font(26, True),
               fill=cyan, anchor="rm")
@@ -683,7 +695,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     # Right panel: bowling stats with well-spaced paired columns.
     draw.rounded_rectangle((1105, 280, 1146, 287), radius=3, fill=cyan)
     draw.text((1105, 300), "BOWLING", font=load_font(21, True), fill=cyan)
-    draw.text((1518, 306), "WITH THE BALL", font=load_font(10, True), fill=muted, anchor="ra")
+    draw.text((1518, 306), "WITH THE BALL", font=load_font(12, True), fill=muted, anchor="ra")
     best = max(
         ((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0),
         default=(0, 0),
@@ -705,7 +717,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         x, y = bowl_col_x[col], bowl_row_y[row]
         draw.rounded_rectangle((x - 5, y - 8, x + 190, y + 61), radius=10,
                                fill=(14, 31, 50, 145))
-        draw.text((x + 5, y), label, font=load_font(13, True), fill=muted)
+        draw.text((x + 5, y), label, font=load_font(16, True), fill=muted)
         # All bowling values are white except the 5-wicket haul number, which is red.
         draw.text((x + 5, y + 23), str(value), font=load_font(26, True), fill=red if label == "5W HAULS" else white)
     draw.line((1320, 351, 1320, 682), fill=divider, width=2)
@@ -799,7 +811,7 @@ def make_recent_matches_image(player_name, rows):
     image = Image.alpha_composite(image, overlay)
     draw = ImageDraw.Draw(image)
     white = (245, 249, 255, 255)
-    muted = (159, 187, 215, 255)
+    muted = (205, 224, 242, 255)
     blue = (61, 151, 255, 255)
     draw.text((800, 100), "RECENT MATCHES", font=load_font(42, True), fill=white, anchor="mt")
     draw.text((800, 157), player_name.upper(), font=load_font(23, True), fill=blue, anchor="mt")
