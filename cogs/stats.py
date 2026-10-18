@@ -888,8 +888,7 @@ class StatsSelect(discord.ui.Select):
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=[
-                discord.SelectOption(label="Overall Stats", description="Full generated player stats image", emoji="📊", value="overall", default=True),
-                discord.SelectOption(label="Recent Matches", description="Recent five matches as an image", emoji="📋", value="recent"),
+                discord.SelectOption(label="Image", description="Show the generated stats image", emoji="🖼️", value="image"),
             ],
         )
 
@@ -900,26 +899,16 @@ class StatsSelect(discord.ui.Select):
                 "This stats menu belongs to the person who requested it.", ephemeral=True
             )
             return
-        if self.values[0] == "recent":
-            image = await asyncio.to_thread(make_recent_matches_image, view.player_name, view.rows)
-            filename = f"player_{view.member_id}_recent_matches.png"
-        else:
-            image = io.BytesIO(view.overall_image)
-            filename = f"player_{view.member_id}_stats.png"
+        image = io.BytesIO(view.overall_image)
         image.seek(0)
-        file = discord.File(image, filename=filename)
-        for option in self.options:
-            option.default = (option.value == self.values[0])
-        # Update the attachment itself; no stats embed or text is sent.
+        file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
         await interaction.response.edit_message(content=None, embed=None, attachments=[file], view=view)
 
 
 class StatsView(discord.ui.View):
-    def __init__(self, requester_id, player_name, rows, member_id, overall_image):
+    def __init__(self, requester_id, member_id, overall_image):
         super().__init__(timeout=600)
         self.requester_id = requester_id
-        self.player_name = player_name
-        self.rows = rows
         self.member_id = member_id
         self.overall_image = overall_image
         self.add_item(StatsSelect())
@@ -1271,22 +1260,59 @@ class Stats(commands.Cog):
             )
             return
 
-        filename = f"player_{member.id}_stats.png"
         image.seek(0)
         overall_image = image.getvalue()
-        file = discord.File(io.BytesIO(overall_image), filename=filename)
 
-        view = StatsView(
-            ctx.author.id,
-            member.display_name,
-            rows,
-            member.id,
-            overall_image,
+        t = totals(rows)
+        batting_points, bowling_points, total_points = fantasy_raw_points(rows, t)
+        fifties = sum(50 <= r["runs"] < 100 for r in rows)
+        hundreds = sum(r["runs"] >= 100 for r in rows)
+        ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
+        highest = max((r["runs"] for r in rows), default=0)
+        bowling_innings = sum(r["balls_bowled"] > 0 for r in rows)
+        overs_whole = t["balls_bowled"] // 6
+        overs_remainder = t["balls_bowled"] % 6
+        overs_text = f"{overs_whole}.{overs_remainder}"
+        embed = discord.Embed(
+            title=f"{member.display_name} — Stats Overview",
+            colour=discord.Colour.blurple(),
         )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(
+            name="🏏 BATTING",
+            value=(
+                f"**Innings:** `{t['matches']}`\n"
+                f"**Runs:** `{t['runs']}`\n"
+                f"**Average:** `{t['bat_avg']:.2f}`\n"
+                f"**50s:** `{fifties}`\n"
+                f"**100s:** `{hundreds}`\n"
+                f"**Highest score:** `{highest}`\n"
+                f"**Ducks:** `{ducks}`\n"
+                f"**Fantasy points:** `{batting_points:.2f}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🎯 BOWLING",
+            value=(
+                f"**Innings:** `{bowling_innings}`\n"
+                f"**Overs bowled:** `{overs_text}`\n"
+                f"**Wickets:** `{t['wickets']}`\n"
+                f"**Average:** `{t['bowl_avg']:.2f}`\n"
+                f"**3W hauls:** `{sum(3 <= r['wickets'] < 5 for r in rows)}`\n"
+                f"**5W hauls:** `{sum(5 <= r['wickets'] < 7 for r in rows)}`\n"
+                f"**Economy:** `{t['economy']:.2f}`\n"
+                f"**BFB:** `{t['balls_bowled']}`\n"
+                f"**Fantasy points:** `{bowling_points:.2f}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(name="⭐ TOTAL FANTASY POINTS", value=f"**`{total_points:.2f}`**", inline=False)
+        view = StatsView(ctx.author.id, member.id, overall_image)
 
-        # Send only the generated image and its dropdown; no stats embed/text.
+        # First response is a stats overview embed; the Image menu option swaps it for the generated image.
         await ctx.send(
-            file=file,
+            embed=embed,
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
