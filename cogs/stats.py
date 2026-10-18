@@ -1279,7 +1279,7 @@ class Stats(commands.Cog):
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(
-            name="<:cricketbat:1561294474951393360> `\BATTING",
+            name="<:cricketbat:1561294474951393360> BATTING",
             value=(
                 f"**Innings:** `{t['matches']}`\n"
                 f"**Runs:** `{t['runs']}`\n"
@@ -1293,7 +1293,7 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="<:cricketball:1561294577392951338> `__**BOWLING**__`",
+            name="<:cricketball:1561294577392951338> **__BOWLING__**",
             value=(
                 f"**Innings:** `{bowling_innings}`\n"
                 f"**Overs bowled:** `{overs_text}`\n"
