@@ -886,74 +886,31 @@ def make_recent_matches_image(player_name, rows):
 class StatsSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
-            placeholder="Choose a stats view...",
-            min_values=1,
-            max_values=1,
+            placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=[
-                discord.SelectOption(
-                    label="Overview",
-                    description="Show player stats in an embed",
-                    emoji="📊",
-                    value="overview",
-                    default=True,
-                ),
-                discord.SelectOption(
-                    label="Image",
-                    description="Show the generated stats image",
-                    emoji="🖼️",
-                    value="image",
-                ),
+                discord.SelectOption(label="Image", description="Show the generated stats image", emoji="🖼️", value="image"),
             ],
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-
         if interaction.user.id != view.requester_id:
             await interaction.response.send_message(
-                "This stats menu belongs to the person who requested it.",
-                ephemeral=True,
+                "This stats menu belongs to the person who requested it.", ephemeral=True
             )
             return
-
-        selected = self.values[0]
-
-        for option in self.options:
-            option.default = option.value == selected
-
-        if selected == "overview":
-            await interaction.response.edit_message(
-                embed=view.overview_embed,
-                attachments=[],
-                view=view,
-            )
-        else:
-            image = io.BytesIO(view.overall_image)
-            image.seek(0)
-            file = discord.File(
-                image,
-                filename=f"player_{view.member_id}_stats.png",
-            )
-            await interaction.response.edit_message(
-                embed=None,
-                attachments=[file],
-                view=view,
-            )
+        image = io.BytesIO(view.overall_image)
+        image.seek(0)
+        file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
+        await interaction.response.edit_message(content=None, embed=None, attachments=[file], view=view)
 
 
 class StatsView(discord.ui.View):
-    def __init__(
-        self,
-        requester_id,
-        member_id,
-        overall_image,
-        overview_embed,
-    ):
+    def __init__(self, requester_id, member_id, overall_image):
         super().__init__(timeout=600)
         self.requester_id = requester_id
         self.member_id = member_id
         self.overall_image = overall_image
-        self.overview_embed = overview_embed
         self.add_item(StatsSelect())
 
 
