@@ -391,11 +391,19 @@ class Utility(commands.Cog):
                 CREATE TABLE IF NOT EXISTS approved_team_post_settings (
                     guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS approved_team_posted (
-                    guild_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
-                    message_id INTEGER, PRIMARY KEY(guild_id, team_id)
-                );
             """)
+            # Track posts per channel, so a test post in one channel doesn't block
+            # posting the same approved teams in the real announcement channel.
+            posted_columns = [r[1] for r in conn.execute("PRAGMA table_info(approved_team_posted)").fetchall()]
+            if posted_columns and "channel_id" not in posted_columns:
+                conn.execute("ALTER TABLE approved_team_posted RENAME TO approved_team_posted_legacy")
+            conn.execute("""CREATE TABLE IF NOT EXISTS approved_team_posted (
+                guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
+                message_id INTEGER, PRIMARY KEY(guild_id, channel_id, team_id)
+            )""")
+            # Legacy test posts have no reliable channel-specific record; don't let
+            # them block posting in the selected channel.
+            conn.execute("DROP TABLE IF EXISTS approved_team_posted_legacy")
             rows = conn.execute(
                 "SELECT id, name, captain_id, logo_url FROM registered_teams "
                 "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
@@ -426,8 +434,8 @@ class Utility(commands.Cog):
         # by alphabetical position (which could label a newly posted team "3").
         conn = sqlite3.connect("team_registration.db")
         already_posted = conn.execute(
-            "SELECT COUNT(*) FROM approved_team_posted WHERE guild_id=?",
-            (guild_id,),
+            "SELECT COUNT(*) FROM approved_team_posted WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
         ).fetchone()[0]
         conn.close()
 
@@ -435,8 +443,8 @@ class Utility(commands.Cog):
         for team in rows:
             conn = sqlite3.connect("team_registration.db")
             exists = conn.execute(
-                "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND team_id=?",
-                (guild_id, int(team["id"])),
+                "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND channel_id=? AND team_id=?",
+                (guild_id, channel_id, int(team["id"])),
             ).fetchone()
             conn.close()
             if exists:
@@ -463,8 +471,8 @@ class Utility(commands.Cog):
                 message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
                 conn = sqlite3.connect("team_registration.db")
                 conn.execute(
-                    "INSERT OR IGNORE INTO approved_team_posted(guild_id, team_id, message_id) VALUES(?,?,?)",
-                    (guild_id, int(team["id"]), message.id),
+                    "INSERT OR IGNORE INTO approved_team_posted(guild_id, channel_id, team_id, message_id) VALUES(?,?,?,?)",
+                    (guild_id, channel_id, int(team["id"]), message.id),
                 )
                 conn.commit()
                 conn.close()

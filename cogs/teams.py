@@ -288,11 +288,17 @@ class TeamRegistration(commands.Cog):
         CREATE TABLE IF NOT EXISTS approved_team_post_settings (
             guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS approved_team_posted (
-            guild_id INTEGER NOT NULL, team_id INTEGER NOT NULL, message_id INTEGER,
-            PRIMARY KEY(guild_id, team_id)
-        );
         """)
+        # Migrate announcement tracking to be channel-specific. This allows a
+        # previous test-channel post to be repeated in the real announcement channel.
+        posted_columns = [r[1] for r in self.db.execute("PRAGMA table_info(approved_team_posted)").fetchall()]
+        if posted_columns and "channel_id" not in posted_columns:
+            self.db.execute("ALTER TABLE approved_team_posted RENAME TO approved_team_posted_legacy")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS approved_team_posted (
+            guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
+            message_id INTEGER, PRIMARY KEY(guild_id, channel_id, team_id)
+        )""")
+        self.db.execute("DROP TABLE IF EXISTS approved_team_posted_legacy")
         self.db.commit()
         for row in self.db.execute("SELECT id FROM team_join_requests WHERE status='pending'").fetchall():
             self.bot.add_view(JoinRequestView(self, row["id"]))
@@ -1093,8 +1099,8 @@ class TeamRegistration(commands.Cog):
                     (int(interaction.guild_id),),
                 ).fetchone()
                 already_posted = self.db.execute(
-                    "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND team_id=?",
-                    (int(interaction.guild_id), int(team_id)),
+                    "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND channel_id=? AND team_id=?",
+                    (int(interaction.guild_id), int(settings["channel_id"]), int(team_id)),
                 ).fetchone()
                 if settings and not already_posted:
                     channel = self.bot.get_channel(int(settings["channel_id"]))
@@ -1125,8 +1131,8 @@ class TeamRegistration(commands.Cog):
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         self.db.execute(
-                            "INSERT OR IGNORE INTO approved_team_posted(guild_id, team_id, message_id) VALUES(?,?,?)",
-                            (int(interaction.guild_id), int(team_id), int(posted_message.id)),
+                            "INSERT OR IGNORE INTO approved_team_posted(guild_id, channel_id, team_id, message_id) VALUES(?,?,?,?)",
+                            (int(interaction.guild_id), int(settings["channel_id"]), int(team_id), int(posted_message.id)),
                         )
                         self.db.commit()
             except (sqlite3.Error, discord.HTTPException, KeyError, TypeError, ValueError):
