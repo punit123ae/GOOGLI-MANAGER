@@ -118,7 +118,7 @@ def fantasy_raw_points(rows, t=None):
     fifties = sum(50 <= r["runs"] < 100 for r in rows)
     hundreds = sum(r["runs"] >= 100 for r in rows)
     ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
-    run_bonus = t["runs"] / 10
+    run_bonus = t["runs"] / 10  # Confirmed: total runs divided by 10
     batting_raw = (
         50 + (t["bat_avg"] * 2) + run_bonus + (hundreds * 10)
         + (fifties * 5) - (ducks * 10) - (t["balls_faced"] * 0.1)
@@ -143,9 +143,10 @@ def fantasy_raw_points(rows, t=None):
 
 
 def impact_scores(rows, t=None):
-    """Convert raw points to impact ratings from 0 to 99, preserving order."""
+    """Impact ratings follow their respective raw points, bounded from 0 to 99."""
     batting_raw, bowling_raw, _ = fantasy_raw_points(rows, t)
-    # Clamp raw points directly: negative/low raw points stay low; 99 is the cap.
+    # Negative raw points produce 0 impact; higher raw points increase impact
+    # until the required maximum of 99 is reached.
     bat_score = max(0, min(99, round(batting_raw)))
     bowl_score = max(0, min(99, round(bowling_raw)))
     return bat_score, bowl_score
@@ -539,7 +540,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     draw = ImageDraw.Draw(image)
 
     white = (245, 249, 255, 255)
-    muted = (205, 224, 242, 255)
+    muted = (232, 242, 253, 255)
     blue = (61, 151, 255, 255)
     lime = (190, 255, 48, 255)
     cyan = (64, 220, 235, 255)
@@ -584,7 +585,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     draw.rounded_rectangle((55, 116, 300, 122), radius=3, fill=blue)
 
     # Season snapshot. Total fantasy points are shown here, not over the avatar.
-    draw.text((78, 155), "SEASON SNAPSHOT", font=load_font(14, True), fill=muted)
+    draw.text((78, 155), "SEASON SNAPSHOT", font=load_font(16, True), fill=muted)
     snapshot = [
         ("MATCHES", t["matches"], blue),
         ("RUNS", t["runs"], gold),
@@ -600,7 +601,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
         # Keep each snapshot label and its value on one horizontal line.
         # Vertically centre both inside the card and align the value to the right.
         card_mid_y = (178 + 222) // 2
-        draw.text((x + 16, card_mid_y), label, font=load_font(15, True),
+        draw.text((x + 16, card_mid_y), label, font=load_font(16, True),
                   fill=muted, anchor="lm")
         draw.text((x + card_w - 16, card_mid_y), str(value),
                   font=load_font(22, True), fill=accent, anchor="rm")
@@ -635,7 +636,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     # High score is deliberately alone across the bottom of the batting panel.
     high_score = max((r["runs"] for r in rows), default=0)
     draw.rounded_rectangle((82, 713, 492, 775), radius=12, fill=(14, 31, 50, 175), outline=(44, 82, 120, 150), width=1)
-    draw.text((98, 722), "HIGH SCORE", font=load_font(14, True), fill=muted)
+    draw.text((98, 722), "HIGH SCORE", font=load_font(16, True), fill=muted)
     draw.text((98, 741), str(high_score), font=load_font(25, True), fill=gold)
 
     # Centre profile: avatar, username, team and role. No rating here.
@@ -811,7 +812,7 @@ def make_recent_matches_image(player_name, rows):
     image = Image.alpha_composite(image, overlay)
     draw = ImageDraw.Draw(image)
     white = (245, 249, 255, 255)
-    muted = (205, 224, 242, 255)
+    muted = (232, 242, 253, 255)
     blue = (61, 151, 255, 255)
     draw.text((800, 100), "RECENT MATCHES", font=load_font(42, True), fill=white, anchor="mt")
     draw.text((800, 157), player_name.upper(), font=load_font(23, True), fill=blue, anchor="mt")
