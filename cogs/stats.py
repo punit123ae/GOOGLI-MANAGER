@@ -1279,7 +1279,7 @@ class Stats(commands.Cog):
         )
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(
-            name="🏏 BATTING",
+            name="<:cricketbat:1561294474951393360> `\BATTING",
             value=(
                 f"**Innings:** `{t['matches']}`\n"
                 f"**Runs:** `{t['runs']}`\n"
@@ -1293,7 +1293,7 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="🎯 BOWLING",
+            name="<:cricketball:1561294577392951338> `\BOWLING",
             value=(
                 f"**Innings:** `{bowling_innings}`\n"
                 f"**Overs bowled:** `{overs_text}`\n"
@@ -1307,7 +1307,7 @@ class Stats(commands.Cog):
             ),
             inline=True,
         )
-        embed.add_field(name="⭐ TOTAL FANTASY POINTS", value=f"**`{total_points:.2f}`**", inline=False)
+        embed.add_field(name="<:Crown:1561296003104243803> TOTAL FANTASY POINTS", value=f"**`{total_points:.2f}`**", inline=False)
         view = StatsView(ctx.author.id, member.id, overall_image)
 
         # First response is a stats overview embed; the Image menu option swaps it for the generated image.
