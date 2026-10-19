@@ -1,0 +1,604 @@
+import asyncio
+import re
+import sqlite3
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+import discord
+from discord.ext import commands
+
+class ConfirmDeleteAllView(discord.ui.View):
+    def __init__(self, cog, guild_id, author_id):
+        super().__init__(timeout=30)
+        self.cog, self.guild_id, self.author_id = cog, guild_id, author_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the administrator who started this action can confirm it.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm deletion", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        if not await self.cog._command_allowed(interaction, "deleteallteams"):
+            await interaction.response.send_message("You are not allowed to use this command.", ephemeral=True)
+            return
+        count = self.cog.db.execute(
+            "SELECT COUNT(*) FROM registered_teams WHERE guild_id=?", (self.guild_id,)
+        ).fetchone()[0]
+        self.cog.db.execute("DELETE FROM team_join_requests WHERE guild_id=?", (self.guild_id,))
+        self.cog.db.execute(
+            "DELETE FROM team_players WHERE team_id IN (SELECT id FROM registered_teams WHERE guild_id=?)",
+            (self.guild_id,)
+        )
+        self.cog.db.execute("DELETE FROM registered_teams WHERE guild_id=?", (self.guild_id,))
+        self.cog.db.commit()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"Deleted **{count} team(s)** from this server's database. Other servers' teams were not affected.",
+            view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Deletion cancelled. No teams were deleted.", view=self)
+
+class TeamApprovalView(discord.ui.View):
+    def __init__(self, cog, team_id):
+        super().__init__(timeout=None)
+        self.cog, self.team_id = cog, team_id
+
+    async def _authorized(self, interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This button can only be used inside the server.", ephemeral=True)
+            return False
+        if not isinstance(interaction.channel, discord.abc.GuildChannel):
+            await interaction.response.send_message("This is not a valid approval channel.", ephemeral=True)
+            return False
+        perms = interaction.channel.permissions_for(interaction.user)
+        if not (perms.view_channel and (perms.send_messages or perms.manage_messages or interaction.user.guild_permissions.administrator)):
+            await interaction.response.send_message("You don't have permission to review applications in this channel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="teamreg:accept")
+    async def accept(self, interaction, button):
+        if await self._authorized(interaction):
+            await self.cog.decide_application(interaction, self.team_id, "approved")
+
+    @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, custom_id="teamreg:reject")
+    async def reject(self, interaction, button):
+        if await self._authorized(interaction):
+            await self.cog.decide_application(interaction, self.team_id, "rejected")
+
+class TeamListView(discord.ui.View):
+    def __init__(self, cog, guild_id, page=0):
+        super().__init__(timeout=300)
+        self.cog, self.guild_id, self.page = cog, guild_id, page
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        self.clear_items()
+        prev = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, disabled=self.page <= 0)
+        nxt = discord.ui.Button(label="Next", style=discord.ButtonStyle.primary)
+        prev.callback, nxt.callback = self.previous_page, self.next_page
+        self.add_item(prev)
+        self.add_item(nxt)
+
+    async def _show(self, interaction, page):
+        total = self.cog.db.execute(
+            "SELECT COUNT(*) FROM registered_teams WHERE guild_id=? AND status='approved'",
+            (self.guild_id,)
+        ).fetchone()[0]
+        self.page = max(0, min(page, max(0, (total - 1) // 10)))
+        self._sync_buttons()
+        await interaction.response.edit_message(
+            embed=self.cog.make_teamlist_embed(self.guild_id, self.page), view=self
+        )
+
+    async def previous_page(self, interaction):
+        await self._show(interaction, self.page - 1)
+
+    async def next_page(self, interaction):
+        await self._show(interaction, self.page + 1)
+
+class JoinRequestView(discord.ui.View):
+    def __init__(self, cog, request_id):
+        super().__init__(timeout=None)
+        self.cog, self.request_id = cog, request_id
+        accept = discord.ui.Button(label="Accept", style=discord.ButtonStyle.success, custom_id=f"teamjoin:accept:{request_id}")
+        deny = discord.ui.Button(label="Deny", style=discord.ButtonStyle.danger, custom_id=f"teamjoin:deny:{request_id}")
+        accept.callback, deny.callback = self.accept_request, self.deny_request
+        self.add_item(accept)
+        self.add_item(deny)
+
+    async def _decide(self, interaction, decision):
+        row = self.cog.db.execute(
+            "SELECT r.*, t.name AS team_name, t.captain_id, t.status AS team_status "
+            "FROM team_join_requests r JOIN registered_teams t ON t.id=r.team_id WHERE r.id=?",
+            (self.request_id,)
+        ).fetchone()
+        if not row or row["status"] != "pending":
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(content="This request has already been handled or cancelled.", embed=None, view=self)
+            return
+        if interaction.user.id != row["captain_id"]:
+            await interaction.response.send_message("Only this team's captain can respond to the request.", ephemeral=True)
+            return
+        if row["team_status"] != "approved":
+            await interaction.response.send_message("This team is no longer active.", ephemeral=True)
+            return
+        if decision == "accepted":
+            if self.cog._membership(row["guild_id"], row["user_id"]):
+                self.cog.db.execute("UPDATE team_join_requests SET status='denied' WHERE id=?", (self.request_id,))
+                self.cog.db.commit()
+                for child in self.children:
+                    child.disabled = True
+                await interaction.response.edit_message(content="This player is already in a team. Request closed.", embed=None, view=self)
+                return
+            maximum = self.cog._max_players(row["guild_id"])
+            if self.cog._team_player_count(row["team_id"]) >= maximum:
+                await interaction.response.send_message(
+                    f"This team has reached its maximum of {maximum} players. The request has not been accepted.",
+                    ephemeral=True
+                )
+                return
+            self.cog.db.execute(
+                "UPDATE team_join_requests SET status='accepted' WHERE id=? AND status='pending'",
+                (self.request_id,)
+            )
+            try:
+                self.cog.db.execute(
+                    "INSERT INTO team_players(team_id,user_id,added_by,added_at) VALUES(?,?,?,?)",
+                    (row["team_id"], row["user_id"], row["captain_id"], datetime.now(timezone.utc).isoformat())
+                )
+            except sqlite3.IntegrityError:
+                pass
+        else:
+            self.cog.db.execute(
+                "UPDATE team_join_requests SET status='denied' WHERE id=? AND status='pending'",
+                (self.request_id,)
+            )
+        self.cog.db.commit()
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=f"Request **{decision}** by {interaction.user.name}.", embed=None, view=self)
+        if decision == "accepted":
+            # Join requests are answered in the captain's DMs, so interaction.guild
+            # is normally None. Resolve the original server from the saved request.
+            guild = self.cog.bot.get_guild(row["guild_id"])
+            if guild is not None:
+                member = guild.get_member(row["user_id"])
+                if member is None:
+                    try:
+                        member = await guild.fetch_member(row["user_id"])
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        member = None
+                if member is not None:
+                    await self.cog._assign_team_role(guild, row["team_id"], member)
+        try:
+            user = self.cog.bot.get_user(row["user_id"]) or await self.cog.bot.fetch_user(row["user_id"])
+            await self.cog._dm(user, f"Your request to join **{row['team_name']}** was {'accepted' if decision == 'accepted' else 'denied'} by the captain.")
+        except discord.HTTPException:
+            pass
+
+    async def accept_request(self, interaction):
+        await self._decide(interaction, "accepted")
+
+    async def deny_request(self, interaction):
+        await self._decide(interaction, "denied")
+
+class LeaveTeamConfirmView(discord.ui.View):
+    def __init__(self, cog, user_id, team_id, guild_id, team_name):
+        super().__init__(timeout=60)
+        self.cog, self.user_id, self.team_id, self.guild_id, self.team_name = cog, user_id, team_id, guild_id, team_name
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Only the player who started this action can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, leave team", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        team = self.cog._membership(self.guild_id, self.user_id)
+        if not team or team["id"] != self.team_id:
+            await interaction.response.edit_message(content="You're no longer in that team.", view=None)
+            return
+        if self.user_id in (team["captain_id"], team["vice_captain_id"]):
+            await interaction.response.edit_message(content="Captains and vice-captains cannot leave their team.", view=None)
+            return
+        self.cog.db.execute("DELETE FROM team_players WHERE team_id=? AND user_id=?", (self.team_id, self.user_id))
+        self.cog.db.commit()
+        # Remove the team's configured role when a player leaves.
+        await self.cog._remove_team_role(interaction.guild, self.team_id, interaction.user)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"You have left **{self.team_name}**. You can now join or create another team.", view=self
+        )
+
+    @discord.ui.button(label="No, stay", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content=f"Cancelled. You're still in **{self.team_name}**.", view=self)
+
+
+class TeamCore:
+    """Shared database, permission, lookup, and utility methods for team commands."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        self.db = sqlite3.connect("team_registration.db")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")
+        self._init_db()
+
+    def cog_unload(self):
+        self.db.close()
+
+    def _init_db(self):
+        self.db.executescript("""
+        CREATE TABLE IF NOT EXISTS team_settings (guild_id INTEGER PRIMARY KEY, approval_channel_id INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS registered_teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, name TEXT NOT NULL,
+            name_key TEXT NOT NULL, captain_id INTEGER NOT NULL, vice_captain_id INTEGER,
+            logo_url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', applicant_id INTEGER NOT NULL,
+            approval_channel_id INTEGER, approval_message_id INTEGER, created_at TEXT NOT NULL,
+            decided_by INTEGER, UNIQUE(guild_id, name_key)
+        );
+        CREATE TABLE IF NOT EXISTS team_players (
+            team_id INTEGER NOT NULL, user_id INTEGER NOT NULL, added_by INTEGER NOT NULL, added_at TEXT NOT NULL,
+            PRIMARY KEY(team_id, user_id),
+            FOREIGN KEY(team_id) REFERENCES registered_teams(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS team_join_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', message_id INTEGER,
+            channel_id INTEGER, created_at TEXT NOT NULL,
+            FOREIGN KEY(team_id) REFERENCES registered_teams(id) ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS one_pending_join_per_user
+        ON team_join_requests(guild_id, user_id) WHERE status='pending';
+        CREATE TABLE IF NOT EXISTS team_limits (guild_id INTEGER PRIMARY KEY, max_players INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS team_role_settings (
+            team_id INTEGER PRIMARY KEY, role_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(team_id) REFERENCES registered_teams(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS server_team_role_settings (guild_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS team_feature_toggles (
+            guild_id INTEGER NOT NULL, feature TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY(guild_id, feature)
+        );
+        CREATE TABLE IF NOT EXISTS approved_team_post_settings (
+            guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
+        );
+        """)
+        # Assign each team a permanent sequence number based on its creation time.
+        # Existing teams are numbered oldest-first once; future teams receive the next number.
+        team_columns = [r[1] for r in self.db.execute("PRAGMA table_info(registered_teams)").fetchall()]
+        if "team_number" not in team_columns:
+            self.db.execute("ALTER TABLE registered_teams ADD COLUMN team_number INTEGER")
+        guild_ids = [r[0] for r in self.db.execute("SELECT DISTINCT guild_id FROM registered_teams").fetchall()]
+        for guild_id in guild_ids:
+            existing = self.db.execute(
+                "SELECT id FROM registered_teams WHERE guild_id=? AND team_number IS NOT NULL",
+                (guild_id,),
+            ).fetchall()
+            next_number = max((int(r[0]) for r in existing), default=0) + 1
+            missing = self.db.execute(
+                "SELECT id FROM registered_teams WHERE guild_id=? AND team_number IS NULL ORDER BY created_at ASC, id ASC",
+                (guild_id,),
+            ).fetchall()
+            for team_row in missing:
+                self.db.execute(
+                    "UPDATE registered_teams SET team_number=? WHERE id=? AND team_number IS NULL",
+                    (next_number, int(team_row["id"])),
+                )
+                next_number += 1
+
+        # Rejected applications should not reserve their team names. Keep the
+        # rejected records for history, but give their unique name keys an
+        # archival value so the same name can be submitted again.
+        rejected_rows = self.db.execute(
+            "SELECT id, name_key FROM registered_teams WHERE status='rejected'"
+        ).fetchall()
+        for rejected_row in rejected_rows:
+            archived_key = f"__rejected__{int(rejected_row['id'])}__{rejected_row['name_key']}"
+            self.db.execute(
+                "UPDATE registered_teams SET name_key=? WHERE id=?",
+                (archived_key, int(rejected_row['id'])),
+            )
+
+        # Migrate announcement tracking to be channel-specific. This allows a
+        # previous test-channel post to be repeated in the real announcement channel.
+        posted_columns = [r[1] for r in self.db.execute("PRAGMA table_info(approved_team_posted)").fetchall()]
+        if posted_columns and "channel_id" not in posted_columns:
+            self.db.execute("ALTER TABLE approved_team_posted RENAME TO approved_team_posted_legacy")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS approved_team_posted (
+            guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, team_id INTEGER NOT NULL,
+            message_id INTEGER, PRIMARY KEY(guild_id, channel_id, team_id)
+        )""")
+        self.db.execute("DROP TABLE IF EXISTS approved_team_posted_legacy")
+        self.db.commit()
+        for row in self.db.execute("SELECT id FROM team_join_requests WHERE status='pending'").fetchall():
+            self.bot.add_view(JoinRequestView(self, row["id"]))
+
+    @staticmethod
+    def _key(name):
+        return " ".join(name.casefold().split())
+
+    def _team(self, guild_id, name):
+        return self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND name_key=?",
+            (guild_id, self._key(name))
+        ).fetchone()
+
+    def _resolve_team(self, guild_id, query):
+        key = self._key(query)
+        if len(key) < 4:
+            return None, "short"
+        exact = self._team(guild_id, key)
+        if exact and exact["status"] == "approved":
+            return exact, None
+        rows = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+            (guild_id,)
+        ).fetchall()
+        matches = [r for r in rows if self._key(r["name"]).startswith(key)]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return matches, "multiple"
+        return None, "missing"
+
+    def _membership(self, guild_id, user_id):
+        return self.db.execute(
+            "SELECT t.* FROM team_players p JOIN registered_teams t ON t.id=p.team_id "
+            "WHERE t.guild_id=? AND t.status='approved' AND p.user_id=? "
+            "UNION SELECT t.* FROM registered_teams t WHERE t.guild_id=? AND t.status='approved' "
+            "AND (t.captain_id=? OR t.vice_captain_id=?) LIMIT 1",
+            (guild_id, user_id, guild_id, user_id, user_id)
+        ).fetchone()
+
+    def _max_players(self, guild_id):
+        row = self.db.execute("SELECT max_players FROM team_limits WHERE guild_id=?", (guild_id,)).fetchone()
+        return row["max_players"] if row else 18
+
+    def _team_player_ids(self, team_id):
+        team = self.db.execute("SELECT captain_id,vice_captain_id FROM registered_teams WHERE id=?", (team_id,)).fetchone()
+        if not team:
+            return set()
+        ids = {team["captain_id"]}
+        if team["vice_captain_id"] is not None:
+            ids.add(team["vice_captain_id"])
+        ids.update(r["user_id"] for r in self.db.execute("SELECT user_id FROM team_players WHERE team_id=?", (team_id,)).fetchall())
+        return ids
+
+    def _team_player_count(self, team_id):
+        return len(self._team_player_ids(team_id))
+
+    async def _command_allowed(self, ctx, command_name):
+        """Delegate command permissions to the shared utility cog."""
+        utility = self.bot.get_cog("Utility")
+        if utility is None:
+            # Fail closed until the shared permission system is loaded.
+            return False
+        return await utility.command_allowed(ctx, command_name)
+
+    async def _get_member(self, guild, value):
+        value = value.strip()
+        match = re.fullmatch(r"<@!?(\d+)>|@(\d+)|(\d+)", value)
+        if match:
+            uid = int(next(g for g in match.groups() if g))
+            member = guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(uid)
+                except (discord.NotFound, discord.HTTPException):
+                    return None
+            return member
+        lowered = value.casefold()
+        for member in guild.members:
+            if member.name.casefold() == lowered or member.display_name.casefold() == lowered:
+                return member
+        try:
+            async for member in guild.fetch_members(limit=None):
+                if member.name.casefold() == lowered or member.display_name.casefold() == lowered:
+                    return member
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return None
+
+    async def _dm(self, user, message):
+        try:
+            await user.send(message)
+            return True
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+
+    def _username(self, guild, user_id):
+        member = guild.get_member(user_id) if guild else None
+        return member.name if member else str(user_id)
+
+    def _feature_enabled(self, guild_id, feature):
+        row = self.db.execute(
+            "SELECT enabled FROM team_feature_toggles WHERE guild_id=? AND feature=?", (guild_id, feature)
+        ).fetchone()
+        return bool(row["enabled"]) if row else True
+
+    async def _feature_blocked(self, ctx, feature):
+        if self._feature_enabled(ctx.guild.id, feature):
+            return False
+        await ctx.reply("This feature has been toggled off by an administrator.", mention_author=False)
+        return True
+
+    async def _assign_team_role(self, guild, team_id, member):
+        global_setting = self.db.execute(
+            "SELECT enabled FROM server_team_role_settings WHERE guild_id=?", (guild.id,)
+        ).fetchone()
+        if global_setting and not global_setting["enabled"]:
+            return
+        setting = self.db.execute(
+            "SELECT role_id,enabled FROM team_role_settings WHERE team_id=?", (team_id,)
+        ).fetchone()
+        if not setting or not setting["enabled"]:
+            return
+        role = guild.get_role(setting["role_id"])
+        if role is None or role in member.roles:
+            return
+        me = guild.me
+        if not me or not me.guild_permissions.manage_roles or role >= me.top_role:
+            return
+        try:
+            await member.add_roles(role, reason="Automatic team role assignment")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _remove_team_role(self, guild, team_id, member):
+        if guild is None:
+            return
+        setting = self.db.execute("SELECT role_id FROM team_role_settings WHERE team_id=?", (team_id,)).fetchone()
+        if not setting:
+            return
+        role = guild.get_role(setting["role_id"])
+        me = guild.me
+        if role and role in member.roles and me and me.guild_permissions.manage_roles and role < me.top_role:
+            try:
+                await member.remove_roles(role, reason="Player left team")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+    def make_teamlist_embed(self, guild_id, page):
+        rows = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' "
+            "ORDER BY team_number ASC, created_at ASC, id ASC LIMIT 10 OFFSET ?",
+            (guild_id, page * 10)
+        ).fetchall()
+        total = self.db.execute(
+            "SELECT COUNT(*) FROM registered_teams WHERE guild_id=? AND status='approved'", (guild_id,)
+        ).fetchone()[0]
+        embed = discord.Embed(
+            title="🏏 Teams • KASHMIR TITANS",
+            description=f"Page {page + 1} of {max(1, (total + 9) // 10)}",
+            color=discord.Color.from_rgb(55, 150, 255)
+        )
+        if not rows:
+            embed.description += "\n\nNo approved teams yet."
+        guild = self.bot.get_guild(guild_id)
+        for index, team in enumerate(rows, start=page * 10 + 1):
+            count = self._team_player_count(team["id"])
+            captain = self._username(guild, team["captain_id"])
+            # Requested format: numbered teams in inline code; no cricket-bat emoji per team.
+            embed.add_field(
+                name=f"`{index}.` {team['name']}",
+                value=f"**Captain:** {captain}\n**Players:** {count}/{self._max_players(guild_id)}",
+                inline=False
+            )
+        if guild and guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        return embed
+
+    async def decide_application(self, interaction, team_id, decision):
+        row = self.db.execute(
+            "SELECT * FROM registered_teams WHERE id=? AND guild_id=?", (team_id, interaction.guild_id)
+        ).fetchone()
+        if not row:
+            await interaction.response.send_message("This application could not be found.", ephemeral=True)
+            return
+        if row["status"] != "pending":
+            await interaction.response.send_message(f"This application was already {row['status']}.", ephemeral=True)
+            return
+        self.db.execute(
+            "UPDATE registered_teams SET status=?,decided_by=? WHERE id=? AND status='pending'",
+            (decision, interaction.user.id, team_id)
+        )
+        if decision == "approved":
+            self.db.execute(
+                "INSERT OR IGNORE INTO team_players(team_id,user_id,added_by,added_at) VALUES(?,?,?,?)",
+                (team_id, row["captain_id"], interaction.user.id, datetime.now(timezone.utc).isoformat())
+            )
+        self.db.commit()
+        # Announce newly approved teams in the owner-selected channel. Keep this
+        # isolated so a Discord posting failure never blocks the approval itself.
+        if decision == "approved":
+            try:
+                settings = self.db.execute(
+                    "SELECT channel_id FROM approved_team_post_settings WHERE guild_id=?",
+                    (int(interaction.guild_id),),
+                ).fetchone()
+                already_posted = self.db.execute(
+                    "SELECT 1 FROM approved_team_posted WHERE guild_id=? AND channel_id=? AND team_id=?",
+                    (int(interaction.guild_id), int(settings["channel_id"]), int(team_id)),
+                ).fetchone()
+                if settings and not already_posted:
+                    channel = self.bot.get_channel(int(settings["channel_id"]))
+                    if channel is None:
+                        channel = await self.bot.fetch_channel(int(settings["channel_id"]))
+                    if isinstance(channel, discord.TextChannel) and channel.guild.id == int(interaction.guild_id):
+                        approved = self.db.execute(
+                            "SELECT id, name, captain_id, logo_url, team_number FROM registered_teams "
+                            "WHERE guild_id=? AND status='approved' ORDER BY team_number ASC, created_at ASC, id ASC",
+                            (int(interaction.guild_id),),
+                        ).fetchall()
+                        # Match +teamlist numbering: position among approved teams only.
+                        number = next(
+                            (index for index, approved_team in enumerate(approved, start=1)
+                             if int(approved_team["id"]) == int(team_id)),
+                            len(approved),
+                        )
+                        safe_name = discord.utils.escape_markdown(str(row["name"] or "Unknown Team"))
+                        captain_id = int(row["captain_id"])
+                        logo_url = str(row["logo_url"] or "").strip()
+                        team_embed = discord.Embed(
+                            title="Kashmir Titans S1",
+                            description=(f"{number}. **__Team name:__** **`{safe_name}`**\n"
+                                         f"**__Team captain:__** <@{captain_id}>"),
+                            color=discord.Color.from_rgb(55, 150, 255),
+                        )
+                        if logo_url.startswith(("https://", "http://")):
+                            team_embed.set_thumbnail(url=logo_url)
+                            team_embed.set_image(url=logo_url)
+                        # Mention is shown in the embed only. Discord won't notify for embed mentions.
+                        posted_message = await channel.send(
+                            embed=team_embed,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO approved_team_posted(guild_id, channel_id, team_id, message_id) VALUES(?,?,?,?)",
+                            (int(interaction.guild_id), int(settings["channel_id"]), int(team_id), int(posted_message.id)),
+                        )
+                        self.db.commit()
+            except (sqlite3.Error, discord.HTTPException, KeyError, TypeError, ValueError):
+                pass
+        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else discord.Embed(title="Team Application")
+        embed.color = discord.Color.green() if decision == "approved" else discord.Color.red()
+        embed.add_field(name="Decision", value=f"{decision.title()} by {interaction.user.name}", inline=False)
+        await interaction.response.edit_message(embed=embed, view=None)
+        applicant = self.bot.get_user(row["applicant_id"])
+        if applicant is None:
+            try:
+                applicant = await self.bot.fetch_user(row["applicant_id"])
+            except discord.HTTPException:
+                applicant = None
+        if applicant:
+            msg = f"Congratulations! Your team **{row['name']}** has been approved. You are now its captain." if decision == "approved" else f"Your application for **{row['name']}** was rejected."
+            await self._dm(applicant, msg)
+
+
+from .teams2 import TeamCommandsA
+from .teams3 import TeamCommandsB
+
+class TeamRegistration(TeamCommandsA, TeamCommandsB, TeamCore, commands.Cog):
+    """Team registration and roster management."""
+    pass
+
+async def setup(bot):
+    await bot.add_cog(TeamRegistration(bot))
+
