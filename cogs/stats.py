@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
+from types import SimpleNamespace
 
 import discord
 from discord.ext import commands
@@ -1344,8 +1345,37 @@ class Stats(commands.Cog):
         )
 
     @commands.command(name="stats")
-    async def player_stats(self, ctx, member: discord.Member = None):
-        member = member or ctx.author
+    async def player_stats(self, ctx, user_id: str = None):
+        # Accept a server member, a mention, or a numeric Discord user ID.
+        if not user_id:
+            member = ctx.author
+        else:
+            cleaned_id = user_id.strip().strip("<@!>")
+            if not cleaned_id.isdigit():
+                await ctx.reply(
+                    "Use `+stats`, `+stats @user`, or `+stats USER_ID`.",
+                    mention_author=False,
+                )
+                return
+            target_id = int(cleaned_id)
+            member = ctx.guild.get_member(target_id)
+            if member is None:
+                user = self.bot.get_user(target_id)
+                if user is None:
+                    try:
+                        user = await self.bot.fetch_user(target_id)
+                    except (discord.NotFound, discord.HTTPException):
+                        user = None
+                # A departed user may no longer be a Guild Member. Keep the
+                # same rendering interface while using their stored ID/stats.
+                member = SimpleNamespace(
+                    id=target_id,
+                    name=getattr(user, "name", f"User {target_id}"),
+                    display_name=getattr(user, "name", f"User {target_id}"),
+                    mention=f"<@{target_id}>",
+                    display_avatar=getattr(user, "display_avatar", None),
+                    guild=ctx.guild,
+                )
 
         rows = self.get_player_rows(ctx.guild.id, member.id)
         if not rows:
@@ -1359,9 +1389,10 @@ class Stats(commands.Cog):
         avatar = guild_icon = None
 
         try:
-            avatar = await member.display_avatar.replace(
-                size=256, static_format="png"
-            ).read()
+            if member.display_avatar is not None:
+                avatar = await member.display_avatar.replace(
+                    size=256, static_format="png"
+                ).read()
         except Exception:
             pass
 
@@ -1428,7 +1459,8 @@ class Stats(commands.Cog):
             description=f"**MATCHES RECORDED:** `{t['matches']}`",
             colour=discord.Colour.blurple(),
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
+        if member.display_avatar is not None:
+            embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(
             name="<:cricketbat:1561294474951393360> **__BATTING__**",
             value=(
@@ -1494,7 +1526,8 @@ class Stats(commands.Cog):
             ),
             colour=discord.Colour.blurple(),
         )
-        deep_embed.set_thumbnail(url=member.display_avatar.url)
+        if member.display_avatar is not None:
+            deep_embed.set_thumbnail(url=member.display_avatar.url)
         deep_embed.add_field(
             name="<:cricketbat:1561294474951393360> **__BATTING__**",
             value=(
