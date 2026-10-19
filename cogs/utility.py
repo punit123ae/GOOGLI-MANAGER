@@ -109,6 +109,13 @@ class Utility(commands.Cog):
             channel_id INTEGER NOT NULL,
             PRIMARY KEY (guild_id, channel_id)
         );
+        CREATE TABLE IF NOT EXISTS bot_bans (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL DEFAULT '',
+            banned_by INTEGER NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            banned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         self.db.commit()
         self.bot.add_check(self.global_command_check)
@@ -163,10 +170,26 @@ class Utility(commands.Cog):
             return has_any_whitelisted_role(self.bot, guild_id, member)
         return has_command_whitelist(self.bot, guild_id, member, name)
 
+    def is_bot_banned(self, user_id):
+        return self.db.execute(
+            "SELECT 1 FROM bot_bans WHERE user_id=?", (int(user_id),)
+        ).fetchone() is not None
+
     async def global_command_check(self, ctx):
-        if not ctx.guild:
-            return True
+        # Bot bans apply across every server and in DMs, not just one guild.
         if int(ctx.author.id) == BOT_OWNER_ID:
+            return True
+        if self.is_bot_banned(ctx.author.id):
+            try:
+                await ctx.reply(
+                    "You are banned from using this bot's commands.",
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                pass
+            return False
+        if not ctx.guild:
             return True
         name = _normalise_command_name(getattr(ctx.command, "name", ""))
         if self.is_channel_disabled(ctx.guild.id, ctx.channel.id):
@@ -187,9 +210,18 @@ class Utility(commands.Cog):
             if not result:
                 return False
 
-        if interaction.guild_id is None:
-            return True
         if int(interaction.user.id) == BOT_OWNER_ID:
+            return True
+        if self.is_bot_banned(interaction.user.id):
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.send_message(
+                        "You are banned from using this bot's commands.", ephemeral=True
+                    )
+                except discord.HTTPException:
+                    pass
+            return False
+        if interaction.guild_id is None:
             return True
         command = getattr(interaction, "command", None)
         name = _normalise_command_name(getattr(command, "name", ""))
@@ -369,6 +401,113 @@ class Utility(commands.Cog):
         self.db.commit()
         await ctx.reply("🔊 Bot commands are enabled in all channels again.", mention_author=False)
 
+
+    async def _require_bot_owner(self, ctx):
+        if int(ctx.author.id) == BOT_OWNER_ID:
+            return True
+        await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        return False
+
+    async def _resolve_botban_target(self, ctx, raw_target):
+        """Resolve a mention/ID, or an exact username in the current server/cache."""
+        value = raw_target.strip()
+        match = re.fullmatch(r"<@!?(\d+)>|(\d+)", value)
+        if match:
+            user_id = int(match.group(1) or match.group(2))
+            user = self.bot.get_user(user_id)
+            if user is None:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    return user_id, None
+            return user_id, user
+
+        # Username resolution is intentionally exact to avoid banning the wrong person.
+        candidates = {}
+        if ctx.guild:
+            for member in ctx.guild.members:
+                if member.name.casefold() == value.casefold() or member.display_name.casefold() == value.casefold():
+                    candidates[member.id] = member
+        for user in self.bot.users:
+            if user.name.casefold() == value.casefold():
+                candidates[user.id] = user
+        if len(candidates) == 1:
+            user = next(iter(candidates.values()))
+            return user.id, user
+        if len(candidates) > 1:
+            return None, "ambiguous"
+        return None, None
+
+    @commands.command(name="botban")
+    @commands.guild_only()
+    async def botban(self, ctx, target: str, *, reason: str = "No reason provided"):
+        """Owner-only: prevent a user from using any bot command."""
+        if not await self._require_bot_owner(ctx):
+            return
+        user_id, user = await self._resolve_botban_target(ctx, target)
+        if user_id == BOT_OWNER_ID:
+            await ctx.reply("The bot owner cannot be bot-banned.", mention_author=False)
+            return
+        if user_id is None and user == "ambiguous":
+            await ctx.reply("That username matches multiple users. Use a mention or numeric user ID.", mention_author=False)
+            return
+        if user_id is None:
+            await ctx.reply("I couldn't resolve that user. Use a mention, numeric user ID, or exact username of a visible/cached user.", mention_author=False)
+            return
+        if self.is_bot_banned(user_id):
+            await ctx.reply(f"User `{user_id}` is already bot-banned.", mention_author=False)
+            return
+        display_name = getattr(user, "name", str(user_id))
+        self.db.execute(
+            "INSERT INTO bot_bans(user_id, username, banned_by, reason, banned_at) VALUES(?,?,?,?,?)",
+            (user_id, str(display_name), ctx.author.id, reason[:500], discord.utils.utcnow().isoformat()),
+        )
+        self.db.commit()
+        await ctx.reply(
+            f"🔨 Bot-banned **{discord.utils.escape_markdown(str(display_name))}** (`{user_id}`).\nReason: {discord.utils.escape_markdown(reason[:500])}",
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.command(name="botunban")
+    @commands.guild_only()
+    async def botunban(self, ctx, target: str):
+        """Owner-only: restore a bot-banned user's command access."""
+        if not await self._require_bot_owner(ctx):
+            return
+        match = re.fullmatch(r"<@!?(\d+)>|(\d+)", target.strip())
+        if not match:
+            await ctx.reply("Usage: `+botunban <user ID or mention>`", mention_author=False)
+            return
+        user_id = int(match.group(1) or match.group(2))
+        cur = self.db.execute("DELETE FROM bot_bans WHERE user_id=?", (user_id,))
+        self.db.commit()
+        await ctx.reply(
+            f"User `{user_id}` is unbanned from the bot." if cur.rowcount else f"User `{user_id}` was not bot-banned.",
+            mention_author=False,
+        )
+
+    @commands.command(name="botbanlist")
+    @commands.guild_only()
+    async def botbanlist(self, ctx):
+        """Owner-only: list persistent bot bans."""
+        if not await self._require_bot_owner(ctx):
+            return
+        rows = self.db.execute(
+            "SELECT user_id, username, reason, banned_at FROM bot_bans ORDER BY banned_at DESC"
+        ).fetchall()
+        if not rows:
+            await ctx.reply("There are no bot-banned users.", mention_author=False)
+            return
+        lines = [
+            f"`{row['user_id']}` — **{discord.utils.escape_markdown(row['username'] or 'Unknown user')}**"
+            + (f" — {discord.utils.escape_markdown(row['reason'])}" if row['reason'] else "")
+            for row in rows
+        ]
+        # Keep messages within Discord's normal message-size limit.
+        text = "\n".join(lines)
+        for start in range(0, len(text), 1800):
+            await ctx.reply(text[start:start + 1800], mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     async def _post_approved_team_embeds(self, guild_id, channel_id):
         """Read approved teams from team_registration.db and post one embed per team."""
