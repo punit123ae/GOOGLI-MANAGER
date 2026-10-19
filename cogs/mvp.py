@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -16,59 +15,39 @@ BACKGROUND_PATH = Path(__file__).with_name("mvp_background.png")
 # Coordinates are designed for the supplied 1024 x 1536 Kashmir Titans banner.
 # Coordinates for the updated tropical MVP background (1024 x 1536).
 NAME_BOX = (165, 850, 860, 950)
-AVATAR_BOX = (305, 420, 719, 830)
+AVATAR_BOX = (305, 416, 719, 825)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    "runs": (105, 1090, 455, 1150),
-    "wickets": (595, 1090, 925, 1150),
-    "against": (105, 1285, 435, 1345),
-    "awarded for": (620, 1285, 925, 1345),
+    # Center each value over the template's dotted underline, with a little room
+    # above and below so the text stays inside the pale panel.
+    "runs": (120, 1082, 430, 1140),
+    "wickets": (615, 1082, 900, 1140),
+    "against": (115, 1278, 435, 1335),
+    "awarded for": (610, 1278, 925, 1335),
 }
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Load a scalable italic font. Never silently use Pillow's tiny bitmap font."""
+    # Put Bangers-Regular.ttf beside mvp.py or inside cogs/fonts/ to use the requested font.
+    # Bangers is a display font, so its italic appearance is built in; do not slant it again.
     candidates = [
-        # Common Linux hosting paths
-        "/usr/share/fonts/opentype/inter/InterDisplay-ExtraBoldItalic.otf",
-        "/usr/share/fonts/opentype/inter/InterDisplay-BoldItalic.otf",
-        "/usr/share/fonts/opentype/inter/Inter-ExtraBoldItalic.otf",
-        "/usr/share/fonts/opentype/inter/Inter-BoldItalic.otf",
-        "/usr/share/fonts/opentype/cabin/Cabin-BoldItalic.otf",
-        "/usr/share/fonts/truetype/lato/Lato-HeavyItalic.ttf",
-        "/usr/share/fonts/truetype/lato/Lato-BoldItalic.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
-    ] if bold else [
-        "/usr/share/fonts/opentype/inter/InterDisplay-MediumItalic.otf",
-        "/usr/share/fonts/opentype/inter/Inter-MediumItalic.otf",
-        "/usr/share/fonts/opentype/cabin/Cabin-Italic.otf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+        Path(__file__).with_name("Bangers-Regular.ttf"),
+        Path(__file__).with_name("fonts") / "Bangers-Regular.ttf",
+        Path(__file__).with_name("fonts") / "Bangers.ttf",
     ]
-    if os.name == "nt":
-        candidates = ([r"C:\Windows\Fonts\arialbi.ttf", r"C:\Windows\Fonts\calibrib.ttf"] if bold else
-                      [r"C:\Windows\Fonts\ariali.ttf", r"C:\Windows\Fonts\calibri.ttf"]) + candidates
-
-    for font_path in candidates:
+    # Readable fallbacks only if the Bangers font file has not been installed yet.
+    candidates += [
+        Path(r"C:\Windows\Fonts\arialbd.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        Path("/usr/share/fonts/fonts-go/Go-Bold.ttf"),
+    ]
+    for path in candidates:
         try:
-            return ImageFont.truetype(font_path, size=size)
-        except (OSError, ValueError):
+            return ImageFont.truetype(str(path), size=size)
+        except OSError:
             continue
-
-    # Newer Pillow supports a scalable default font; older versions do not.
-    # If no system font is available, try Pillow's sized default before the
-    # legacy bitmap font, which ignores requested sizes and causes tiny text.
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
-        try:
-            return ImageFont.truetype("DejaVuSans-BoldOblique.ttf" if bold else "DejaVuSans-Oblique.ttf", size=size)
-        except OSError as exc:
-            raise RuntimeError(
-                "No scalable TrueType/OpenType font found. Install a font such as Inter Bold Italic or DejaVu Sans."
-            ) from exc
-
+    # Avoid Pillow's tiny bitmap default font, which ignores the requested pixel size.
+    raise RuntimeError("No scalable font found. Add Bangers-Regular.ttf beside mvp.py.")
 
 def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: int,
               start_size: int, minimum: int = 16) -> ImageFont.ImageFont:
@@ -83,32 +62,28 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
                    color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True) -> None:
     x1, y1, x2, y2 = box
-    text = str(text).strip()
-    if not text:
-        return
-
-    # Keep a generous usable area and calculate using the exact font that is drawn.
-    max_width = x2 - x1 - 20
-    max_height = y2 - y1 - 6
-    font = _font(min_size, bold=bold)
+    max_width = x2 - x1 - 12
+    max_height = y2 - y1 - 4
+    chosen = None
+    bbox = (0, 0, 0, 0)
     for size in range(start_size, min_size - 1, -1):
         candidate = _font(size, bold=bold)
-        bbox = draw.textbbox((0, 0), text, font=candidate, stroke_width=1)
-        if (bbox[2] - bbox[0]) <= max_width and (bbox[3] - bbox[1]) <= max_height:
-            font = candidate
+        candidate_bbox = draw.textbbox((0, 0), text, font=candidate)
+        if (candidate_bbox[2] - candidate_bbox[0] <= max_width
+                and candidate_bbox[3] - candidate_bbox[1] <= max_height):
+            chosen, bbox = candidate, candidate_bbox
             break
+    if chosen is None:
+        chosen = _font(min_size, bold=bold)
+        bbox = draw.textbbox((0, 0), text, font=chosen)
 
-    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
+    # Center using the font's real bounding box (important for Bangers' uneven glyphs).
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
     y = y1 + ((y2 - y1) - h) / 2 - bbox[1]
-
-    # Thin dark shadow and light outline; avoid a thick stroke swallowing small text.
-    draw.text((x + 2, y + 2), text, font=font, fill=(10, 42, 73, 190), stroke_width=2,
-              stroke_fill=(10, 42, 73, 190))
-    draw.text((x, y), text, font=font, fill=color, stroke_width=1,
-              stroke_fill=(255, 255, 255, 235))
-
+    # White text, subtle shadow only: no thick outline.
+    draw.text((round(x + 1), round(y + 2)), text, font=chosen, fill=(0, 40, 70, 110))
+    draw.text((round(x), round(y)), text, font=chosen, fill=(255, 255, 255, 255))
 
 def _avatar_from_member(member: Optional[discord.Member], size: tuple[int, int]) -> Optional[Image.Image]:
     if member is None:
@@ -173,7 +148,7 @@ class MVP(commands.Cog):
         draw = ImageDraw.Draw(image, "RGBA")
 
         # Keep only the player name in the blue strip; no playing-for text is drawn here.
-        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 68, 32)
+        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 60, 28)
 
         # Prefer the image sent in the final prompt; otherwise use the matched Discord member avatar.
         if custom_avatar is not None or member is not None:
@@ -195,15 +170,16 @@ class MVP(commands.Cog):
                 # Keep the template's built-in silhouette if the avatar cannot be fetched.
                 pass
 
-        colors = {
-            "runs": (0, 126, 190),
-            "wickets": (222, 26, 91),
-            "against": (209, 112, 0),
-            "awarded for": (13, 145, 69),
+        # Bangers sizes requested for this template. Long values automatically shrink
+        # to fit the real panel width and height without spilling into the borders.
+        value_sizes = {
+            "runs": 46,
+            "wickets": 44,
+            "against": 38,
+            "awarded for": 36,
         }
-        # Larger bold-italic values sit directly over the dotted guide lines.
         for key in ("runs", "wickets", "against", "awarded for"):
-            _draw_centered(draw, VALUE_BOXES[key], values[key], colors[key], 64, 28)
+            _draw_centered(draw, VALUE_BOXES[key], values[key], (255, 255, 255), value_sizes[key], 18)
 
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True)
