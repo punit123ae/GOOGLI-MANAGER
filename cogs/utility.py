@@ -133,10 +133,59 @@ class Utility(commands.Cog):
         );
         """)
         self.db.commit()
+        # Repair historical approved teams whose captain is missing from the roster.
+        # This is safe to run on every startup: INSERT OR IGNORE prevents duplicates.
+        self._repair_missing_approved_captains()
         self.bot.add_check(self.global_command_check)
         # discord.py's app-command tree supports a global interaction check.
         self._previous_tree_check = getattr(self.bot.tree, "interaction_check", None)
         self.bot.tree.interaction_check = self.global_interaction_check
+
+    def _repair_missing_approved_captains(self):
+        """Add missing captains to approved team rosters without duplicating players."""
+        db_path = Path("team_registration.db")
+        if not db_path.is_file():
+            return
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=10)
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if not {"registered_teams", "team_players"}.issubset(tables):
+                return
+            team_columns = {row[1] for row in conn.execute("PRAGMA table_info(team_players)")}
+            required = {"team_id", "user_id"}
+            if not required.issubset(team_columns):
+                return
+            # The current team schema has added_by/added_at; support older schemas too.
+            insert_columns = ["team_id", "user_id"]
+            select_values = ["t.id", "t.captain_id"]
+            if "added_by" in team_columns:
+                insert_columns.append("added_by")
+                select_values.append("t.captain_id")
+            if "added_at" in team_columns:
+                insert_columns.append("added_at")
+                select_values.append("CURRENT_TIMESTAMP")
+            sql = (
+                f"INSERT OR IGNORE INTO team_players ({', '.join(insert_columns)}) "
+                f"SELECT {', '.join(select_values)} FROM registered_teams AS t "
+                "WHERE t.status='approved' AND t.captain_id IS NOT NULL AND t.captain_id != 0 "
+                "AND NOT EXISTS (SELECT 1 FROM team_players AS p "
+                "WHERE p.team_id=t.id AND p.user_id=t.captain_id)"
+            )
+            cursor = conn.execute(sql)
+            repaired = cursor.rowcount
+            conn.commit()
+            if repaired > 0:
+                print(f"[Utility] Automatically added missing captains to {repaired} approved team roster(s).")
+        except (sqlite3.Error, OSError) as exc:
+            print(f"[Utility] Captain roster auto-repair skipped: {type(exc).__name__}: {exc}")
+        finally:
+            if conn is not None:
+                conn.close()
 
     def cog_unload(self):
         self.bot.remove_check(self.global_command_check)
