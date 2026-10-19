@@ -376,52 +376,195 @@ class Utility(commands.Cog):
                 try: temp.unlink(missing_ok=True)
                 except OSError: pass
 
+    async def _audit_team_db(self):
+        """Return team tables and columns needed by the audit/resolve commands."""
+        db_path = Path("team_registration.db")
+        if not db_path.is_file():
+            raise FileNotFoundError("team_registration.db was not found")
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"registered_teams", "team_players"}.issubset(tables):
+            conn.close()
+            raise ValueError("The registered_teams/team_players tables are missing")
+        return conn
+
+    def _audit_username(self, guild, user_id):
+        member = guild.get_member(int(user_id))
+        if member:
+            return f"{member.display_name} (@{member.name})"
+        user = self.bot.get_user(int(user_id))
+        if user:
+            return f"{user.name} (not currently in this server)"
+        return f"Unknown user (`{user_id}`)"
+
     @commands.command(name="auditteams")
     @commands.guild_only()
     async def auditteams(self, ctx):
-        """Owner-only read-only consistency audit of registered teams."""
+        """Show active duplicate roster membership in this server, plus captain data issues."""
         if not await self._require_bot_owner(ctx):
-            return
-        db_path = Path("team_registration.db")
-        if not db_path.exists():
-            await ctx.reply("`team_registration.db` was not found.", mention_author=False)
             return
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
-            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "registered_teams" not in tables or "team_players" not in tables:
-                await ctx.reply("Team tables are missing; audit stopped without changing data.", mention_author=False)
-                return
-            issues = []
-            duplicate_players = conn.execute(
-                "SELECT user_id, COUNT(DISTINCT team_id) AS n FROM team_players GROUP BY user_id HAVING n>1"
+            conn = self._audit_team_db()
+            # Match +teaminfo's roster logic: approved teams in this server, with
+            # captain_id plus team_players. Removed/kicked/left players no longer
+            # present in team_players are not counted unless they remain captain.
+            teams = conn.execute(
+                "SELECT id, name, captain_id FROM registered_teams "
+                "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+                (ctx.guild.id,),
             ).fetchall()
-            issues += [f"Player `{r['user_id']}` appears in {r['n']} teams." for r in duplicate_players]
-            orphan_players = conn.execute(
-                "SELECT p.user_id, p.team_id FROM team_players p LEFT JOIN registered_teams t ON t.id=p.team_id WHERE t.id IS NULL"
-            ).fetchall()
-            issues += [f"Player `{r['user_id']}` references missing team `{r['team_id']}`." for r in orphan_players]
+            team_by_id = {int(t['id']): t['name'] for t in teams}
+            memberships = {}
+            for team in teams:
+                tid = int(team['id'])
+                ids = {int(team['captain_id'])} if team['captain_id'] else set()
+                ids.update(int(r['user_id']) for r in conn.execute(
+                    "SELECT user_id FROM team_players WHERE team_id=?", (tid,)
+                ).fetchall())
+                for uid in ids:
+                    memberships.setdefault(uid, set()).add(tid)
+            duplicates = [(uid, sorted(tids, key=lambda tid: team_by_id[tid].casefold()))
+                          for uid, tids in memberships.items() if len(tids) > 1]
+            lines = []
+            for uid, tids in sorted(duplicates, key=lambda item: self._audit_username(ctx.guild, item[0]).casefold()):
+                names = ", ".join(f"**{discord.utils.escape_markdown(team_by_id[tid])}**" for tid in tids)
+                lines.append(f"• **{discord.utils.escape_markdown(self._audit_username(ctx.guild, uid))}** — {names}")
+
             missing_captains = conn.execute(
-                "SELECT id, name, captain_id FROM registered_teams WHERE status='approved' AND (captain_id IS NULL OR captain_id=0)"
+                "SELECT id, name, captain_id FROM registered_teams "
+                "WHERE guild_id=? AND status='approved' AND (captain_id IS NULL OR captain_id=0)",
+                (ctx.guild.id,),
             ).fetchall()
-            issues += [f"Approved team **{discord.utils.escape_markdown(r['name'])}** (`{r['id']}`) has no captain ID." for r in missing_captains]
-            captain_not_member = conn.execute(
-                "SELECT t.id, t.name, t.captain_id FROM registered_teams t LEFT JOIN team_players p ON p.team_id=t.id AND p.user_id=t.captain_id WHERE t.status='approved' AND p.user_id IS NULL"
-            ).fetchall()
-            issues += [f"Approved team **{discord.utils.escape_markdown(r['name'])}** (`{r['id']}`) captain `{r['captain_id']}` isn't listed as a player." for r in captain_not_member]
-            bad_status = conn.execute(
-                "SELECT id, name, status FROM registered_teams WHERE status NOT IN ('pending','approved','rejected')"
-            ).fetchall()
-            issues += [f"Team **{discord.utils.escape_markdown(r['name'])}** (`{r['id']}`) has unexpected status `{r['status']}`." for r in bad_status]
-            if not issues:
-                await ctx.reply("✅ Team audit passed. No issues were found in the checks performed.", mention_author=False)
-            else:
-                await ctx.reply("**Team audit findings** (read-only; no data changed):\n" + "\n".join(f"• {x}" for x in issues[:35]) + (f"\n…and {len(issues)-35} more." if len(issues)>35 else ""), mention_author=False,
+            if lines:
+                header = f"**Active duplicate memberships — {discord.utils.escape_markdown(ctx.guild.name)}**\n"
+                body = "\n".join(lines[:25])
+                if len(lines) > 25:
+                    body += f"\n…and {len(lines)-25} more player(s)."
+                await ctx.reply(header + body, mention_author=False,
                                 allowed_mentions=discord.AllowedMentions.none())
-        except sqlite3.Error as exc:
-            await ctx.reply(f"Team audit failed ({type(exc).__name__}).", mention_author=False)
+            else:
+                await ctx.reply(
+                    f"✅ No players appear in multiple approved team rosters in **{discord.utils.escape_markdown(ctx.guild.name)}**.",
+                    mention_author=False,
+                )
+            if missing_captains:
+                extra = "\n".join(
+                    f"• **{discord.utils.escape_markdown(r['name'])}** has no captain ID."
+                    for r in missing_captains[:10]
+                )
+                await ctx.send("**Other team data issues**\n" + extra)
+        except FileNotFoundError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+        except (sqlite3.Error, ValueError) as exc:
+            await ctx.reply(f"Team audit failed: {exc}", mention_author=False)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    async def _wait_for_audit_answer(self, ctx, prompt):
+        await ctx.reply(prompt, mention_author=False)
+        def check(message):
+            return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id
+        try:
+            message = await self.bot.wait_for("message", check=check, timeout=90)
+            return message.content.strip()
+        except TimeoutError:
+            await ctx.send("Timed out. Nothing was changed; run `+resolveauditteams` again.")
+            return None
+
+    async def _resolve_audit_user(self, ctx, raw):
+        match = re.fullmatch(r"<@!?(\d+)>|\s*(\d+)\s*", raw)
+        if match:
+            uid = int(match.group(1) or match.group(2))
+            return uid if ctx.guild.get_member(uid) or self.bot.get_user(uid) else None
+        matches = [m for m in ctx.guild.members
+                   if raw.casefold() in {m.name.casefold(), m.display_name.casefold(), str(m).casefold()}]
+        if len(matches) == 1:
+            return matches[0].id
+        return None
+
+    @commands.command(name="resolveauditteams")
+    @commands.guild_only()
+    async def resolve_audit_teams(self, ctx):
+        """Move a player into one chosen approved team, removing other roster entries in this server."""
+        if not await self._require_bot_owner(ctx):
+            return
+        raw_player = await self._wait_for_audit_answer(
+            ctx, "**Which player should I resolve?** Send a server username, mention, or user ID."
+        )
+        if raw_player is None:
+            return
+        user_id = await self._resolve_audit_user(ctx, raw_player)
+        if user_id is None:
+            await ctx.reply("I couldn't identify one unique user in this server. Use their mention or user ID.", mention_author=False)
+            return
+        raw_team = await self._wait_for_audit_answer(
+            ctx, f"Which **approved team in {ctx.guild.name}** should <@{user_id}> remain in? Send the exact team name."
+        )
+        if raw_team is None:
+            return
+
+        conn = None
+        try:
+            conn = self._audit_team_db()
+            teams = conn.execute(
+                "SELECT id, name, captain_id, vice_captain_id FROM registered_teams "
+                "WHERE guild_id=? AND status='approved' ORDER BY name COLLATE NOCASE",
+                (ctx.guild.id,),
+            ).fetchall()
+            selected = [t for t in teams if t['name'].casefold() == raw_team.casefold()]
+            if len(selected) != 1:
+                choices = ", ".join(t['name'] for t in teams[:20]) or "none"
+                await ctx.reply(f"I couldn't find that exact approved team in this server. Available teams: {choices}", mention_author=False)
+                return
+            target = selected[0]
+            # Never silently strip a captain from their team; leadership must be reassigned first.
+            captain_elsewhere = [t['name'] for t in teams
+                                 if int(t['id']) != int(target['id']) and int(t['captain_id'] or 0) == user_id]
+            if captain_elsewhere:
+                await ctx.reply(
+                    f"I can't automatically move this player because they are captain of **{', '.join(captain_elsewhere)}**. "
+                    "Reassign that captain role first, then run `+resolveauditteams` again. No data was changed.",
+                    mention_author=False,
+                )
+                return
+
+            # Only remove active roster rows from other approved teams in this server.
+            # Historical/non-approved teams and other servers are left untouched.
+            other_ids = [int(t['id']) for t in teams if int(t['id']) != int(target['id'])]
+            removed = 0
+            if other_ids:
+                placeholders = ",".join("?" for _ in other_ids)
+                cur = conn.execute(
+                    f"DELETE FROM team_players WHERE user_id=? AND team_id IN ({placeholders})",
+                    [user_id, *other_ids],
+                )
+                removed = max(cur.rowcount, 0)
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(team_players)")}
+            insert_cols = ["team_id", "user_id"]
+            values = [int(target['id']), user_id]
+            if "added_by" in columns:
+                insert_cols.append("added_by")
+                values.append(int(ctx.author.id))
+            if "added_at" in columns:
+                insert_cols.append("added_at")
+                values.append(datetime.now(timezone.utc).isoformat())
+            conn.execute(
+                f"INSERT OR IGNORE INTO team_players ({', '.join(insert_cols)}) VALUES ({', '.join('?' for _ in insert_cols)})",
+                values,
+            )
+            conn.commit()
+            await ctx.reply(
+                f"✅ Resolved **{discord.utils.escape_markdown(self._audit_username(ctx.guild, user_id))}**. "
+                f"They are now listed in **{discord.utils.escape_markdown(target['name'])}** only among approved teams in this server. "
+                f"Removed {removed} other active roster entry/entries.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (sqlite3.Error, FileNotFoundError, ValueError) as exc:
+            await ctx.reply(f"Couldn't resolve the team memberships: {exc}", mention_author=False)
         finally:
             if conn is not None:
                 conn.close()
