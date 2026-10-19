@@ -15,14 +15,14 @@ BACKGROUND_PATH = Path(__file__).with_name("mvp_background.png")
 
 # Coordinates are designed for the supplied 1024 x 1536 Kashmir Titans banner.
 # Coordinates for the updated tropical MVP background (1024 x 1536).
-NAME_BOX = (340, 855, 684, 895)
+NAME_BOX = (165, 850, 860, 950)
 AVATAR_BOX = (305, 420, 719, 830)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    "runs": (90, 1100, 460, 1148),
-    "wickets": (575, 1100, 925, 1148),
-    "against": (90, 1290, 440, 1342),
-    "awarded for": (640, 1290, 930, 1342),
+    "runs": (105, 1090, 455, 1150),
+    "wickets": (595, 1090, 925, 1150),
+    "against": (105, 1285, 435, 1345),
+    "awarded for": (620, 1285, 925, 1345),
 }
 
 
@@ -63,16 +63,25 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
                    color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True) -> None:
     x1, y1, x2, y2 = box
-    font = _fit_font(draw, text, x2 - x1 - 22, y2 - y1 - 8, start_size, min_size)
-    # Use the matching italic family for category values as well.
-    font = _font(getattr(font, "size", start_size), bold=bold)
-    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
+    # Fit the actual chosen typeface into the available area. Previously the
+    # font was measured and then re-created, which could invalidate the fit.
+    max_width = x2 - x1 - 18
+    max_height = y2 - y1 - 4
+    font = _font(start_size, bold=bold)
+    for size in range(start_size, min_size - 1, -1):
+        candidate = _font(size, bold=bold)
+        bbox = draw.textbbox((0, 0), text, font=candidate, stroke_width=2)
+        if bbox[2] - bbox[0] <= max_width and bbox[3] - bbox[1] <= max_height:
+            font = candidate
+            break
+        font = candidate
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=2)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
     y = y1 + ((y2 - y1) - h) / 2 - bbox[1]
-    # A subtle dark outline keeps text readable over the bright template.
-    draw.text((x + 2, y + 3), text, font=font, fill=(10, 42, 73, 110), stroke_width=2, stroke_fill=(10, 42, 73, 90))
-    draw.text((x, y), text, font=font, fill=color, stroke_width=1, stroke_fill=(255, 255, 255, 170))
+    # High-contrast outline keeps large lettering legible on the template.
+    draw.text((x + 2, y + 3), text, font=font, fill=(10, 42, 73, 170), stroke_width=3, stroke_fill=(10, 42, 73, 170))
+    draw.text((x, y), text, font=font, fill=color, stroke_width=2, stroke_fill=(255, 255, 255, 235))
 
 
 def _avatar_from_member(member: Optional[discord.Member], size: tuple[int, int]) -> Optional[Image.Image]:
@@ -138,7 +147,7 @@ class MVP(commands.Cog):
         draw = ImageDraw.Draw(image, "RGBA")
 
         # Keep only the player name in the blue strip; no playing-for text is drawn here.
-        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 36, 22)
+        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 68, 32)
 
         # Prefer the image sent in the final prompt; otherwise use the matched Discord member avatar.
         if custom_avatar is not None or member is not None:
@@ -168,7 +177,7 @@ class MVP(commands.Cog):
         }
         # Larger bold-italic values sit directly over the dotted guide lines.
         for key in ("runs", "wickets", "against", "awarded for"):
-            _draw_centered(draw, VALUE_BOXES[key], values[key], colors[key], 48, 25)
+            _draw_centered(draw, VALUE_BOXES[key], values[key], colors[key], 64, 28)
 
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True)
