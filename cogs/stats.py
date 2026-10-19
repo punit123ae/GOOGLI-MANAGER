@@ -957,6 +957,74 @@ LB_METRICS = [
 # STATS COG AND COMMANDS
 # ============================================================
 
+class ResetServerStatsView(discord.ui.View):
+    """Confirmation controls for the bot-owner-only server stats reset."""
+
+    def __init__(self, cog, guild_id, owner_id):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.owner_id = owner_id
+        self.completed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the bot owner who started this reset can confirm or cancel it.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm reset", style=discord.ButtonStyle.danger)
+    async def confirm_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.completed:
+            await interaction.response.send_message(
+                "This reset confirmation has already been used.", ephemeral=True
+            )
+            return
+
+        with self.cog.db:
+            self.cog.db.execute(
+                """DELETE FROM player_match_stats
+                   WHERE source_message_id IN (
+                       SELECT source_message_id FROM stats_imports WHERE guild_id = ?
+                   )""",
+                (self.guild_id,),
+            )
+            result = self.cog.db.execute(
+                "DELETE FROM stats_imports WHERE guild_id = ?",
+                (self.guild_id,),
+            )
+        deleted_matches = result.rowcount
+        self.completed = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Server stats have been reset. Deleted **{deleted_matches}** imported "
+                "match record(s) and their player statistics. Other servers and design settings "
+                "were not changed."
+            ),
+            view=self,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.completed = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content="Reset cancelled. No server stats were changed.", view=self
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
 class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -1181,6 +1249,20 @@ class Stats(commands.Cog):
         await ctx.reply(
             "✅ Removed that match's imported statistics. "
             "Other match records remain unchanged.",
+            mention_author=False,
+        )
+
+    @commands.command(name="resetstats")
+    async def reset_server_stats(self, ctx):
+        """Reset imported stats for this server; restricted to the bot owner."""
+        BOT_OWNER_ID = 1014568928682459198
+        if ctx.author.id != BOT_OWNER_ID:
+            await ctx.reply(
+            "⚠️ **Confirm server stats reset**\n"
+            "This will permanently delete all imported match statistics for this server. "
+            "It will not affect other servers or your saved design settings.\n\n"
+            "Press **Confirm reset** to continue, or **Cancel** to keep the stats.",
+            view=view,
             mention_author=False,
         )
 
