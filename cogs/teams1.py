@@ -6,6 +6,10 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 
+# Shared role markers used by team-list and roster commands.
+CAPTAIN_EMOJI = "<:captain:1560220118422659123>"
+VICE_CAPTAIN_EMOJI = "<:VC:1560220622703824966>"
+
 class ConfirmDeleteAllView(discord.ui.View):
     def __init__(self, cog, guild_id, author_id):
         super().__init__(timeout=30)
@@ -217,6 +221,10 @@ class LeaveTeamConfirmView(discord.ui.View):
         self.cog.db.commit()
         # Remove the team's configured role when a player leaves.
         await self.cog._remove_team_role(interaction.guild, self.team_id, interaction.user)
+        await self.cog._dm_captain(
+            interaction.guild, team,
+            f"**{interaction.user.name}** has left your team **{team['name']}**."
+        )
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
@@ -421,6 +429,16 @@ class TeamCore:
             await user.send(message)
             return True
         except (discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def _dm_captain(self, guild, team, message):
+        """Best-effort DM to the captain of a team row."""
+        try:
+            captain = guild.get_member(int(team["captain_id"])) if guild else None
+            if captain is None:
+                captain = self.bot.get_user(int(team["captain_id"])) or await self.bot.fetch_user(int(team["captain_id"]))
+            return await self._dm(captain, message)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return False
 
     def _username(self, guild, user_id):

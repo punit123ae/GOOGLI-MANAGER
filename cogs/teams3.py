@@ -299,6 +299,7 @@ class TeamCommandsB:
         await self._assign_team_role(ctx.guild, team["id"], member)
         await ctx.reply(f"Added {member.name} to **{team['name']}**.", mention_author=False)
         await self._dm(member, f"You have been added by an administrator to **{team['name']}**.")
+        await self._dm_captain(ctx.guild, team, f"An administrator added **{member.name}** to your team **{team['name']}**.")
 
     @commands.command(name="addallplayers")
     @commands.guild_only()
@@ -414,6 +415,8 @@ class TeamCommandsB:
                 )
                 self.db.commit()
                 added_names.append(member.name)
+                await self._dm(member, f"You have been added by an administrator to **{team['name']}**.")
+                await self._dm_captain(ctx.guild, team, f"An administrator added **{member.name}** to your team **{team['name']}**.")
             except sqlite3.IntegrityError:
                 already_names.append(f"{member.name} — {team['name']}")
             except (discord.Forbidden, discord.HTTPException) as exc:
@@ -490,6 +493,7 @@ class TeamCommandsB:
                 continue
             if not await self._dm(member, f"You have been added to **{team['name']}** by a server administrator."):
                 dm_failed_names.append(member.name)
+            await self._dm_captain(ctx.guild, team, f"An administrator added **{member.name}** to your team **{team['name']}**.")
 
         def format_names(names):
             if not names:
@@ -503,6 +507,38 @@ class TeamCommandsB:
             embed.add_field(name=f"Not added — team full ({len(full_names)})", value=format_names(full_names), inline=False)
         embed.set_footer(text=f"Roster: {self._team_player_count(team['id'])}/{self._max_players(ctx.guild.id)} players")
         await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.command(name="teamchat")
+    @commands.guild_only()
+    async def team_chat(self, ctx, *, message: str = ""):
+        """DM a message and any attached images/files to this captain's own team."""
+        team = self._membership(ctx.guild.id, ctx.author.id)
+        if not team or int(team["captain_id"]) != ctx.author.id:
+            await ctx.reply("Only a team captain can use `+teamchat` for their own team.", mention_author=False)
+            return
+        attachments = list(ctx.message.attachments)
+        if not message.strip() and not attachments:
+            await ctx.reply("Usage: `+teamchat <message>` and optionally attach an image/file.", mention_author=False)
+            return
+
+        player_rows = self.db.execute(
+            "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at", (team["id"],)
+        ).fetchall()
+        recipient_ids = list(dict.fromkeys([int(team["captain_id"])] + [int(row["user_id"]) for row in player_rows]))
+        sent = 0
+        failed = 0
+        for user_id in recipient_ids:
+            try:
+                recipient = ctx.guild.get_member(user_id) or self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                files = [await attachment.to_file() for attachment in attachments]
+                await recipient.send(
+                    content=f"**Team chat • {team['name']}**\n{message}".strip() if message.strip() else f"**Team chat • {team['name']}**",
+                    files=files
+                )
+                sent += 1
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                failed += 1
+        await ctx.reply(f"Team chat sent to **{sent}** team member(s)." + (f" Could not DM **{failed}** member(s)." if failed else ""), mention_author=False)
 
     @commands.command(name="leaveteam")
     @commands.guild_only()
@@ -577,4 +613,5 @@ class TeamCommandsB:
         await self._remove_team_role(ctx.guild, team["id"], member)
         await ctx.reply(f"Removed {member.name} from **{team['name']}**.", mention_author=False)
         await self._dm(member, f"An administrator has removed you from **{team['name']}**.")
+        await self._dm_captain(ctx.guild, team, f"An administrator removed **{member.name}** from your team **{team['name']}**.")
 

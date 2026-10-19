@@ -78,9 +78,14 @@ class TeamCommandsA:
             await ctx.reply("A team with that name already exists or is pending approval.", mention_author=False)
             return
 
+        old_name = team["name"]
         await ctx.reply(
-            f"Renamed **{discord.utils.escape_markdown(team['name'])}** to **{discord.utils.escape_markdown(new_name)}**.",
+            f"Renamed **{discord.utils.escape_markdown(old_name)}** to **{discord.utils.escape_markdown(new_name)}**.",
             mention_author=False,
+        )
+        await self._dm_captain(
+            ctx.guild, team,
+            f"An administrator changed your team's name from **{old_name}** to **{new_name}**."
         )
 
     @commands.command(name="setmaxplayers")
@@ -137,6 +142,11 @@ class TeamCommandsA:
         self.db.commit()
         await ctx.reply(f"**{member.name}** is now captain of **{team['name']}**. The previous captain remains on the roster.", mention_author=False)
         await self._dm(member, f"You have been appointed captain of **{team['name']}** by a server administrator.")
+        try:
+            old_captain_user = ctx.guild.get_member(int(old_captain)) or self.bot.get_user(int(old_captain)) or await self.bot.fetch_user(int(old_captain))
+            await self._dm(old_captain_user, f"You are no longer the captain of **{team['name']}**. An administrator changed the team captain.")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
     @commands.command(name="setteamrole", aliases=["setteamroles"])
     @commands.guild_only()
