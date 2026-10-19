@@ -1095,9 +1095,39 @@ class Stats(commands.Cog):
                 )
             return
 
+        # Calculate each player's fantasy points for this match only, using
+        # the existing fantasy_raw_points() formula.
+        player_points = []
+        for row in rows:
+            user_id, runs, balls_faced, runs_conceded, balls_bowled, wickets, not_out = row
+            player_row = {
+                "user_id": user_id,
+                "runs": runs,
+                "balls_faced": balls_faced,
+                "runs_conceded": runs_conceded,
+                "balls_bowled": balls_bowled,
+                "wickets": wickets,
+                "not_out": bool(not_out),
+            }
+            _, _, points = fantasy_raw_points([player_row])
+            player_points.append((user_id, points))
+
+        highest_points = max(points for _, points in player_points)
+        top_players = [
+            (user_id, points)
+            for user_id, points in player_points
+            if abs(points - highest_points) < 1e-9
+        ]
+        top_names = []
+        for user_id, points in top_players:
+            member = ctx.guild.get_member(user_id)
+            player_name = member.mention if member else f"<@{user_id}>"
+            top_names.append(f"{player_name} (**{points:.2f} points**)")
+
         await ctx.reply(
             f"✅ Imported statistics for **{len(rows)} players**.\n"
-            f"Match record: `{source.id}`",
+            f"Match record: `{source.id}`\n"
+            f"🏆 **Highest fantasy points:** {', '.join(top_names)}",
             mention_author=False,
         )
 
