@@ -64,8 +64,8 @@ def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], te
                    color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True,
                    bottom_padding: int = 0) -> None:
     x1, y1, x2, baseline_y = box
-    max_width = x2 - x1 - 14
-    max_height = baseline_y - y1 - 2
+    max_width = x2 - x1 - 12
+    max_height = baseline_y - y1 - 4
     chosen = None
     bbox = (0, 0, 0, 0)
     for size in range(start_size, min_size - 1, -1):
@@ -180,7 +180,7 @@ class MVP(commands.Cog):
             "runs": 58,
             "wickets": 56,
             "against": 46,
-            "awarded for": 44,
+            "awarded for": 46,
         }
         # Match the text colour to each panel: batting blue, bowling red, opponent orange,
         # and award green. Text is bottom-aligned so the lettering meets the dotted rule.
