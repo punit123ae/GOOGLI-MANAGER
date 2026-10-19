@@ -14,25 +14,31 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 BACKGROUND_PATH = Path(__file__).with_name("mvp_background.png")
 
 # Coordinates are designed for the supplied 1024 x 1536 Kashmir Titans banner.
-NAME_BOX = (170, 864, 854, 946)
-AVATAR_BOX = (405, 456, 619, 670)
+# Coordinates for the updated tropical MVP background (1024 x 1536).
+NAME_BOX = (300, 855, 724, 895)
+PLAYING_FOR_BOX = (300, 895, 724, 931)
+AVATAR_BOX = (305, 420, 719, 830)
+# Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    "runs": (80, 1070, 480, 1147),
-    "wickets": (542, 1070, 942, 1147),
-    "against": (76, 1240, 327, 1320),
-    "playing for": (391, 1240, 640, 1320),
-    "awarded for": (704, 1240, 953, 1320),
+    "runs": (65, 1080, 492, 1140),
+    "wickets": (530, 1080, 959, 1140),
+    "against": (45, 1270, 500, 1340),
+    "awarded for": (520, 1270, 979, 1340),
 }
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = []
-    if os.name == "nt":
-        candidates += [r"C:\Windows\Fonts\arialbd.ttf" if bold else r"C:\Windows\Fonts\arial.ttf"]
-    candidates += [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    # Heavy italic lettering is the closest available match to the poster's brush-style labels.
+    candidates = [
+        "/usr/share/fonts/truetype/lato/Lato-HeavyItalic.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-BoldItalic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+    ] if bold else [
+        "/usr/share/fonts/truetype/lato/Lato-MediumItalic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
     ]
+    if os.name == "nt":
+        candidates += [r"C:\Windows\Fonts\arialbi.ttf" if bold else r"C:\Windows\Fonts\ariali.ttf"]
     for path in candidates:
         try:
             return ImageFont.truetype(path, size=size)
@@ -52,9 +58,11 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 
 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
-                   color: tuple[int, int, int], start_size: int, min_size: int = 16) -> None:
+                   color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True) -> None:
     x1, y1, x2, y2 = box
     font = _fit_font(draw, text, x2 - x1 - 22, y2 - y1 - 8, start_size, min_size)
+    # Use the matching italic family for category values as well.
+    font = _font(getattr(font, "size", start_size), bold=bold)
     bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
@@ -119,20 +127,23 @@ class MVP(commands.Cog):
                 return member
         return None
 
-    async def _make_banner(self, name: str, values: dict[str, str], member: Optional[discord.Member]) -> io.BytesIO:
+    async def _make_banner(self, name: str, values: dict[str, str], member: Optional[discord.Member], custom_avatar: Optional[bytes] = None) -> io.BytesIO:
         if not BACKGROUND_PATH.exists():
             raise FileNotFoundError(f"Background image not found: {BACKGROUND_PATH}")
 
         image = Image.open(BACKGROUND_PATH).convert("RGBA")
         draw = ImageDraw.Draw(image, "RGBA")
 
-        # Place the player's name in the blue name strip.
-        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 48, 22)
+        # Player name and playing-for text share the center of the blue strip.
+        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 34, 18)
+        _draw_centered(draw, PLAYING_FOR_BOX, f"PLAYING FOR: {values['playing for']}", (255, 255, 255), 19, 12)
 
-        # Overlay a rounded avatar crop in the central portrait area when a Discord member was found.
-        if member is not None:
+        # Prefer the image sent in the final prompt; otherwise use the matched Discord member avatar.
+        if custom_avatar is not None or member is not None:
             try:
-                avatar_bytes = await member.display_avatar.replace(size=256, static_format="png").read()
+                avatar_bytes = custom_avatar
+                if avatar_bytes is None and member is not None:
+                    avatar_bytes = await member.display_avatar.replace(size=256, static_format="png").read()
                 avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
                 x1, y1, x2, y2 = AVATAR_BOX
                 target_size = (x2 - x1, y2 - y1)
@@ -151,11 +162,10 @@ class MVP(commands.Cog):
             "runs": (0, 126, 190),
             "wickets": (222, 26, 91),
             "against": (209, 112, 0),
-            "playing for": (13, 145, 69),
-            "awarded for": (112, 35, 174),
+            "awarded for": (13, 145, 69),
         }
-        for key, value in values.items():
-            _draw_centered(draw, VALUE_BOXES[key], value, colors[key], 38 if key in ("runs", "wickets") else 28, 15)
+        for key in ("runs", "wickets", "against", "awarded for"):
+            _draw_centered(draw, VALUE_BOXES[key], values[key], colors[key], 34 if key in ("runs", "wickets") else 30, 14)
 
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True)
@@ -188,9 +198,33 @@ class MVP(commands.Cog):
                 return
             values[key] = answer
 
+        await ctx.send("**MVP setup — 7/7**\nUpload the avatar image you want to use as an attachment, or type `skip` to use the matched Discord member's avatar/default silhouette.\n*Type `cancel` to stop.*")
+        def avatar_check(message: discord.Message) -> bool:
+            return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id and (bool(message.attachments) or message.content.strip().lower() in {"skip", "cancel"})
+        try:
+            avatar_message = await self.bot.wait_for("message", check=avatar_check, timeout=120)
+        except TimeoutError:
+            await ctx.send("MVP setup timed out. Run `+setmvp` again.")
+            return
+        if avatar_message.content.strip().lower() == "cancel":
+            await ctx.send("MVP setup cancelled.")
+            return
+        custom_avatar = None
+        if avatar_message.content.strip().lower() != "skip":
+            attachment = next((a for a in avatar_message.attachments if a.content_type and a.content_type.startswith("image/")), None)
+            if attachment is None:
+                await ctx.send("Please upload an image attachment. Run `+setmvp` again.")
+                return
+            try:
+                custom_avatar = await attachment.read()
+                Image.open(io.BytesIO(custom_avatar)).verify()
+            except Exception:
+                await ctx.send("That avatar file could not be opened as an image. Run `+setmvp` again.")
+                return
+
         member = self._find_member(ctx.guild, name)
         try:
-            banner = await self._make_banner(name, values, member)
+            banner = await self._make_banner(name, values, member, custom_avatar)
         except FileNotFoundError as exc:
             await ctx.send(f"Couldn't find the MVP background. Put `mvp_background.png` beside `mvp.py` in the `cogs` folder.\n`{exc}`")
             return
