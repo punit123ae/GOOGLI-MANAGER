@@ -1256,8 +1256,23 @@ class Stats(commands.Cog):
     async def reset_server_stats(self, ctx):
         """Reset imported stats for this server; restricted to the bot owner."""
         BOT_OWNER_ID = 1014568928682459198
+
         if ctx.author.id != BOT_OWNER_ID:
             await ctx.reply(
+                "❌ Only the bot owner can use this command.",
+                mention_author=False,
+            )
+            return
+
+        if ctx.guild is None:
+            await ctx.reply(
+                "❌ Use this command inside the server whose stats you want to reset.",
+                mention_author=False,
+            )
+            return
+
+        view = ResetServerStatsView(self, ctx.guild.id, BOT_OWNER_ID)
+        await ctx.reply(
             "⚠️ **Confirm server stats reset**\n"
             "This will permanently delete all imported match statistics for this server. "
             "It will not affect other servers or your saved design settings.\n\n"
