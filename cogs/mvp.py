@@ -18,12 +18,13 @@ NAME_BOX = (165, 850, 860, 950)
 AVATAR_BOX = (305, 416, 719, 825)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    # The bottom edge is aligned to the actual dotted underline in the supplied template.
-    # The renderer bottom-aligns the lettering so its lower edge touches the line.
-    "runs": (105, 1075, 455, 1158),
-    "wickets": (585, 1075, 925, 1158),
-    "against": (95, 1268, 450, 1348),
-    "awarded for": (595, 1268, 935, 1348),
+    # x1, y1, x2, underline_y. The last coordinate is the actual dotted-line
+    # height, NOT the bottom edge of the coloured panel. Text bottoms align here.
+    # These values are for the 1024 x 1536 mvp_background.png template.
+    "runs": (105, 1065, 455, 1127),
+    "wickets": (585, 1065, 925, 1127),
+    "against": (95, 1256, 450, 1318),
+    "awarded for": (595, 1256, 935, 1318),
 }
 
 
@@ -62,9 +63,9 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
                    color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True,
                    bottom_padding: int = 0) -> None:
-    x1, y1, x2, y2 = box
+    x1, y1, x2, baseline_y = box
     max_width = x2 - x1 - 14
-    max_height = y2 - y1 - 2
+    max_height = baseline_y - y1 - 2
     chosen = None
     bbox = (0, 0, 0, 0)
     for size in range(start_size, min_size - 1, -1):
@@ -78,11 +79,10 @@ def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], te
         chosen = _font(min_size, bold=bold)
         bbox = draw.textbbox((0, 0), text, font=chosen)
 
-    # Center horizontally, but anchor the bottom of the lettering close to the
-    # dotted line. This moves the entered value upward so it visually ends at the line.
+    # Center horizontally and align the visible bottom of the letters to the dotted line.
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
-    y = y2 - bottom_padding - h - bbox[1]
+    y = baseline_y - bottom_padding - h - bbox[1]
 
     # Small, crisp black shadow plus a very thin black edge for strong readability.
     draw.text((round(x + 2), round(y + 2)), text, font=chosen, fill=(0, 0, 0, 235))
