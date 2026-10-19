@@ -27,27 +27,47 @@ VALUE_BOXES = {
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    # Heavy italic lettering is the closest available match to the poster's brush-style labels.
+    """Load a scalable italic font. Never silently use Pillow's tiny bitmap font."""
     candidates = [
+        # Common Linux hosting paths
+        "/usr/share/fonts/opentype/inter/InterDisplay-ExtraBoldItalic.otf",
+        "/usr/share/fonts/opentype/inter/InterDisplay-BoldItalic.otf",
+        "/usr/share/fonts/opentype/inter/Inter-ExtraBoldItalic.otf",
+        "/usr/share/fonts/opentype/inter/Inter-BoldItalic.otf",
+        "/usr/share/fonts/opentype/cabin/Cabin-BoldItalic.otf",
         "/usr/share/fonts/truetype/lato/Lato-HeavyItalic.ttf",
         "/usr/share/fonts/truetype/lato/Lato-BoldItalic.ttf",
-        "/usr/share/fonts/truetype/lato/Lato-SemiboldItalic.ttf",
-        "/usr/share/fonts/opentype/inter/InterDisplay-BoldItalic.otf",
-        "/usr/share/fonts/opentype/inter/InterDisplay-SemiBoldItalic.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
     ] if bold else [
-        "/usr/share/fonts/truetype/lato/Lato-MediumItalic.ttf",
         "/usr/share/fonts/opentype/inter/InterDisplay-MediumItalic.otf",
+        "/usr/share/fonts/opentype/inter/Inter-MediumItalic.otf",
+        "/usr/share/fonts/opentype/cabin/Cabin-Italic.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
     ]
     if os.name == "nt":
-        candidates += [r"C:\Windows\Fonts\arialbi.ttf" if bold else r"C:\Windows\Fonts\ariali.ttf"]
-    for path in candidates:
+        candidates = ([r"C:\Windows\Fonts\arialbi.ttf", r"C:\Windows\Fonts\calibrib.ttf"] if bold else
+                      [r"C:\Windows\Fonts\ariali.ttf", r"C:\Windows\Fonts\calibri.ttf"]) + candidates
+
+    for font_path in candidates:
         try:
-            return ImageFont.truetype(path, size=size)
-        except OSError:
-            pass
-    return ImageFont.load_default()
+            return ImageFont.truetype(font_path, size=size)
+        except (OSError, ValueError):
+            continue
+
+    # Newer Pillow supports a scalable default font; older versions do not.
+    # If no system font is available, try Pillow's sized default before the
+    # legacy bitmap font, which ignores requested sizes and causes tiny text.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        try:
+            return ImageFont.truetype("DejaVuSans-BoldOblique.ttf" if bold else "DejaVuSans-Oblique.ttf", size=size)
+        except OSError as exc:
+            raise RuntimeError(
+                "No scalable TrueType/OpenType font found. Install a font such as Inter Bold Italic or DejaVu Sans."
+            ) from exc
 
 
 def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: int,
@@ -63,25 +83,31 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
                    color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True) -> None:
     x1, y1, x2, y2 = box
-    # Fit the actual chosen typeface into the available area. Previously the
-    # font was measured and then re-created, which could invalidate the fit.
-    max_width = x2 - x1 - 18
-    max_height = y2 - y1 - 4
-    font = _font(start_size, bold=bold)
+    text = str(text).strip()
+    if not text:
+        return
+
+    # Keep a generous usable area and calculate using the exact font that is drawn.
+    max_width = x2 - x1 - 20
+    max_height = y2 - y1 - 6
+    font = _font(min_size, bold=bold)
     for size in range(start_size, min_size - 1, -1):
         candidate = _font(size, bold=bold)
-        bbox = draw.textbbox((0, 0), text, font=candidate, stroke_width=2)
-        if bbox[2] - bbox[0] <= max_width and bbox[3] - bbox[1] <= max_height:
+        bbox = draw.textbbox((0, 0), text, font=candidate, stroke_width=1)
+        if (bbox[2] - bbox[0]) <= max_width and (bbox[3] - bbox[1]) <= max_height:
             font = candidate
             break
-        font = candidate
-    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=2)
+
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=1)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
     y = y1 + ((y2 - y1) - h) / 2 - bbox[1]
-    # High-contrast outline keeps large lettering legible on the template.
-    draw.text((x + 2, y + 3), text, font=font, fill=(10, 42, 73, 170), stroke_width=3, stroke_fill=(10, 42, 73, 170))
-    draw.text((x, y), text, font=font, fill=color, stroke_width=2, stroke_fill=(255, 255, 255, 235))
+
+    # Thin dark shadow and light outline; avoid a thick stroke swallowing small text.
+    draw.text((x + 2, y + 2), text, font=font, fill=(10, 42, 73, 190), stroke_width=2,
+              stroke_fill=(10, 42, 73, 190))
+    draw.text((x, y), text, font=font, fill=color, stroke_width=1,
+              stroke_fill=(255, 255, 255, 235))
 
 
 def _avatar_from_member(member: Optional[discord.Member], size: tuple[int, int]) -> Optional[Image.Image]:
