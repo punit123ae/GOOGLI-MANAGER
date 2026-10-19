@@ -506,7 +506,7 @@ class TeamRegistration(commands.Cog):
             captain = self._username(guild, team["captain_id"])
             # Requested format: numbered teams in inline code; no cricket-bat emoji per team.
             embed.add_field(
-                name=f"`{index}` {team['name']}",
+                name=f"`{index}.` {team['name']}",
                 value=f"**Captain:** {captain}\n**Players:** {count}/{self._max_players(guild_id)}",
                 inline=False
             )
@@ -1387,6 +1387,19 @@ class TeamRegistration(commands.Cog):
             line = re.sub(r"\s*\((?:C|VC|CAPTAIN|VICE[- ]CAPTAIN)\)\s*$", "", line, flags=re.IGNORECASE)
             line = line.strip().strip("`* ")
             if not line or line.startswith(("http://", "https://")):
+                continue
+            # Prefer an explicit Discord user ID in parentheses, e.g. "name (123456789012345678)".
+            # Converting it to a mention lets _get_member resolve the exact member rather than
+            # relying on a username that may have changed or may not be unique.
+            id_match = re.search(r"\((?:<@!?(\d+)>|@(\d+)|(\d{15,22}))\)\s*$", line)
+            if id_match:
+                user_id = next(group for group in id_match.groups() if group)
+                usernames.append(f"<@{user_id}>")
+                continue
+            # Also accept username (DiscordUserID) when the ID is a plain number in parentheses.
+            id_match = re.search(r"\((\d{15,22})\)\s*$", line)
+            if id_match:
+                usernames.append(f"<@{id_match.group(1)}>")
                 continue
             # Ignore headings and prose; keep likely Discord usernames, mentions, or IDs.
             if re.fullmatch(r"(?:<@!?\d+>|@?\d+|[\w.]{2,32})", line):
