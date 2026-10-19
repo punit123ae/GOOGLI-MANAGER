@@ -1,4 +1,9 @@
 import re
+import os
+import sqlite3
+import zipfile
+from pathlib import Path
+from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
@@ -109,6 +114,16 @@ class Utility(commands.Cog):
             channel_id INTEGER NOT NULL,
             PRIMARY KEY (guild_id, channel_id)
         );
+        CREATE TABLE IF NOT EXISTS admin_activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            guild_id INTEGER,
+            channel_id INTEGER,
+            user_id INTEGER NOT NULL,
+            command_name TEXT NOT NULL,
+            command_text TEXT NOT NULL DEFAULT '',
+            succeeded INTEGER NOT NULL DEFAULT 1
+        );
         CREATE TABLE IF NOT EXISTS bot_bans (
             user_id INTEGER PRIMARY KEY,
             username TEXT NOT NULL DEFAULT '',
@@ -128,6 +143,239 @@ class Utility(commands.Cog):
         # Restore the previous check if this cog is unloaded.
         if getattr(self.bot.tree, "interaction_check", None) == self.global_interaction_check:
             self.bot.tree.interaction_check = self._previous_tree_check
+
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx):
+        """Record prefix-command activity for the owner audit log."""
+        try:
+            self.db.execute(
+                "INSERT INTO admin_activity_log(guild_id, channel_id, user_id, command_name, command_text, succeeded) VALUES(?,?,?,?,?,1)",
+                (ctx.guild.id if ctx.guild else None, ctx.channel.id if ctx.channel else None,
+                 ctx.author.id, str(ctx.command.qualified_name if ctx.command else "unknown"),
+                 str(ctx.message.content or "")[:500]),
+            )
+            self.db.commit()
+        except sqlite3.Error:
+            pass
+
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx, error):
+        # Ignore command-not-found noise; record actual attempted command errors.
+        if isinstance(error, commands.CommandNotFound):
+            return
+        try:
+            self.db.execute(
+                "INSERT INTO admin_activity_log(guild_id, channel_id, user_id, command_name, command_text, succeeded) VALUES(?,?,?,?,?,0)",
+                (ctx.guild.id if ctx.guild else None, ctx.channel.id if ctx.channel else None,
+                 ctx.author.id, str(ctx.command.qualified_name if ctx.command else "unknown"),
+                 str(ctx.message.content or "")[:500]),
+            )
+            self.db.commit()
+        except sqlite3.Error:
+            pass
+
+    def _backup_dir(self):
+        path = Path("backups")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _database_paths(self):
+        # Both databases are used by this bot's loaded cogs.
+        return [Path("matches.db"), Path("team_registration.db")]
+
+    @commands.command(name="adminlog")
+    @commands.guild_only()
+    async def adminlog(self, ctx, limit: int = 15):
+        """Owner-only recent command activity log."""
+        if not await self._require_bot_owner(ctx):
+            return
+        limit = max(1, min(int(limit), 40))
+        rows = self.db.execute(
+            "SELECT occurred_at, guild_id, user_id, command_name, command_text, succeeded "
+            "FROM admin_activity_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        if not rows:
+            await ctx.reply("No command activity has been logged yet.", mention_author=False)
+            return
+        lines = []
+        for row in rows:
+            status = "OK" if row[5] else "ERROR"
+            command_text = discord.utils.escape_markdown((row[4] or "")[:100]).replace("`", "ˋ")
+            lines.append(f"`{row[0]}` **{status}** user `{row[2]}` · `+{row[3]}` · `{command_text}`")
+        await ctx.reply("**Recent bot activity**\n" + "\n".join(lines), mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name="backupdata")
+    @commands.guild_only()
+    async def backupdata(self, ctx):
+        """Owner-only backup of both bot databases."""
+        if not await self._require_bot_owner(ctx):
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_name = f"backup_{stamp}.zip"
+        backup_path = self._backup_dir() / backup_name
+        temp_paths = []
+        try:
+            with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for db_path in self._database_paths():
+                    if not db_path.exists():
+                        continue
+                    snapshot = self._backup_dir() / f".{db_path.name}.{stamp}.snapshot"
+                    temp_paths.append(snapshot)
+                    source = sqlite3.connect(str(db_path))
+                    target = sqlite3.connect(str(snapshot))
+                    try:
+                        source.backup(target)
+                    finally:
+                        target.close()
+                        source.close()
+                    archive.write(snapshot, arcname=db_path.name)
+            if not zipfile.is_zipfile(backup_path):
+                raise RuntimeError("Backup archive validation failed")
+            await ctx.reply(f"✅ Backup created: `{backup_name}`\nIncluded available database files. Use `+backuplist` to view backups.", mention_author=False)
+        except Exception as exc:
+            try:
+                backup_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            await ctx.reply(f"❌ Backup failed ({type(exc).__name__}). No backup was reported as successful.", mention_author=False)
+        finally:
+            for path in temp_paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @commands.command(name="backuplist")
+    @commands.guild_only()
+    async def backuplist(self, ctx):
+        """Owner-only list of available backups."""
+        if not await self._require_bot_owner(ctx):
+            return
+        files = sorted(self._backup_dir().glob("backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+            await ctx.reply("No backups found. Run `+backupdata` first.", mention_author=False)
+            return
+        lines = [f"`{p.name}` — {p.stat().st_size:,} bytes" for p in files[:30]]
+        await ctx.reply("**Available backups**\n" + "\n".join(lines), mention_author=False)
+
+    @commands.command(name="restoredata")
+    @commands.guild_only()
+    async def restoredata(self, ctx, backup_name: str, confirmation: str = ""):
+        """Owner-only restore. Requires explicit CONFIRM and a prior backup name."""
+        if not await self._require_bot_owner(ctx):
+            return
+        if confirmation.upper() != "CONFIRM":
+            await ctx.reply(
+                "⚠️ Restore replaces current database contents and may discard newer data.\n"
+                f"To proceed, run `+restoredata {backup_name} CONFIRM`. Make a fresh `+backupdata` first if needed.",
+                mention_author=False,
+            )
+            return
+        if Path(backup_name).name != backup_name or not backup_name.startswith("backup_") or not backup_name.endswith(".zip"):
+            await ctx.reply("Invalid backup name. Use an exact filename from `+backuplist`.", mention_author=False)
+            return
+        archive_path = self._backup_dir() / backup_name
+        if not archive_path.is_file() or not zipfile.is_zipfile(archive_path):
+            await ctx.reply("Backup not found or invalid. Check `+backuplist`.", mention_author=False)
+            return
+        expected = {p.name for p in self._database_paths()}
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                names = set(archive.namelist())
+                if not names or not names.issubset(expected) or any("/" in n or "\\" in n for n in names):
+                    raise ValueError("Unexpected files in backup")
+                for name in names:
+                    if not archive.getinfo(name).file_size or archive.getinfo(name).file_size > 200_000_000:
+                        raise ValueError("Invalid database size")
+                # Validate every database before touching current files.
+                staged = {}
+                for name in names:
+                    temp = self._backup_dir() / f".restore_{name}"
+                    with archive.open(name) as src, open(temp, "wb") as dst:
+                        dst.write(src.read())
+                    check = sqlite3.connect(str(temp))
+                    try:
+                        result = check.execute("PRAGMA integrity_check").fetchone()[0]
+                        if result != "ok":
+                            raise ValueError(f"Database integrity check failed for {name}")
+                    finally:
+                        check.close()
+                    staged[name] = temp
+            # Use SQLite's online backup API to restore into the existing database files.
+            # This avoids replacing file handles used by the running bot and team cogs.
+            restored = []
+            for name, temp in staged.items():
+                source = sqlite3.connect(str(temp))
+                target = sqlite3.connect(name, timeout=30)
+                try:
+                    source.backup(target)
+                    target.commit()
+                    check = target.execute("PRAGMA integrity_check").fetchone()[0]
+                    if check != "ok":
+                        raise ValueError(f"Restored database integrity check failed for {name}")
+                    restored.append(name)
+                finally:
+                    target.close()
+                    source.close()
+            for temp in staged.values():
+                temp.unlink(missing_ok=True)
+            await ctx.reply("✅ Restored database(s): " + ", ".join(f"`{n}`" for n in restored) + ". The bot may need a restart if any cog cached data in memory.", mention_author=False)
+        except Exception as exc:
+            await ctx.reply(f"❌ Restore validation failed ({type(exc).__name__}). Current databases were not intentionally changed.", mention_author=False)
+            for temp in (self._backup_dir()).glob(".restore_*"):
+                try: temp.unlink(missing_ok=True)
+                except OSError: pass
+
+    @commands.command(name="auditteams")
+    @commands.guild_only()
+    async def auditteams(self, ctx):
+        """Owner-only read-only consistency audit of registered teams."""
+        if not await self._require_bot_owner(ctx):
+            return
+        db_path = Path("team_registration.db")
+        if not db_path.exists():
+            await ctx.reply("`team_registration.db` was not found.", mention_author=False)
+            return
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "registered_teams" not in tables or "team_players" not in tables:
+                await ctx.reply("Team tables are missing; audit stopped without changing data.", mention_author=False)
+                return
+            issues = []
+            duplicate_players = conn.execute(
+                "SELECT user_id, COUNT(DISTINCT team_id) AS n FROM team_players GROUP BY user_id HAVING n>1"
+            ).fetchall()
+            issues += [f"Player `{r['user_id']}` appears in {r['n']} teams." for r in duplicate_players]
+            orphan_players = conn.execute(
+                "SELECT p.user_id, p.team_id FROM team_players p LEFT JOIN registered_teams t ON t.id=p.team_id WHERE t.id IS NULL"
+            ).fetchall()
+            issues += [f"Player `{r['user_id']}` references missing team `{r['team_id']}`." for r in orphan_players]
+            missing_captains = conn.execute(
+                "SELECT id, name, captain_id FROM registered_teams WHERE status='approved' AND (captain_id IS NULL OR captain_id=0)"
+            ).fetchall()
+            issues += [f"Approved team **{discord.utils.escape_markdown(r['name'])}** (`{r['id']}`) has no captain ID." for r in missing_captains]
+            captain_not_member = conn.execute(
+                "SELECT t.id, t.name, t.captain_id FROM registered_teams t LEFT JOIN team_players p ON p.team_id=t.id AND p.user_id=t.captain_id WHERE t.status='approved' AND p.user_id IS NULL"
+            ).fetchall()
+            issues += [f"Approved team **{discord.utils.escape_markdown(r['name'])}** (`{r['id']}`) captain `{r['captain_id']}` isn't listed as a player." for r in captain_not_member]
+            bad_status = conn.execute(
+                "SELECT id, name, status FROM registered_teams WHERE status NOT IN ('pending','approved','rejected')"
+            ).fetchall()
+            issues += [f"Team **{discord.utils.escape_markdown(r['name'])}** (`{r['id']}`) has unexpected status `{r['status']}`." for r in bad_status]
+            if not issues:
+                await ctx.reply("✅ Team audit passed. No issues were found in the checks performed.", mention_author=False)
+            else:
+                await ctx.reply("**Team audit findings** (read-only; no data changed):\n" + "\n".join(f"• {x}" for x in issues[:35]) + (f"\n…and {len(issues)-35} more." if len(issues)>35 else ""), mention_author=False,
+                                allowed_mentions=discord.AllowedMentions.none())
+        except sqlite3.Error as exc:
+            await ctx.reply(f"Team audit failed ({type(exc).__name__}).", mention_author=False)
+        finally:
+            if conn is not None:
+                conn.close()
 
     def is_locked(self, guild_id):
         if not guild_id:
