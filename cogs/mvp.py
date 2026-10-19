@@ -14,7 +14,7 @@ BACKGROUND_PATH = Path(__file__).with_name("mvp_background.png")
 
 # Coordinates are designed for the supplied 1024 x 1536 Kashmir Titans banner.
 # Coordinates for the updated tropical MVP background (1024 x 1536).
-NAME_BOX = (165, 850, 860, 950)
+NAME_BOX = (165, 830, 860, 930)
 AVATAR_BOX = (305, 416, 719, 825)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
@@ -152,7 +152,7 @@ class MVP(commands.Cog):
         draw = ImageDraw.Draw(image, "RGBA")
 
         # Keep only the player name in the blue strip; no playing-for text is drawn here.
-        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 60, 28, bottom_padding=2)
+        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 70, 35, bottom_padding=2)
 
         # Prefer the image sent in the final prompt; otherwise use the matched Discord member avatar.
         if custom_avatar is not None or member is not None:
