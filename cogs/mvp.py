@@ -18,12 +18,12 @@ NAME_BOX = (165, 850, 860, 950)
 AVATAR_BOX = (305, 416, 719, 825)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    # Center each value over the template's dotted underline, with a little room
-    # above and below so the text stays inside the pale panel.
-    "runs": (120, 1082, 430, 1140),
-    "wickets": (615, 1082, 900, 1140),
-    "against": (115, 1278, 435, 1335),
-    "awarded for": (610, 1278, 925, 1335),
+    # Text is bottom-aligned just above the dotted underline in each panel.
+    # The larger vertical boxes allow bigger lettering without crossing the border.
+    "runs": (105, 1078, 455, 1151),
+    "wickets": (585, 1078, 925, 1151),
+    "against": (95, 1272, 450, 1342),
+    "awarded for": (595, 1272, 935, 1342),
 }
 
 
@@ -62,8 +62,8 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
                    color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True) -> None:
     x1, y1, x2, y2 = box
-    max_width = x2 - x1 - 12
-    max_height = y2 - y1 - 4
+    max_width = x2 - x1 - 14
+    max_height = y2 - y1 - 3
     chosen = None
     bbox = (0, 0, 0, 0)
     for size in range(start_size, min_size - 1, -1):
@@ -77,12 +77,15 @@ def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], te
         chosen = _font(min_size, bold=bold)
         bbox = draw.textbbox((0, 0), text, font=chosen)
 
-    # Center using the font's real bounding box (important for Bangers' uneven glyphs).
+    # Center horizontally, but anchor the bottom of the lettering close to the
+    # dotted line. This moves the entered value upward so it visually ends at the line.
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
-    y = y1 + ((y2 - y1) - h) / 2 - bbox[1]
-    # White text, subtle shadow only: no thick outline.
-    draw.text((round(x + 1), round(y + 2)), text, font=chosen, fill=(0, 40, 70, 110))
+    bottom_padding = 3
+    y = y2 - bottom_padding - h - bbox[1]
+
+    # Dark, crisp shadow for contrast; only a 2px offset (not a large blurry shadow).
+    draw.text((round(x + 2), round(y + 2)), text, font=chosen, fill=(0, 20, 45, 225))
     draw.text((round(x), round(y)), text, font=chosen, fill=(255, 255, 255, 255))
 
 def _avatar_from_member(member: Optional[discord.Member], size: tuple[int, int]) -> Optional[Image.Image]:
@@ -173,13 +176,13 @@ class MVP(commands.Cog):
         # Bangers sizes requested for this template. Long values automatically shrink
         # to fit the real panel width and height without spilling into the borders.
         value_sizes = {
-            "runs": 46,
-            "wickets": 44,
-            "against": 38,
-            "awarded for": 36,
+            "runs": 58,
+            "wickets": 56,
+            "against": 46,
+            "awarded for": 44,
         }
         for key in ("runs", "wickets", "against", "awarded for"):
-            _draw_centered(draw, VALUE_BOXES[key], values[key], (255, 255, 255), value_sizes[key], 18)
+            _draw_centered(draw, VALUE_BOXES[key], values[key], (255, 255, 255), value_sizes[key], 20)
 
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True)
