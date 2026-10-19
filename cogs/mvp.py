@@ -15,15 +15,14 @@ BACKGROUND_PATH = Path(__file__).with_name("mvp_background.png")
 
 # Coordinates are designed for the supplied 1024 x 1536 Kashmir Titans banner.
 # Coordinates for the updated tropical MVP background (1024 x 1536).
-NAME_BOX = (300, 855, 724, 895)
-PLAYING_FOR_BOX = (300, 895, 724, 931)
+NAME_BOX = (340, 855, 684, 895)
 AVATAR_BOX = (305, 420, 719, 830)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    "runs": (65, 1080, 492, 1140),
-    "wickets": (530, 1080, 959, 1140),
-    "against": (45, 1270, 500, 1340),
-    "awarded for": (520, 1270, 979, 1340),
+    "runs": (90, 1100, 460, 1148),
+    "wickets": (575, 1100, 925, 1148),
+    "against": (90, 1290, 440, 1342),
+    "awarded for": (640, 1290, 930, 1342),
 }
 
 
@@ -32,9 +31,13 @@ def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.Im
     candidates = [
         "/usr/share/fonts/truetype/lato/Lato-HeavyItalic.ttf",
         "/usr/share/fonts/truetype/lato/Lato-BoldItalic.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-SemiboldItalic.ttf",
+        "/usr/share/fonts/opentype/inter/InterDisplay-BoldItalic.otf",
+        "/usr/share/fonts/opentype/inter/InterDisplay-SemiBoldItalic.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
     ] if bold else [
         "/usr/share/fonts/truetype/lato/Lato-MediumItalic.ttf",
+        "/usr/share/fonts/opentype/inter/InterDisplay-MediumItalic.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
     ]
     if os.name == "nt":
@@ -134,9 +137,8 @@ class MVP(commands.Cog):
         image = Image.open(BACKGROUND_PATH).convert("RGBA")
         draw = ImageDraw.Draw(image, "RGBA")
 
-        # Player name and playing-for text share the center of the blue strip.
-        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 34, 18)
-        _draw_centered(draw, PLAYING_FOR_BOX, f"PLAYING FOR: {values['playing for']}", (255, 255, 255), 19, 12)
+        # Keep only the player name in the blue strip; no playing-for text is drawn here.
+        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 36, 22)
 
         # Prefer the image sent in the final prompt; otherwise use the matched Discord member avatar.
         if custom_avatar is not None or member is not None:
@@ -164,8 +166,9 @@ class MVP(commands.Cog):
             "against": (209, 112, 0),
             "awarded for": (13, 145, 69),
         }
+        # Larger bold-italic values sit directly over the dotted guide lines.
         for key in ("runs", "wickets", "against", "awarded for"):
-            _draw_centered(draw, VALUE_BOXES[key], values[key], colors[key], 34 if key in ("runs", "wickets") else 30, 14)
+            _draw_centered(draw, VALUE_BOXES[key], values[key], colors[key], 48, 25)
 
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True)
@@ -180,16 +183,15 @@ class MVP(commands.Cog):
             await ctx.send("Only the bot owner can use this command.")
             return
 
-        name = await self._ask(ctx, "**MVP setup — 1/6**\nEnter the player name (or mention a Discord member):")
+        name = await self._ask(ctx, "**MVP setup — 1/5**\nEnter the player name (or mention a Discord member):")
         if name is None:
             return
 
         fields = [
-            ("runs", "**MVP setup — 2/6**\nEnter the player's runs:"),
-            ("wickets", "**MVP setup — 3/6**\nEnter the player's wickets:"),
-            ("against", "**MVP setup — 4/6**\nEnter the team/player they played against:"),
-            ("playing for", "**MVP setup — 5/6**\nEnter the team they were playing for:"),
-            ("awarded for", "**MVP setup — 6/6**\nEnter what they were awarded for:"),
+            ("runs", "**MVP setup — 2/5**\nEnter the player's runs:"),
+            ("wickets", "**MVP setup — 3/5**\nEnter the player's wickets:"),
+            ("against", "**MVP setup — 4/5**\nEnter the team/player they played against:"),
+            ("awarded for", "**MVP setup — 5/5**\nEnter what they were awarded for:"),
         ]
         values: dict[str, str] = {}
         for key, prompt in fields:
@@ -198,7 +200,7 @@ class MVP(commands.Cog):
                 return
             values[key] = answer
 
-        await ctx.send("**MVP setup — 7/7**\nUpload the avatar image you want to use as an attachment, or type `skip` to use the matched Discord member's avatar/default silhouette.\n*Type `cancel` to stop.*")
+        await ctx.send("**MVP setup — 6/6**\nUpload the avatar image you want to use as an attachment, or type `skip` to use the matched Discord member's avatar/default silhouette.\n*Type `cancel` to stop.*")
         def avatar_check(message: discord.Message) -> bool:
             return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id and (bool(message.attachments) or message.content.strip().lower() in {"skip", "cancel"})
         try:
@@ -223,8 +225,9 @@ class MVP(commands.Cog):
                 return
 
         member = self._find_member(ctx.guild, name)
+        display_name = member.display_name if member is not None else name
         try:
-            banner = await self._make_banner(name, values, member, custom_avatar)
+            banner = await self._make_banner(display_name, values, member, custom_avatar)
         except FileNotFoundError as exc:
             await ctx.send(f"Couldn't find the MVP background. Put `mvp_background.png` beside `mvp.py` in the `cogs` folder.\n`{exc}`")
             return
