@@ -312,6 +312,19 @@ class TeamRegistration(commands.Cog):
                 )
                 next_number += 1
 
+        # Rejected applications should not reserve their team names. Keep the
+        # rejected records for history, but give their unique name keys an
+        # archival value so the same name can be submitted again.
+        rejected_rows = self.db.execute(
+            "SELECT id, name_key FROM registered_teams WHERE status='rejected'"
+        ).fetchall()
+        for rejected_row in rejected_rows:
+            archived_key = f"__rejected__{int(rejected_row['id'])}__{rejected_row['name_key']}"
+            self.db.execute(
+                "UPDATE registered_teams SET name_key=? WHERE id=?",
+                (archived_key, int(rejected_row['id'])),
+            )
+
         # Migrate announcement tracking to be channel-specific. This allows a
         # previous test-channel post to be repeated in the real announcement channel.
         posted_columns = [r[1] for r in self.db.execute("PRAGMA table_info(approved_team_posted)").fetchall()]
@@ -509,6 +522,68 @@ class TeamRegistration(commands.Cog):
         ).fetchone()[0]
         await ctx.send(embed=self.make_teamlist_embed(ctx.guild.id, 0),
                        view=TeamListView(self, ctx.guild.id) if total > 10 else None)
+
+    @commands.command(name="setteamname")
+    @commands.guild_only()
+    async def set_team_name(self, ctx, *, names: str):
+        """Rename an approved team. Team names may contain spaces."""
+        if not await self._command_allowed(ctx, "setteamname"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
+
+        raw = " ".join(names.strip().split())
+        approved_teams = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY LENGTH(name) DESC",
+            (ctx.guild.id,),
+        ).fetchall()
+
+        # Match the longest approved team-name prefix, allowing both old and
+        # new team names to contain spaces in: +setteamname Current Name New Name
+        team = None
+        new_name = None
+        raw_folded = raw.casefold()
+        for candidate in approved_teams:
+            old_name = " ".join(str(candidate["name"]).split())
+            if raw_folded.startswith(old_name.casefold() + " "):
+                proposed = raw[len(old_name):].strip()
+                if proposed:
+                    team = candidate
+                    new_name = proposed
+                    break
+
+        if team is None or not new_name:
+            await ctx.reply(
+                "Usage: `+setteamname <current team name> <new team name>\n"
+                "Example: `+setteamname Dark Spectors Dark Specters`",
+                mention_author=False,
+            )
+            return
+        if len(new_name) > 50:
+            await ctx.reply("Team names must be between 1 and 50 characters.", mention_author=False)
+            return
+        new_key = self._key(new_name)
+        if new_key == team["name_key"]:
+            await ctx.reply("The new team name is the same as the current name.", mention_author=False)
+            return
+        existing = self._team(ctx.guild.id, new_name)
+        if existing and int(existing["id"]) != int(team["id"]):
+            await ctx.reply("A team with that name already exists or is pending approval.", mention_author=False)
+            return
+        try:
+            self.db.execute(
+                "UPDATE registered_teams SET name=?, name_key=? WHERE id=? AND guild_id=? AND status='approved'",
+                (new_name, new_key, int(team["id"]), ctx.guild.id),
+            )
+            self.db.commit()
+        except sqlite3.IntegrityError:
+            self.db.rollback()
+            await ctx.reply("A team with that name already exists or is pending approval.", mention_author=False)
+            return
+
+        await ctx.reply(
+            f"Renamed **{discord.utils.escape_markdown(team['name'])}** to **{discord.utils.escape_markdown(new_name)}**.",
+            mention_author=False,
+        )
 
     @commands.command(name="setmaxplayers")
     @commands.guild_only()
