@@ -18,12 +18,13 @@ NAME_BOX = (165, 830, 860, 930)
 AVATAR_BOX = (305, 416, 719, 825)
 # Values sit on the template's dotted underline in each information box.
 VALUE_BOXES = {
-    # Text is bottom-aligned just above the dotted underline in each panel.
-    # The larger vertical boxes allow bigger lettering without crossing the border.
-    "runs": (105, 1078, 455, 1151),
-    "wickets": (585, 1078, 925, 1151),
-    "against": (95, 1272, 450, 1342),
-    "awarded for": (595, 1272, 935, 1342),
+    # x1, y1, x2, underline_y. The last coordinate is the actual dotted-line
+    # height, NOT the bottom edge of the coloured panel. Text bottoms align here.
+    # These values are for the 1024 x 1536 mvp_background.png template.
+    "runs": (105, 1065, 455, 1127),
+    "wickets": (585, 1065, 925, 1127),
+    "against": (95, 1256, 450, 1318),
+    "awarded for": (595, 1256, 935, 1318),
 }
 
 
@@ -60,10 +61,11 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_height: 
 
 
 def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], text: str,
-                   color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True) -> None:
-    x1, y1, x2, y2 = box
+                   color: tuple[int, int, int], start_size: int, min_size: int = 16, bold: bool = True,
+                   bottom_padding: int = 0) -> None:
+    x1, y1, x2, baseline_y = box
     max_width = x2 - x1 - 14
-    max_height = y2 - y1 - 3
+    max_height = baseline_y - y1 - 2
     chosen = None
     bbox = (0, 0, 0, 0)
     for size in range(start_size, min_size - 1, -1):
@@ -77,16 +79,15 @@ def _draw_centered(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], te
         chosen = _font(min_size, bold=bold)
         bbox = draw.textbbox((0, 0), text, font=chosen)
 
-    # Center horizontally, but anchor the bottom of the lettering close to the
-    # dotted line. This moves the entered value upward so it visually ends at the line.
+    # Center horizontally and align the visible bottom of the letters to the dotted line.
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     x = x1 + ((x2 - x1) - w) / 2 - bbox[0]
-    bottom_padding = 3
-    y = y2 - bottom_padding - h - bbox[1]
+    y = baseline_y - bottom_padding - h - bbox[1]
 
-    # Dark, crisp shadow for contrast; only a 2px offset (not a large blurry shadow).
-    draw.text((round(x + 2), round(y + 2)), text, font=chosen, fill=(0, 20, 45, 225))
-    draw.text((round(x), round(y)), text, font=chosen, fill=(255, 255, 255, 255))
+    # Small, crisp black shadow plus a very thin black edge for strong readability.
+    draw.text((round(x + 2), round(y + 2)), text, font=chosen, fill=(0, 0, 0, 235))
+    draw.text((round(x), round(y)), text, font=chosen, fill=(*color, 255), stroke_width=1,
+              stroke_fill=(0, 0, 0, 190))
 
 def _avatar_from_member(member: Optional[discord.Member], size: tuple[int, int]) -> Optional[Image.Image]:
     if member is None:
@@ -151,7 +152,7 @@ class MVP(commands.Cog):
         draw = ImageDraw.Draw(image, "RGBA")
 
         # Keep only the player name in the blue strip; no playing-for text is drawn here.
-        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 60, 28)
+        _draw_centered(draw, NAME_BOX, name, (255, 255, 255), 60, 28, bottom_padding=2)
 
         # Prefer the image sent in the final prompt; otherwise use the matched Discord member avatar.
         if custom_avatar is not None or member is not None:
@@ -181,8 +182,19 @@ class MVP(commands.Cog):
             "against": 46,
             "awarded for": 44,
         }
+        # Match the text colour to each panel: batting blue, bowling red, opponent orange,
+        # and award green. Text is bottom-aligned so the lettering meets the dotted rule.
+        value_colors = {
+            "runs": (0, 105, 215),       # vivid blue
+            "wickets": (225, 18, 80),    # strong red/pink
+            "against": (222, 112, 0),    # orange
+            "awarded for": (0, 145, 65), # green
+        }
         for key in ("runs", "wickets", "against", "awarded for"):
-            _draw_centered(draw, VALUE_BOXES[key], values[key], (255, 255, 255), value_sizes[key], 20)
+            _draw_centered(
+                draw, VALUE_BOXES[key], values[key], value_colors[key],
+                value_sizes[key], 20, bottom_padding=0
+            )
 
         output = io.BytesIO()
         image.save(output, format="PNG", optimize=True)
