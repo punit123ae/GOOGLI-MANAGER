@@ -39,6 +39,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.custom_image_commands",
             "cogs.mvp",
             "cogs.results",
+            "cogs.dm",
         ):
             await self.load_extension(extension)
 
