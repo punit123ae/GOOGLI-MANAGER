@@ -1,8 +1,9 @@
 """
 Kashmir Titans DM extension
 ---------------------------
-Owner-only command:
-    +dm <user_id_or_role_id> <message_or_image_url>
+Owner-only commands:
+    +dm <user_id_or_role_id_or_username> <message_or_image_url>
+    +echo <message> <#channel>
 
 Setup:
 1. Save this file as dm.py beside bot.py.
@@ -193,53 +194,82 @@ class DMExtension(commands.Cog):
         self.bot = bot
 
     @commands.command(name="dm")
-    async def dm_command(self, ctx: commands.Context, target_id: int, *, raw_message: str):
-        """Owner-only: +dm <user_id_or_role_id> <text_or_image_url>"""
+    async def dm_command(self, ctx: commands.Context, *, raw_args: str):
+        """Owner-only: +dm <user ID/username/role ID/role name> <text or image URL>"""
         if ctx.author.id != OWNER_ID:
             await ctx.reply("You are not authorized to use this command.", mention_author=False)
             return
-
         if ctx.guild is None:
             await ctx.reply("Use this command inside the server.", mention_author=False)
             return
 
-        text, image_url = _split_message_and_image(raw_message)
-        if not text and not image_url:
+        if not raw_args.strip() or len(raw_args.split(maxsplit=1)) < 2:
             await ctx.reply(
-                "Provide text or an image URL.\nUsage: `+dm <user_id_or_role_id> <text_or_image_url>`",
+                "Usage: `+dm <user ID / username / role ID> <text or image URL>`\n"
+                "For names with spaces, use the ID instead.",
                 mention_author=False,
             )
             return
 
-        # Resolve a role first; if no role exists, resolve as a user.
-        role = ctx.guild.get_role(target_id)
-        target_user: Optional[discord.User | discord.Member] = None
+        target_text, raw_message = raw_args.split(maxsplit=1)
+        text, image_url = _split_message_and_image(raw_message)
+        if not text and not image_url:
+            await ctx.reply("Provide text or an image URL.", mention_author=False)
+            return
+
+        # Accept IDs, user mentions, role mentions, usernames, and display names.
+        mention_match = re.fullmatch(r"<@!?([0-9]+)>|<@&([0-9]+)>", target_text)
+        id_match = re.fullmatch(r"[0-9]+", target_text)
+        target_id = int(target_text) if id_match else None
+        if mention_match:
+            target_id = int(mention_match.group(1) or mention_match.group(2))
+
+        role = ctx.guild.get_role(target_id) if target_id is not None else None
+        if role is None and target_id is None:
+            role = discord.utils.find(
+                lambda r: r.name.casefold() == target_text.casefold(), ctx.guild.roles
+            )
 
         if role is not None:
             recipients: list[discord.Member | discord.User] = [
-                member
-                for member in role.members
-                if not member.bot
+                member for member in role.members if not member.bot
             ]
             target_kind = "role"
             target_label = f"{role.name} (`{role.id}`)"
             if not recipients:
                 await ctx.reply(
-                    "That role has no cached, non-bot members to DM.",
+                    "That role has no cached, non-bot members to DM. Make sure the bot has the Server Members intent enabled.",
                     mention_author=False,
                 )
                 return
         else:
-            target_user = ctx.guild.get_member(target_id)
-            if target_user is None:
-                try:
-                    target_user = await self.bot.fetch_user(target_id)
-                except (discord.NotFound, discord.HTTPException):
-                    target_user = None
+            target_user: Optional[discord.User | discord.Member] = None
+            if target_id is not None:
+                target_user = ctx.guild.get_member(target_id)
+                if target_user is None:
+                    try:
+                        target_user = await self.bot.fetch_user(target_id)
+                    except (discord.NotFound, discord.HTTPException):
+                        target_user = None
+            else:
+                query = target_text.casefold()
+                target_user = discord.utils.find(
+                    lambda m: (
+                        m.name.casefold() == query
+                        or m.display_name.casefold() == query
+                        or (getattr(m, "global_name", None) or "").casefold() == query
+                    ),
+                    ctx.guild.members,
+                )
+                if target_user is None:
+                    # Also accept a username in the legacy name#1234 form where applicable.
+                    target_user = discord.utils.find(
+                        lambda m: str(m).casefold() == query, ctx.guild.members
+                    )
 
             if target_user is None:
                 await ctx.reply(
-                    "I couldn't find that user ID or role ID in this server.",
+                    "Couldn't find that user or role. Try their exact username/display name or use their ID. Names with spaces aren't supported; use the ID instead.",
                     mention_author=False,
                 )
                 return
@@ -248,40 +278,93 @@ class DMExtension(commands.Cog):
             target_kind = "user"
             target_label = f"{target_user} (`{target_user.id}`)"
 
-        # Avoid sending an accidental role-wide DM to a huge group without showing count.
         preview_text = text if text else "(image only)"
         if len(preview_text) > 900:
             preview_text = preview_text[:897] + "..."
-
-        embed = None
+        preview_embed = None
         if image_url:
-            embed = discord.Embed(title="Image preview")
-            embed.set_image(url=image_url)
+            preview_embed = discord.Embed(title="Image preview")
+            preview_embed.set_image(url=image_url)
 
         confirmation = (
             f"**Are you sure you want to DM this {target_kind}?**\n\n"
             f"**Target:** {target_label}\n"
             f"**Message:** {preview_text}\n"
             f"**This will DM:** {target_label}\n"
-            f"**Total members:** {len(recipients)}\n"
+            f"**Total members:** {len(recipients)}"
         )
-
         view = DMConfirmView(
             requester_id=ctx.author.id,
             target_kind=target_kind,
-            target_id=target_id,
+            target_id=role.id if role is not None else recipients[0].id,
             content=text,
             image_url=image_url,
             recipients=recipients,
         )
-
         await ctx.reply(
             content=confirmation,
-            embed=embed,
+            embed=preview_embed,
             view=view,
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    @commands.command(name="echo")
+    async def echo_command(self, ctx: commands.Context, *, raw_args: str):
+        """Owner-only: +echo <message> <#channel>"""
+        if ctx.author.id != OWNER_ID:
+            await ctx.reply("You are not authorized to use this command.", mention_author=False)
+            return
+        if ctx.guild is None:
+            await ctx.reply("Use this command inside the server.", mention_author=False)
+            return
+
+        # Channel can be a Discord mention (<#ID>), raw ID, or #channel-name.
+        match = re.search(r"\s+(<#[0-9]+>|#[\w-]+|[0-9]{15,22})\s*$", raw_args)
+        if not match:
+            await ctx.reply(
+                "Usage: `+echo <message> <#channel>`\nExample: `+echo Hello everyone! #announcements`",
+                mention_author=False,
+            )
+            return
+
+        message = raw_args[:match.start()].strip()
+        channel_token = match.group(1)
+        if not message:
+            await ctx.reply("Write a message to send.", mention_author=False)
+            return
+
+        channel_id_match = re.search(r"[0-9]{15,22}", channel_token)
+        channel = None
+        if channel_id_match:
+            channel = ctx.guild.get_channel(int(channel_id_match.group(0)))
+        elif channel_token.startswith("#"):
+            name = channel_token[1:].casefold()
+            channel = discord.utils.find(
+                lambda ch: isinstance(ch, (discord.TextChannel, discord.Thread))
+                and ch.name.casefold() == name,
+                ctx.guild.channels,
+            )
+
+        if channel is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await ctx.reply("Couldn't find that text channel. Use its mention or ID.", mention_author=False)
+            return
+
+        try:
+            await channel.send(
+                message,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await ctx.reply(
+                f"Message sent in {channel.mention}.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.Forbidden:
+            await ctx.reply("I don't have permission to send messages in that channel.", mention_author=False)
+        except discord.HTTPException as exc:
+            await ctx.reply(f"Couldn't send the message: {exc}", mention_author=False)
+
 
 
 async def setup(bot: commands.Bot):
