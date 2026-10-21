@@ -353,7 +353,14 @@ class DMExtension(commands.Cog):
         try:
             await channel.send(
                 message,
-                allowed_mentions=discord.AllowedMentions.none(),
+                # Allow explicit user mentions in +echo to ping the mentioned user.
+                # Keep role and @everyone/@here mentions disabled.
+                allowed_mentions=discord.AllowedMentions(
+                    users=True,
+                    roles=False,
+                    everyone=False,
+                    replied_user=False,
+                ),
             )
             await ctx.reply(
                 f"Message sent in {channel.mention}.",
