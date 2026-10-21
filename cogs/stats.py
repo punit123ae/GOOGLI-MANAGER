@@ -113,61 +113,60 @@ def classify_player(t):
 
 def fantasy_raw_points(rows, t=None):
     """Return batting raw points, bowling raw points and total fantasy points."""
-    t = t or totals(rows)
+    batting_raw = 0.0
+    bowling_raw = 0.0
 
-    # Batting statistics
-    fifties = sum(50 <= r["runs"] < 100 for r in rows)
-    hundreds = sum(r["runs"] >= 100 for r in rows)
-    ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
+    # Apply batting points and milestone bonuses separately for each innings.
+    for row in rows:
+        runs = int(row.get("runs", 0))
+        balls_faced = int(row.get("balls_faced", 0))
+        not_out = bool(row.get("not_out", 0))
 
-    # Batting average = total runs / times dismissed
-    times_dismissed = sum(not r["not_out"] for r in rows)
-    bat_avg = (
-        t["runs"] / times_dismissed
-        if times_dismissed > 0
-        else 0
-    )
+        # A row with no runs and no balls faced represents no batting contribution.
+        batted = runs > 0 or balls_faced > 0
+        if batted:
+            batting_raw += runs - (balls_faced * 0.1)
 
-    batting_raw = (
-        50
-        + (bat_avg * 2)
-        + (t["runs"] * 0.1)
-        - (t["balls_faced"] * 0.1)
-        - (ducks * 10)
-        + (fifties * 5)
-        + (hundreds * 10)
-    )
+            # Only the highest batting milestone bonus applies per innings.
+            if runs >= 100:
+                batting_raw += 30
+            elif runs >= 50:
+                batting_raw += 15
 
-    
-    # Bowling statistics
-    balls_bowled = sum(r.get("balls_bowled", 0) for r in rows)
+            # A duck penalty applies only when dismissed on zero runs.
+            if runs == 0 and not not_out:
+                batting_raw -= 15
 
-    if balls_bowled <= 0:
-        bowling_raw = 0
-    else:
-        three_wicket_hauls = sum(
-            3 <= r["wickets"] < 5 for r in rows
-        )
-        five_wicket_hauls = sum(
-            5 <= r["wickets"] < 7 for r in rows
-        )
-        seven_wicket_hauls = sum(
-            r["wickets"] >= 7 for r in rows
-        )
+    # The stricter run penalty depends on the bowler's overall totals
+    # across all rows/innings being scored, not on each row independently.
+    total_balls_bowled = sum(int(row.get("balls_bowled", 0)) for row in rows)
+    total_wickets = sum(int(row.get("wickets", 0)) for row in rows)
 
-        haul_bonus = (
-            three_wicket_hauls * 7
-            + five_wicket_hauls * 15
-            + seven_wicket_hauls * 25
-        )
+    if total_balls_bowled > 0:
+        run_penalty = 1.0 if total_wickets == 0 and total_balls_bowled > 5 else 0.5
 
-        bowling_raw = (
-            70
-            - (t["bowl_avg"] / 2)
-            + (t["wickets"] * 2)
-            - (max(0, t["economy"] - 5) * 2)
-            + haul_bonus
-        )
+        for row in rows:
+            balls_bowled = int(row.get("balls_bowled", 0))
+            if balls_bowled <= 0:
+                continue
+
+            wickets = int(row.get("wickets", 0))
+            runs_conceded = int(row.get("runs_conceded", 0))
+            bowling_raw += (
+                (wickets * 18)
+                - (runs_conceded * run_penalty)
+                - (balls_bowled * 0.1)
+            )
+
+            # Only the highest wicket milestone bonus applies per spell.
+            if wickets >= 9:
+                bowling_raw += 20
+            elif wickets >= 7:
+                bowling_raw += 12
+            elif wickets >= 5:
+                bowling_raw += 15
+            elif wickets >= 3:
+                bowling_raw += 6
 
     total_raw = batting_raw + bowling_raw
     return batting_raw, bowling_raw, total_raw
