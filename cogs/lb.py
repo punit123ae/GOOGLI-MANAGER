@@ -64,24 +64,52 @@ def _totals(rows: list[dict]) -> dict[str, float | int]:
 
 
 def _fantasy_points(rows: list[dict]) -> float:
-    """Use the same fantasy formula as the stats cog."""
-    t = _totals(rows)
-    fifties = sum(50 <= r["runs"] < 100 for r in rows)
-    hundreds = sum(r["runs"] >= 100 for r in rows)
-    ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
-    batting_raw = (50 + t["bat_avg"] * 2 + t["runs"] * 0.1
-                   - t["balls_faced"] * 0.1 - ducks * 10
-                   + fifties * 5 + hundreds * 10)
-    if t["balls_bowled"] <= 0:
-        bowling_raw = 0
-    else:
-        three = sum(3 <= r["wickets"] < 5 for r in rows)
-        five = sum(5 <= r["wickets"] < 7 for r in rows)
-        seven = sum(r["wickets"] >= 7 for r in rows)
-        haul_bonus = three * 7 + five * 15 + seven * 25
-        bowling_raw = (70 - t["bowl_avg"] / 2 + t["wickets"] * 2
-                       - max(0, t["economy"] - 5) * 2 + haul_bonus)
-    return batting_raw + bowling_raw
+    """Sum fantasy points per match using the exact stats-cog formula."""
+    total_points = 0.0
+
+    # The +stats command calculates each imported match row independently.
+    # Do the same here so +lb matches the points shown when stats are added.
+    for row in rows:
+        batting_raw = 0.0
+        bowling_raw = 0.0
+
+        runs = int(row.get("runs", 0))
+        balls_faced = int(row.get("balls_faced", 0))
+        not_out = bool(row.get("not_out", 0))
+
+        # Batting points and milestones for this match/innings.
+        if runs > 0 or balls_faced > 0:
+            batting_raw += runs - (balls_faced * 0.1)
+            if runs >= 100:
+                batting_raw += 30
+            elif runs >= 50:
+                batting_raw += 15
+            if runs == 0 and not not_out:
+                batting_raw -= 15
+
+        # Bowling penalty is based on this match row, exactly like +stats.
+        balls_bowled = int(row.get("balls_bowled", 0))
+        wickets = int(row.get("wickets", 0))
+        if balls_bowled > 0:
+            runs_conceded = int(row.get("runs_conceded", 0))
+            run_penalty = 1.0 if wickets == 0 and balls_bowled > 5 else 0.5
+            bowling_raw += (
+                (wickets * 18)
+                - (runs_conceded * run_penalty)
+                - (balls_bowled * 0.1)
+            )
+            if wickets >= 9:
+                bowling_raw += 20
+            elif wickets >= 7:
+                bowling_raw += 12
+            elif wickets >= 5:
+                bowling_raw += 15
+            elif wickets >= 3:
+                bowling_raw += 6
+
+        total_points += batting_raw + bowling_raw
+
+    return total_points
 
 
 def _value(key: str, rows: list[dict]) -> float | int | tuple[int, int]:
