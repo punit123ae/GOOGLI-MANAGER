@@ -132,6 +132,9 @@ class NoTeam(commands.Cog):
 
             new_ids: list[int] = []
             for index, content in enumerate(chunks):
+                # If the refreshed list needs more chunks than we already have
+                # messages for, send additional messages automatically. For
+                # example, 2 existing messages can grow to 3, 4, or more.
                 if index < len(old_messages) and old_messages[index] is not None:
                     try:
                         await old_messages[index].edit(content=content, allowed_mentions=discord.AllowedMentions.none())
