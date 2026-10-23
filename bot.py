@@ -40,7 +40,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.mvp",
             "cogs.results",
             "cogs.dm",
-            "cogs.unteamed",
+            "cogs.noteam",
         ):
             await self.load_extension(extension)
 
