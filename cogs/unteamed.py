@@ -10,10 +10,11 @@ from discord.ext import commands
 OWNER_ID = 1014568928682459198
 PARTICIPANT_ROLE_ID = 1560979656096743474
 DB_PATH = Path(__file__).resolve().parent.parent / "team_registration.db"
+MAX_CONTENT = 1900  # Safely below Discord's 2000-character limit.
 
 
 class Unteamed(commands.Cog):
-    """Owner-configured unteamed list, automatically refreshed on membership changes."""
+    """Automatically refresh a role-based teamless list across managed messages."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -28,6 +29,14 @@ class Unteamed(commands.Cog):
                     guild_id INTEGER PRIMARY KEY,
                     channel_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL
+                )"""
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS unteamed_extra_messages (
+                    guild_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, position)
                 )"""
             )
             db.commit()
@@ -51,43 +60,68 @@ class Unteamed(commands.Cog):
                      message_id=excluded.message_id""",
                 (guild_id, channel_id, message_id),
             )
+            # Changing the target means old continuation messages are no longer managed.
+            db.execute("DELETE FROM unteamed_extra_messages WHERE guild_id=?", (guild_id,))
             db.commit()
 
-    def _make_content(self, guild: discord.Guild) -> str:
+    def _get_extra_ids(self, guild_id: int) -> list[int]:
+        self._ensure_tracking_table()
+        with sqlite3.connect(DB_PATH, timeout=10) as db:
+            rows = db.execute(
+                "SELECT message_id FROM unteamed_extra_messages WHERE guild_id=? ORDER BY position",
+                (guild_id,),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def _save_extra_ids(self, guild_id: int, message_ids: list[int]):
+        with sqlite3.connect(DB_PATH, timeout=10) as db:
+            db.execute("DELETE FROM unteamed_extra_messages WHERE guild_id=?", (guild_id,))
+            db.executemany(
+                "INSERT INTO unteamed_extra_messages (guild_id, position, message_id) VALUES (?, ?, ?)",
+                [(guild_id, i, mid) for i, mid in enumerate(message_ids, start=1)],
+            )
+            db.commit()
+
+    def _make_chunks(self, guild: discord.Guild) -> list[str]:
         role = guild.get_role(PARTICIPANT_ROLE_ID)
         if role is None:
-            return (
-                "KASHMIR TITANS S1\n\nTEAMLESS USERS;\n\n"
-                f"ERROR: I couldn't find the participant role (ID: {PARTICIPANT_ROLE_ID})."
-            )
+            return [
+                "KASHMIR TITANS S1\n\nTEAMLESS USERS\n\n"
+                f"ERROR: Participant role not found (ID: {PARTICIPANT_ROLE_ID})."
+            ]
 
         teamless = sorted(
-            (
-                member for member in guild.members
-                if not member.bot and role not in member.roles
-            ),
-            key=lambda member: (member.name.casefold(), member.id),
+            (m for m in guild.members if not m.bot and role not in m.roles),
+            key=lambda m: (m.name.casefold(), m.id),
         )
+        rows = [f"{i}. {m.display_name} (@{m.name}) — {m.id}" for i, m in enumerate(teamless, start=1)]
+        if not rows:
+            rows = ["No teamless users."]
 
-        lines = ["KASHMIR TITANS S1", "", "TEAMLESS USERS;", ""]
-        if teamless:
-            lines.extend(
-                f"{index}. {member.name} ({member.id})"
-                for index, member in enumerate(teamless, start=1)
-            )
-        else:
-            lines.append("No teamless users.")
+        # Split rows into Discord-safe messages, preserving every user.
+        chunks: list[str] = []
+        current = ""
+        for row in rows:
+            if len(row) > MAX_CONTENT - 80:
+                row = row[: MAX_CONTENT - 83] + "..."
+            candidate = f"{current}\n{row}" if current else row
+            if len(candidate) > MAX_CONTENT - 100 and current:
+                chunks.append(current)
+                current = row
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
 
-        content = "\n".join(lines)
-        if len(content) > 1990:
-            content = content[:1970].rsplit("\n", 1)[0] + "\n... (list too long for one Discord message)"
-        return content
+        total = len(chunks)
+        return [
+            f"KASHMIR TITANS S1\nTEAMLESS USERS — Part {i + 1}/{total}\n\n{chunk}"
+            for i, chunk in enumerate(chunks)
+        ]
 
     async def _refresh_saved_message(self, guild: discord.Guild) -> bool:
-        """Edit the configured target message; return whether it succeeded."""
         if guild.id in self._refreshing_guilds:
             return False
-
         tracking = self._get_tracking(guild.id)
         if not tracking:
             return False
@@ -95,31 +129,55 @@ class Unteamed(commands.Cog):
         self._refreshing_guilds.add(guild.id)
         try:
             self._last_refresh_error = "No detailed error recorded."
-            # Use the cached member list when available; the member intent and
-            # role/member events maintain it. Chunking here can fail on some setups.
+            # Ensure the member cache is populated before building the role-based list.
+            await guild.chunk(cache=True)
             channel_id, message_id = map(int, tracking)
             channel = guild.get_channel_or_thread(channel_id)
             if channel is None:
                 channel = await self.bot.fetch_channel(channel_id)
             if not hasattr(channel, "fetch_message"):
                 raise TypeError(f"Configured channel {channel_id} cannot fetch messages.")
-            message = await channel.fetch_message(message_id)
-            if self.bot.user is not None and message.author.id != self.bot.user.id:
+
+            primary = await channel.fetch_message(message_id)
+            if self.bot.user is not None and primary.author.id != self.bot.user.id:
                 raise PermissionError(
-                    f"The target message was sent by user ID {message.author.id}, "
-                    f"not this bot (ID {self.bot.user.id}). Set a message sent by this bot."
+                    f"Target message was sent by user ID {primary.author.id}, not this bot (ID {self.bot.user.id})."
                 )
-            await message.edit(
-                content=self._make_content(guild),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+
+            chunks = self._make_chunks(guild)
+            primary_ids = [message_id]
+            extra_ids = self._get_extra_ids(guild.id)
+            managed_ids = extra_ids[:]
+
+            await primary.edit(content=chunks[0], allowed_mentions=discord.AllowedMentions.none())
+            new_extra_ids: list[int] = []
+            for i, content in enumerate(chunks[1:]):
+                if i < len(extra_ids):
+                    try:
+                        extra = await channel.fetch_message(extra_ids[i])
+                        if self.bot.user is not None and extra.author.id != self.bot.user.id:
+                            raise PermissionError(f"Continuation message {extra.id} is not authored by this bot.")
+                        await extra.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
+                        new_extra_ids.append(extra.id)
+                    except discord.NotFound:
+                        extra = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                        new_extra_ids.append(extra.id)
+                else:
+                    extra = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                    new_extra_ids.append(extra.id)
+
+            # Delete stale continuation messages if the list has shrunk.
+            for stale_id in extra_ids[len(chunks) - 1:]:
+                try:
+                    stale = await channel.fetch_message(stale_id)
+                    if self.bot.user is not None and stale.author.id == self.bot.user.id:
+                        await stale.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+            self._save_extra_ids(guild.id, new_extra_ids)
             return True
         except Exception as exc:
-            # Keep the exact failure visible in the console and return it to the command.
-            print(
-                f"[unteamed] Refresh failed for guild {guild.id}: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            print(f"[unteamed] Refresh failed for guild {guild.id}: {type(exc).__name__}: {exc}")
             self._last_refresh_error = f"{type(exc).__name__}: {exc}"
             return False
         finally:
@@ -135,34 +193,29 @@ class Unteamed(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        role_id = PARTICIPANT_ROLE_ID
-        had_role = any(role.id == role_id for role in before.roles)
-        has_role = any(role.id == role_id for role in after.roles)
-        if had_role != has_role:
+        before_has = any(r.id == PARTICIPANT_ROLE_ID for r in before.roles)
+        after_has = any(r.id == PARTICIPANT_ROLE_ID for r in after.roles)
+        if before_has != after_has:
             await self._refresh_saved_message(after.guild)
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Rebuild the saved list after a bot restart, without needing +unteamed.
         for guild in self.bot.guilds:
             if self._get_tracking(guild.id):
                 await self._refresh_saved_message(guild)
 
     async def _fetch_message_from_reference(self, ctx, reference: str):
-        """Accept a Discord message link or a raw message ID in the current server."""
         reference = reference.strip()
         match = re.search(
             r"(?:https?://)?(?:www\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)",
             reference,
         )
-
         if match:
             guild_id, channel_id, message_id = map(int, match.groups())
             if guild_id != ctx.guild.id:
                 raise ValueError("Use a message link from this server.")
         elif reference.isdigit():
-            message_id = int(reference)
-            channel_id = ctx.channel.id
+            message_id, channel_id = int(reference), ctx.channel.id
         else:
             raise ValueError("Provide a Discord message link or message ID.")
 
@@ -172,17 +225,16 @@ class Unteamed(commands.Cog):
                 channel = await self.bot.fetch_channel(channel_id)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 raise ValueError("I couldn't access that channel.")
-
         if not hasattr(channel, "fetch_message"):
             raise ValueError("That link doesn't point to a text channel message.")
-
         try:
             message = await channel.fetch_message(message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             raise ValueError("I couldn't find or access that message.")
-
         if message.guild.id != ctx.guild.id:
             raise ValueError("Use a message from this server.")
+        if self.bot.user is not None and message.author.id != self.bot.user.id:
+            raise ValueError("The target message must have been sent by Googli Manager.")
         return message
 
     @commands.command(name="setunteamed")
@@ -192,22 +244,16 @@ class Unteamed(commands.Cog):
             await ctx.reply("Only the bot owner can use this command.", mention_author=False)
             return
         if not reference.strip():
-            await ctx.reply(
-                "Usage: `+setunteamed <message link or message ID>`",
-                mention_author=False,
-            )
+            await ctx.reply("Usage: `+setunteamed <message link or message ID>`", mention_author=False)
             return
-
         try:
             message = await self._fetch_message_from_reference(ctx, reference)
         except ValueError as exc:
             await ctx.reply(str(exc), mention_author=False)
             return
-
         self._save_tracking(ctx.guild.id, message.channel.id, message.id)
         await ctx.reply(
-            f"Target message saved: {message.jump_url}\n"
-            "Automatic updates are enabled. Run `+unteamed` once to fill the message now.",
+            f"Target message saved: {message.jump_url}\nAutomatic updates are enabled. Run `+unteamed` once to fill it now.",
             mention_author=False,
         )
 
@@ -217,28 +263,15 @@ class Unteamed(commands.Cog):
         if ctx.author.id != OWNER_ID:
             await ctx.reply("Only the bot owner can use this command.", mention_author=False)
             return
-
         if not self._get_tracking(ctx.guild.id):
-            await ctx.reply(
-                "Choose the message first with `+setunteamed <message link>`.",
-                mention_author=False,
-            )
+            await ctx.reply("Choose the message first with `+setunteamed <message link>`.", mention_author=False)
             return
-
-        success = await self._refresh_saved_message(ctx.guild)
-        if success:
-            tracking = self._get_tracking(ctx.guild.id)
-            channel = ctx.guild.get_channel(int(tracking[0]))
-            if channel is None:
-                channel = await self.bot.fetch_channel(int(tracking[0]))
-            message = await channel.fetch_message(int(tracking[1]))
-            await ctx.reply(f"Updated: {message.jump_url}", mention_author=False)
+        if await self._refresh_saved_message(ctx.guild):
+            await ctx.reply("Updated the saved teamless list.", mention_author=False)
         else:
-            detail = self._last_refresh_error
             await ctx.reply(
                 "I couldn't update the saved message. **Exact error:** "
-                f"`{detail[:1200]}`\n"
-                "Check the bot's channel permissions and target message, then send me this error if it still fails.",
+                f"`{self._last_refresh_error[:1200]}`",
                 mention_author=False,
             )
 
