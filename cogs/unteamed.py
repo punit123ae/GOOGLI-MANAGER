@@ -18,6 +18,7 @@ class Unteamed(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._refreshing_guilds: set[int] = set()
+        self._last_refresh_error = "No detailed error recorded."
 
     def _ensure_tracking_table(self):
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -93,19 +94,33 @@ class Unteamed(commands.Cog):
 
         self._refreshing_guilds.add(guild.id)
         try:
-            await guild.chunk(cache=True)
+            self._last_refresh_error = "No detailed error recorded."
+            # Use the cached member list when available; the member intent and
+            # role/member events maintain it. Chunking here can fail on some setups.
             channel_id, message_id = map(int, tracking)
-            channel = guild.get_channel(channel_id)
+            channel = guild.get_channel_or_thread(channel_id)
             if channel is None:
                 channel = await self.bot.fetch_channel(channel_id)
+            if not hasattr(channel, "fetch_message"):
+                raise TypeError(f"Configured channel {channel_id} cannot fetch messages.")
             message = await channel.fetch_message(message_id)
+            if self.bot.user is not None and message.author.id != self.bot.user.id:
+                raise PermissionError(
+                    f"The target message was sent by user ID {message.author.id}, "
+                    f"not this bot (ID {self.bot.user.id}). Set a message sent by this bot."
+                )
             await message.edit(
                 content=self._make_content(guild),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return True
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError) as exc:
-            print(f"[unteamed] Could not refresh message for guild {guild.id}: {exc}")
+        except Exception as exc:
+            # Keep the exact failure visible in the console and return it to the command.
+            print(
+                f"[unteamed] Refresh failed for guild {guild.id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self._last_refresh_error = f"{type(exc).__name__}: {exc}"
             return False
         finally:
             self._refreshing_guilds.discard(guild.id)
@@ -219,9 +234,11 @@ class Unteamed(commands.Cog):
             message = await channel.fetch_message(int(tracking[1]))
             await ctx.reply(f"Updated: {message.jump_url}", mention_author=False)
         else:
+            detail = self._last_refresh_error
             await ctx.reply(
-                "I couldn't update the saved message. Check the bot's channel permissions "
-                "and make sure the target message still exists.",
+                "I couldn't update the saved message. **Exact error:** "
+                f"`{detail[:1200]}`\n"
+                "Check the bot's channel permissions and target message, then send me this error if it still fails.",
                 mention_author=False,
             )
 
