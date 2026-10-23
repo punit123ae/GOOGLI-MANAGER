@@ -3,20 +3,21 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
-from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
 
 OWNER_ID = 1014568928682459198
+PARTICIPANT_ROLE_ID = 1560979656096743474
 DB_PATH = Path(__file__).resolve().parent.parent / "team_registration.db"
 
 
 class Unteamed(commands.Cog):
-    """Owner-only command that edits one configured teamless-users message."""
+    """Owner-configured unteamed list, automatically refreshed on membership changes."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._refreshing_guilds: set[int] = set()
 
     def _ensure_tracking_table(self):
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -51,45 +52,18 @@ class Unteamed(commands.Cog):
             )
             db.commit()
 
-    def _team_member_ids(self, guild_id: int) -> set[int]:
-        """Read approved roster members plus captains and vice-captains."""
-        if not DB_PATH.is_file():
-            return set()
-
-        with sqlite3.connect(
-            f"file:{DB_PATH.as_posix()}?mode=ro", uri=True, timeout=5
-        ) as db:
-            tables = {
-                row[0] for row in db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            if not {"registered_teams", "team_players"}.issubset(tables):
-                return set()
-
-            rows = db.execute(
-                """SELECT p.user_id
-                   FROM team_players p
-                   JOIN registered_teams t ON t.id=p.team_id
-                   WHERE t.guild_id=? AND t.status='approved'
-                   UNION
-                   SELECT captain_id FROM registered_teams
-                   WHERE guild_id=? AND status='approved'
-                   UNION
-                   SELECT vice_captain_id FROM registered_teams
-                   WHERE guild_id=? AND status='approved'
-                     AND vice_captain_id IS NOT NULL""",
-                (guild_id, guild_id, guild_id),
-            ).fetchall()
-
-        return {int(row[0]) for row in rows if row[0] is not None}
-
     def _make_content(self, guild: discord.Guild) -> str:
-        team_ids = self._team_member_ids(guild.id)
+        role = guild.get_role(PARTICIPANT_ROLE_ID)
+        if role is None:
+            return (
+                "KASHMIR TITANS S1\n\nTEAMLESS USERS;\n\n"
+                f"ERROR: I couldn't find the participant role (ID: {PARTICIPANT_ROLE_ID})."
+            )
+
         teamless = sorted(
             (
                 member for member in guild.members
-                if not member.bot and member.id not in team_ids
+                if not member.bot and role not in member.roles
             ),
             key=lambda member: (member.name.casefold(), member.id),
         )
@@ -105,18 +79,65 @@ class Unteamed(commands.Cog):
 
         content = "\n".join(lines)
         if len(content) > 1990:
-            content = (
-                content[:1970].rsplit("\n", 1)[0]
-                + "\n... (list too long for one Discord message)"
-            )
+            content = content[:1970].rsplit("\n", 1)[0] + "\n... (list too long for one Discord message)"
         return content
+
+    async def _refresh_saved_message(self, guild: discord.Guild) -> bool:
+        """Edit the configured target message; return whether it succeeded."""
+        if guild.id in self._refreshing_guilds:
+            return False
+
+        tracking = self._get_tracking(guild.id)
+        if not tracking:
+            return False
+
+        self._refreshing_guilds.add(guild.id)
+        try:
+            await guild.chunk(cache=True)
+            channel_id, message_id = map(int, tracking)
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            await message.edit(
+                content=self._make_content(guild),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError) as exc:
+            print(f"[unteamed] Could not refresh message for guild {guild.id}: {exc}")
+            return False
+        finally:
+            self._refreshing_guilds.discard(guild.id)
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        await self._refresh_saved_message(member.guild)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        await self._refresh_saved_message(member.guild)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        role_id = PARTICIPANT_ROLE_ID
+        had_role = any(role.id == role_id for role in before.roles)
+        has_role = any(role.id == role_id for role in after.roles)
+        if had_role != has_role:
+            await self._refresh_saved_message(after.guild)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Rebuild the saved list after a bot restart, without needing +unteamed.
+        for guild in self.bot.guilds:
+            if self._get_tracking(guild.id):
+                await self._refresh_saved_message(guild)
 
     async def _fetch_message_from_reference(self, ctx, reference: str):
         """Accept a Discord message link or a raw message ID in the current server."""
         reference = reference.strip()
         match = re.search(
-            r"(?:https?://)?(?:www\.)?discord(?:app)?\.com/channels/"
-            r"(\d+)/(\d+)/(\d+)",
+            r"(?:https?://)?(?:www\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)",
             reference,
         )
 
@@ -126,7 +147,6 @@ class Unteamed(commands.Cog):
                 raise ValueError("Use a message link from this server.")
         elif reference.isdigit():
             message_id = int(reference)
-            # A raw ID needs to be in the channel where the command was used.
             channel_id = ctx.channel.id
         else:
             raise ValueError("Provide a Discord message link or message ID.")
@@ -148,19 +168,14 @@ class Unteamed(commands.Cog):
 
         if message.guild.id != ctx.guild.id:
             raise ValueError("Use a message from this server.")
-
         return message
 
     @commands.command(name="setunteamed")
     @commands.guild_only()
     async def set_unteamed_message(self, ctx: commands.Context, *, reference: str = ""):
-        """Set the one message that +unteamed is allowed to edit."""
         if ctx.author.id != OWNER_ID:
-            await ctx.reply(
-                "Only the bot owner can use this command.", mention_author=False
-            )
+            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
             return
-
         if not reference.strip():
             await ctx.reply(
                 "Usage: `+setunteamed <message link or message ID>`",
@@ -176,75 +191,39 @@ class Unteamed(commands.Cog):
 
         self._save_tracking(ctx.guild.id, message.channel.id, message.id)
         await ctx.reply(
-            f"Teamless-users message set to: {message.jump_url}",
+            f"Target message saved: {message.jump_url}\n"
+            "Automatic updates are enabled. Run `+unteamed` once to fill the message now.",
             mention_author=False,
         )
 
     @commands.command(name="unteamed")
     @commands.guild_only()
     async def unteamed(self, ctx: commands.Context):
-        """Update the configured message only when this command is run."""
         if ctx.author.id != OWNER_ID:
-            await ctx.reply(
-                "Only the bot owner can use this command.", mention_author=False
-            )
+            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
             return
 
-        if ctx.guild is None:
-            return
-
-        await ctx.guild.chunk(cache=True)
-        tracking = self._get_tracking(ctx.guild.id)
-        if not tracking:
-            # First run: send the list here and save this exact message as the target.
-            try:
-                message = await ctx.send(
-                    self._make_content(ctx.guild),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.HTTPException:
-                await ctx.reply(
-                    "I couldn't send the teamless-users list in this channel.",
-                    mention_author=False,
-                )
-                return
-
-            self._save_tracking(ctx.guild.id, message.channel.id, message.id)
+        if not self._get_tracking(ctx.guild.id):
             await ctx.reply(
-                f"Teamless-users list sent and saved as the target message: {message.jump_url}",
+                "Choose the message first with `+setunteamed <message link>`.",
                 mention_author=False,
             )
             return
 
-        channel_id, message_id = map(int, tracking)
-        channel = ctx.guild.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                await ctx.reply(
-                    "I can't access the configured message channel. Set it again with `+setunteamed`.",
-                    mention_author=False,
-                )
-                return
-
-        try:
-            message = await channel.fetch_message(message_id)
-            await message.edit(
-                content=self._make_content(ctx.guild),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+        success = await self._refresh_saved_message(ctx.guild)
+        if success:
+            tracking = self._get_tracking(ctx.guild.id)
+            channel = ctx.guild.get_channel(int(tracking[0]))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(tracking[0]))
+            message = await channel.fetch_message(int(tracking[1]))
+            await ctx.reply(f"Updated: {message.jump_url}", mention_author=False)
+        else:
             await ctx.reply(
-                "I couldn't edit the configured message. Check the message/channel permissions or set another message.",
+                "I couldn't update the saved message. Check the bot's channel permissions "
+                "and make sure the target message still exists.",
                 mention_author=False,
             )
-            return
-
-        await ctx.reply(
-            f"Updated the configured teamless-users message: {message.jump_url}",
-            mention_author=False,
-        )
 
 
 async def setup(bot: commands.Bot):
