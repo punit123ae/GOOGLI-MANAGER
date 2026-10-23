@@ -119,52 +119,120 @@ class Unteamed(commands.Cog):
             for i, chunk in enumerate(chunks)
         ]
 
+    
     async def _refresh_saved_message(self, guild: discord.Guild) -> bool:
         if guild.id in self._refreshing_guilds:
-            return False
-        tracking = self._get_tracking(guild.id)
-        if not tracking:
+            self._last_refresh_error = (
+                "A refresh is already running. Wait a few seconds and try again."
+            )
+            print(f"[unteamed] Guild {guild.id}: refresh already in progress.")
             return False
 
         self._refreshing_guilds.add(guild.id)
+
         try:
             self._last_refresh_error = "No detailed error recorded."
-            # Ensure the member cache is populated before building the role-based list.
+
+            tracking = self._get_tracking(guild.id)
+            if not tracking:
+                raise ValueError(
+                    "No saved target message. Run +setunteamed first."
+                )
+
+            # Populate the member cache before building the list.
             await guild.chunk(cache=True)
+
             channel_id, message_id = map(int, tracking)
+
             channel = guild.get_channel_or_thread(channel_id)
             if channel is None:
                 channel = await self.bot.fetch_channel(channel_id)
+
             if not hasattr(channel, "fetch_message"):
-                raise TypeError(f"Configured channel {channel_id} cannot fetch messages.")
+                raise TypeError(
+                    f"Channel {channel_id} cannot fetch messages."
+                )
 
             primary = await channel.fetch_message(message_id)
-            if self.bot.user is not None and primary.author.id != self.bot.user.id:
+
+            if self.bot.user is None:
+                raise RuntimeError("The bot user is not ready.")
+
+            if primary.author.id != self.bot.user.id:
                 raise PermissionError(
-                    f"Target message was sent by user ID {primary.author.id}, not this bot (ID {self.bot.user.id})."
+                    f"Target message belongs to user ID {primary.author.id}, "
+                    f"not this bot (ID {self.bot.user.id})."
                 )
 
             chunks = self._make_chunks(guild)
-            primary_ids = [message_id]
             extra_ids = self._get_extra_ids(guild.id)
-            managed_ids = extra_ids[:]
+            new_extra_ids = []
 
-            await primary.edit(content=chunks[0], allowed_mentions=discord.AllowedMentions.none())
-            new_extra_ids: list[int] = []
+            # Update the original saved message.
+            await primary.edit(
+                content=chunks[0],
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+
+            # Update existing continuation messages or create new ones.
             for i, content in enumerate(chunks[1:]):
+                extra = None
+
                 if i < len(extra_ids):
                     try:
                         extra = await channel.fetch_message(extra_ids[i])
-                        if self.bot.user is not None and extra.author.id != self.bot.user.id:
-                            raise PermissionError(f"Continuation message {extra.id} is not authored by this bot.")
-                        await extra.edit(content=content, allowed_mentions=discord.AllowedMentions.none())
-                        new_extra_ids.append(extra.id)
+
+                        if extra.author.id != self.bot.user.id:
+                            raise PermissionError(
+                                f"Continuation message {extra.id} "
+                                "was not sent by this bot."
+                            )
+
                     except discord.NotFound:
-                        extra = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
-                        new_extra_ids.append(extra.id)
-                else:
-                    extra = await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                        extra = None
+
+                if extra is not None:
+                    await extra.edit(
+                        content=content,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
                     new_extra_ids.append(extra.id)
+                else:
+                    extra = await channel.send(
+                        content,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                    new_extra_ids.append(extra.id)
+
+            # Delete obsolete continuation messages.
+            for stale_id in extra_ids[len(chunks) - 1:]:
+                try:
+                    stale = await channel.fetch_message(stale_id)
+
+                    if stale.author.id == self.bot.user.id:
+                        await stale.delete()
+
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+            self._save_extra_ids(guild.id, new_extra_ids)
+            return True
+
+        except Exception as exc:
+            self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+
+            print(
+                f"[unteamed] Refresh failed | "
+                f"Guild: {guild.id} | "
+                f"Error: {self._last_refresh_error}",
+                flush=True
+            )
+
+            return False
+
+        finally:
+            self._refreshing_guilds.discard(guild.id)
+
 
             # Delete stale continuation messages if the list has shrunk.
             for stale_id in extra_ids[len(chunks) - 1:]:
