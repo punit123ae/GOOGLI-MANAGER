@@ -60,9 +60,14 @@ class NoTeam(commands.Cog):
     async def _members_without_role(self, guild: discord.Guild) -> list[discord.Member]:
         # Fetch/chunk when possible so the list is not limited to a partial member cache.
         try:
-            await guild.chunk(cache=True)
-        except (discord.HTTPException, discord.Forbidden, RuntimeError):
-            log.warning("Could not fully chunk members for guild %s; using available member cache.", guild.id)
+            # A chunk request can wait a long time if the Members Intent is not
+            # enabled in the Discord Developer Portal. Never let +noteam hang forever.
+            await asyncio.wait_for(guild.chunk(cache=True), timeout=12.0)
+        except (asyncio.TimeoutError, discord.HTTPException, discord.Forbidden, RuntimeError) as exc:
+            log.warning(
+                "Could not fully chunk members for guild %s (%s); using available member cache.",
+                guild.id, exc,
+            )
 
         role = guild.get_role(PARTICIPANTS_ROLE_ID)
         if role is None:
@@ -75,9 +80,15 @@ class NoTeam(commands.Cog):
         # If member intent/cache is incomplete, fetch the full member list where supported.
         if not guild.chunked:
             try:
-                members = [member async for member in guild.fetch_members(limit=None)]
-            except (discord.HTTPException, discord.Forbidden, discord.ClientException):
-                log.warning("Full member fetch failed for guild %s; using available cache.", guild.id)
+                async def fetch_all_members():
+                    return [member async for member in guild.fetch_members(limit=None)]
+
+                members = await asyncio.wait_for(fetch_all_members(), timeout=20.0)
+            except (asyncio.TimeoutError, discord.HTTPException, discord.Forbidden, discord.ClientException) as exc:
+                log.warning(
+                    "Full member fetch failed for guild %s (%s); using available cache.",
+                    guild.id, exc,
+                )
 
         humans = [m for m in members if not m.bot and role not in m.roles]
         return sorted(humans, key=lambda m: (m.display_name.casefold(), m.name.casefold(), m.id))
@@ -224,6 +235,17 @@ class NoTeam(commands.Cog):
                 mention_author=False,
             )
             return
+        # Acknowledge immediately so a slow member-cache request doesn't look like
+        # the command was ignored. The progress message is edited after the refresh.
+        try:
+            progress_message = await ctx.reply(
+                "Building the No Team list… this may take a few seconds.",
+                mention_author=False,
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Could not send the initial +noteam response in guild %s.", ctx.guild.id)
+            return
+
         state = self.active_lists.get(str(ctx.guild.id), {})
         state["active"] = True
         state["channel_id"] = ctx.channel.id if not state.get("message_ids") else state.get("channel_id", ctx.channel.id)
@@ -235,15 +257,22 @@ class NoTeam(commands.Cog):
                 state["channel_id"] = channel.id
             await self._write_list(ctx.guild, channel, state)
         except LookupError as exc:
-            await ctx.reply(str(exc), mention_author=False)
+            await progress_message.edit(content=f"Couldn't build the list: {exc}")
             return
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.reply("I couldn't update the list. Check that I can view the channel and send/edit messages.", mention_author=False)
+            log.exception("Discord API error while running +noteam in guild %s.", ctx.guild.id)
+            try:
+                await progress_message.edit(
+                    content="I couldn't update the list. Check my View Channel, Send Messages, Read Message History, and Manage Messages permissions (Manage Messages is only needed if old list messages must be deleted)."
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             return
-        await ctx.reply(
-            f"Updated the live **No Team** list: **{state.get('updated_count', 0)}** human member(s) currently lack the participants role.\n"
-            "It will refresh automatically when the server membership or participants role changes. Run `+stopnoteam` to stop automatic updates.",
-            mention_author=False,
+        await progress_message.edit(
+            content=(
+                f"Updated the live **No Team** list: **{state.get('updated_count', 0)}** human member(s) currently lack the participants role.\n"
+                "It will refresh automatically when the server membership or participants role changes. Run `+stopnoteam` to stop automatic updates."
+            )
         )
 
     @commands.command(name="stopnoteam")
