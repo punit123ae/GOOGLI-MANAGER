@@ -196,10 +196,20 @@ class Unteamed(commands.Cog):
         await ctx.guild.chunk(cache=True)
         tracking = self._get_tracking(ctx.guild.id)
         if not tracking:
-            await ctx.reply(
-                "Set the target message first with `+setunteamed <message link or message ID>`.",
-                mention_author=False,
-            )
+            # First run: send the list here and save this exact message as the target.
+            try:
+                message = await ctx.send(
+                    self._make_content(ctx.guild),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                await ctx.reply(
+                    "I couldn't send the teamless-users list in this channel.",
+                    mention_author=False,
+                )
+                return
+
+            self._save_tracking(ctx.guild.id, message.channel.id, message.id)
             return
 
         channel_id, message_id = map(int, tracking)
