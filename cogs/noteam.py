@@ -292,4 +292,11 @@ class NoTeam(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    """Load the NoTeam cog and print a clear startup confirmation."""
     await bot.add_cog(NoTeam(bot))
+    loaded = [
+        command.name
+        for command in bot.commands
+        if command.name in ("noteam", "stopnoteam")
+    ]
+    print(f"[cogs.noteam] Loaded successfully. Registered commands: {loaded}")
