@@ -185,6 +185,7 @@ class JoinRequestView(discord.ui.View):
                         member = None
                 if member is not None:
                     await self.cog._assign_team_role(guild, row["team_id"], member)
+                    await self.cog._sync_base_role_member(guild, member)
         try:
             user = self.cog.bot.get_user(row["user_id"]) or await self.cog.bot.fetch_user(row["user_id"])
             await self.cog._dm(user, f"Your request to join **{row['team_name']}** was {'accepted' if decision == 'accepted' else 'denied'} by the captain.")
@@ -221,6 +222,7 @@ class LeaveTeamConfirmView(discord.ui.View):
         self.cog.db.commit()
         # Remove the team's configured role when a player leaves.
         await self.cog._remove_team_role(interaction.guild, self.team_id, interaction.user)
+        await self.cog._sync_base_role_member(interaction.guild, interaction.user)
         await self.cog._dm_captain(
             interaction.guild, team,
             f"**{interaction.user.name}** has left your team **{team['name']}**."
@@ -280,6 +282,7 @@ class TeamCore:
             FOREIGN KEY(team_id) REFERENCES registered_teams(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS server_team_role_settings (guild_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS team_base_role_settings (guild_id INTEGER PRIMARY KEY, role_id INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS team_feature_toggles (
             guild_id INTEGER NOT NULL, feature TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY(guild_id, feature)
@@ -457,6 +460,43 @@ class TeamCore:
         await ctx.reply("This feature has been toggled off by an administrator.", mention_author=False)
         return True
 
+    def _is_team_member(self, guild_id, user_id):
+        return self.db.execute(
+            "SELECT 1 FROM registered_teams t "
+            "LEFT JOIN team_players p ON p.team_id=t.id "
+            "WHERE t.guild_id=? AND t.status='approved' "
+            "AND (t.captain_id=? OR t.vice_captain_id=? OR p.user_id=?) LIMIT 1",
+            (guild_id, user_id, user_id, user_id),
+        ).fetchone() is not None
+
+    async def _sync_base_role_member(self, guild, member):
+        """Make the configured base role match this member's current team membership."""
+        setting = self.db.execute(
+            "SELECT role_id FROM team_base_role_settings WHERE guild_id=?", (guild.id,)
+        ).fetchone()
+        if not setting:
+            return "not_configured"
+        role = guild.get_role(int(setting["role_id"]))
+        if role is None:
+            return "role_missing"
+        me = guild.me
+        if not me or not me.guild_permissions.manage_roles or role >= me.top_role:
+            return "permission_error"
+        should_have = self._is_team_member(guild.id, member.id)
+        has_role = role in member.roles
+        try:
+            if should_have and not has_role:
+                await member.add_roles(role, reason="Synchronise team base role")
+                return "added"
+            if not should_have and has_role:
+                await member.remove_roles(role, reason="Synchronise team base role")
+                return "removed"
+            return "already_correct"
+        except discord.Forbidden:
+            return "permission_error"
+        except discord.HTTPException:
+            return "discord_error"
+
     async def _assign_team_role(self, guild, team_id, member):
         global_setting = self.db.execute(
             "SELECT enabled FROM server_team_role_settings WHERE guild_id=?", (guild.id,)
@@ -608,6 +648,11 @@ class TeamCore:
         if applicant:
             msg = f"Congratulations! Your team **{row['name']}** has been approved. You are now its captain." if decision == "approved" else f"Your application for **{row['name']}** was rejected."
             await self._dm(applicant, msg)
+        if decision == "approved":
+            guild = self.bot.get_guild(int(interaction.guild_id))
+            member = guild.get_member(int(row["captain_id"])) if guild else None
+            if guild and member:
+                await self._sync_base_role_member(guild, member)
 
 
 from .teams2 import TeamCommandsA

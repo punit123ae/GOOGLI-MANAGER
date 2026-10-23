@@ -12,6 +12,203 @@ from .teams1 import TeamCore, ConfirmDeleteAllView, TeamApprovalView, TeamListVi
 class TeamCommandsA:
     """Command mixin; methods are registered by TeamRegistration in teams1.py."""
 
+    def _ensure_ping_tables(self):
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS team_ping_settings ("
+            "guild_id INTEGER PRIMARY KEY, cooldown_seconds INTEGER NOT NULL DEFAULT 60)"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS team_ping_usage ("
+            "team_id INTEGER PRIMARY KEY, last_ping_at REAL NOT NULL DEFAULT 0, "
+            "FOREIGN KEY(team_id) REFERENCES registered_teams(id) ON DELETE CASCADE)"
+        )
+        self.db.commit()
+
+    @commands.command(name="pingteam", aliases=["pteam", "teamping"])
+    @commands.guild_only()
+    async def ping_team(self, ctx):
+        """Let an approved team captain ping their configured team role."""
+        self._ensure_ping_tables()
+        team = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' AND captain_id=? LIMIT 1",
+            (ctx.guild.id, ctx.author.id),
+        ).fetchone()
+        if team is None:
+            await ctx.reply("Only an approved team captain can use this command.", mention_author=False)
+            return
+
+        setting = self.db.execute(
+            "SELECT role_id FROM team_role_settings WHERE team_id=?", (team["id"],)
+        ).fetchone()
+        if setting is None:
+            await ctx.reply("Your team doesn't have a ping role configured. Ask the server owner to use `+setteamrole`.", mention_author=False)
+            return
+        role = ctx.guild.get_role(int(setting["role_id"]))
+        if role is None:
+            await ctx.reply("Your team's configured role no longer exists. Ask the server owner to set it again.", mention_author=False)
+            return
+
+        cooldown_row = self.db.execute(
+            "SELECT cooldown_seconds FROM team_ping_settings WHERE guild_id=?", (ctx.guild.id,)
+        ).fetchone()
+        cooldown = int(cooldown_row["cooldown_seconds"]) if cooldown_row else 60
+        usage = self.db.execute(
+            "SELECT last_ping_at FROM team_ping_usage WHERE team_id=?", (team["id"],)
+        ).fetchone()
+        last_ping = float(usage["last_ping_at"]) if usage else 0.0
+        remaining = cooldown - (datetime.now(timezone.utc).timestamp() - last_ping)
+        if cooldown > 0 and remaining > 0:
+            await ctx.reply(
+                f"Your team can be pinged again in **{int(remaining) + 1} seconds**.",
+                mention_author=False,
+            )
+            return
+
+        try:
+            await ctx.send(
+                f"{role.mention} — **{discord.utils.escape_markdown(team['name'])}** needs your attention!",
+                allowed_mentions=discord.AllowedMentions(roles=[role], users=False, everyone=False),
+            )
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            await ctx.reply(f"I couldn't send the team ping: `{type(exc).__name__}`. Check my channel permissions.", mention_author=False)
+            return
+
+        self.db.execute(
+            "INSERT INTO team_ping_usage(team_id,last_ping_at) VALUES(?,?) "
+            "ON CONFLICT(team_id) DO UPDATE SET last_ping_at=excluded.last_ping_at",
+            (team["id"], datetime.now(timezone.utc).timestamp()),
+        )
+        self.db.commit()
+
+    @commands.command(name="setpingcooldown")
+    @commands.guild_only()
+    async def set_ping_cooldown(self, ctx, seconds: int):
+        """Configure the per-team ping cooldown; server owner only."""
+        if ctx.author.id not in (ctx.guild.owner_id, 1014568928682459198):
+            await ctx.reply("Only the server owner or bot owner can use this command.", mention_author=False)
+            return
+        if seconds < 0 or seconds > 86400:
+            await ctx.reply("Choose a cooldown from **0 to 86400 seconds**. Use `0` to disable it.", mention_author=False)
+            return
+        self._ensure_ping_tables()
+        self.db.execute(
+            "INSERT INTO team_ping_settings(guild_id,cooldown_seconds) VALUES(?,?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET cooldown_seconds=excluded.cooldown_seconds",
+            (ctx.guild.id, seconds),
+        )
+        self.db.commit()
+        await ctx.reply(
+            f"Team ping cooldown set to **{seconds} seconds**" + (" (disabled)." if seconds == 0 else "."),
+            mention_author=False,
+        )
+
+    @commands.command(name="setbaserole")
+    @commands.guild_only()
+    async def set_base_role(self, ctx, role_id: str):
+        if not await self._command_allowed(ctx, "setbaserole"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
+        match = re.fullmatch(r"<@&?(\d+)>|([0-9]+)", role_id.strip())
+        if not match:
+            await ctx.reply("Usage: `+setbaserole ROLE_ID` (a role mention also works).", mention_author=False)
+            return
+        rid = int(match.group(1) or match.group(2))
+        role = ctx.guild.get_role(rid)
+        if role is None:
+            await ctx.reply("That role ID doesn't exist in this server.", mention_author=False)
+            return
+        me = ctx.guild.me
+        if not me or not me.guild_permissions.manage_roles or role >= me.top_role:
+            await ctx.reply("I can't manage that role. Give me Manage Roles and move my highest role above it.", mention_author=False)
+            return
+        self.db.execute(
+            "INSERT INTO team_base_role_settings(guild_id, role_id) VALUES(?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id",
+            (ctx.guild.id, role.id),
+        )
+        self.db.commit()
+        await ctx.reply(f"Base role set to **{discord.utils.escape_markdown(role.name)}** (`{role.id}`). Use `+syncbaserole` to synchronise existing members.", mention_author=False)
+
+    @commands.command(name="syncbaserole")
+    @commands.guild_only()
+    async def sync_base_role(self, ctx):
+        if not await self._command_allowed(ctx, "syncbaserole"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
+        setting = self.db.execute(
+            "SELECT role_id FROM team_base_role_settings WHERE guild_id=?", (ctx.guild.id,)
+        ).fetchone()
+        if not setting:
+            await ctx.reply("No base role is configured. Use `+setbaserole ROLE_ID` first.", mention_author=False)
+            return
+        role = ctx.guild.get_role(int(setting["role_id"]))
+        if role is None:
+            await ctx.reply("The configured base role no longer exists. Set it again with `+setbaserole ROLE_ID`.", mention_author=False)
+            return
+
+        # Reply immediately so the command never appears to do nothing while the member list loads.
+        status_message = await ctx.reply("Base-role sync started. Loading server members…", mention_author=False)
+        try:
+            members = {m.id: m for m in ctx.guild.members}
+            fetch_note = None
+            try:
+                async for member in ctx.guild.fetch_members(limit=None):
+                    members[member.id] = member
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                fetch_note = f"Could not fetch the full member list ({type(exc).__name__}); synced cached and known team members."
+
+            # Include stored team users even if they weren't in the member cache.
+            rows = self.db.execute(
+                "SELECT DISTINCT user_id FROM ("
+                "SELECT t.captain_id AS user_id FROM registered_teams t WHERE t.guild_id=? AND t.status='approved' "
+                "UNION SELECT t.vice_captain_id FROM registered_teams t WHERE t.guild_id=? AND t.status='approved' "
+                "UNION SELECT p.user_id FROM team_players p JOIN registered_teams t ON t.id=p.team_id "
+                "WHERE t.guild_id=? AND t.status='approved')",
+                (ctx.guild.id, ctx.guild.id, ctx.guild.id),
+            ).fetchall()
+            for row in rows:
+                # Captains/vice-captains can be NULL in the database; skip them.
+                if row["user_id"] is None:
+                    continue
+                uid = int(row["user_id"])
+                if uid not in members:
+                    try:
+                        members[uid] = await ctx.guild.fetch_member(uid)
+                    except discord.NotFound:
+                        continue
+                    except (discord.Forbidden, discord.HTTPException):
+                        continue
+
+            counts = {"added": 0, "removed": 0, "already_correct": 0}
+            failures = []
+            for member in members.values():
+                try:
+                    result = await self._sync_base_role_member(ctx.guild, member)
+                except Exception as exc:
+                    result = f"unexpected_error_{type(exc).__name__}"
+                if result in counts:
+                    counts[result] += 1
+                elif result != "not_configured":
+                    failures.append(f"{discord.utils.escape_markdown(str(member))} (`{member.id}`): {result.replace('_', ' ')}")
+
+            embed = discord.Embed(title="Base Role Sync Complete", color=discord.Color.from_rgb(55, 150, 255))
+            embed.add_field(name="Members checked", value=str(len(members)), inline=True)
+            embed.add_field(name="Roles added", value=str(counts["added"]), inline=True)
+            embed.add_field(name="Roles removed", value=str(counts["removed"]), inline=True)
+            embed.add_field(name="Already correct", value=str(counts["already_correct"]), inline=True)
+            embed.add_field(name=f"Failures ({len(failures)})", value="\n".join(failures[:15]) if failures else "None", inline=False)
+            if len(failures) > 15:
+                embed.set_footer(text=f"{len(failures) - 15} additional failures omitted.")
+            if fetch_note:
+                embed.add_field(name="Member-list note", value=fetch_note, inline=False)
+            await status_message.edit(content=None, embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as exc:
+            await status_message.edit(
+                content=f"Base-role sync failed: `{type(exc).__name__}: {discord.utils.escape_markdown(str(exc))[:500]}`. Check the bot console for details.",
+                embed=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
     @commands.command(name="teamlist")
     @commands.guild_only()
     async def team_list(self, ctx):
@@ -140,6 +337,7 @@ class TeamCommandsA:
         self.db.execute("DELETE FROM team_players WHERE team_id=? AND user_id=?", (team["id"], member.id))
         self.db.execute("UPDATE registered_teams SET captain_id=? WHERE id=?", (member.id, team["id"]))
         self.db.commit()
+        await self._sync_base_role_member(ctx.guild, member)
         await ctx.reply(f"**{member.name}** is now captain of **{team['name']}**. The previous captain remains on the roster.", mention_author=False)
         await self._dm(member, f"You have been appointed captain of **{team['name']}** by a server administrator.")
         try:

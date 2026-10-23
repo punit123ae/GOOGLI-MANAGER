@@ -119,10 +119,20 @@ class TeamCommandsB:
             await ctx.reply("I couldn't find a team with that name.", mention_author=False)
             return
         name, captain_id, team_id = team["name"], team["captain_id"], team["id"]
+        affected_ids = self._team_player_ids(team_id)
         self.db.execute("DELETE FROM team_join_requests WHERE team_id=?", (team_id,))
         self.db.execute("DELETE FROM team_players WHERE team_id=?", (team_id,))
         self.db.execute("DELETE FROM registered_teams WHERE id=?", (team_id,))
         self.db.commit()
+        for user_id in affected_ids:
+            member = ctx.guild.get_member(int(user_id))
+            if member is None:
+                try:
+                    member = await ctx.guild.fetch_member(int(user_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    member = None
+            if member is not None:
+                await self._sync_base_role_member(ctx.guild, member)
         try:
             captain = self.bot.get_user(captain_id) or await self.bot.fetch_user(captain_id)
             await self._dm(captain, f"Your team **{name}** has been disbanded by a server administrator.")
@@ -263,6 +273,7 @@ class TeamCommandsB:
             (team["id"], member.id, ctx.author.id, datetime.now(timezone.utc).isoformat())
         )
         self.db.commit()
+        await self._sync_base_role_member(ctx.guild, member)
         await ctx.reply(f"{member.name} is now vice-captain of **{team['name']}**.", mention_author=False)
         await self._dm(member, f"You have been appointed vice-captain of **{team['name']}**.")
 
@@ -297,6 +308,7 @@ class TeamCommandsB:
             await ctx.reply(f"{member.name} is already on that team.", mention_author=False)
             return
         await self._assign_team_role(ctx.guild, team["id"], member)
+        await self._sync_base_role_member(ctx.guild, member)
         await ctx.reply(f"Added {member.name} to **{team['name']}**.", mention_author=False)
         await self._dm(member, f"You have been added by an administrator to **{team['name']}**.")
         await self._dm_captain(ctx.guild, team, f"An administrator added **{member.name}** to your team **{team['name']}**.")
@@ -415,6 +427,7 @@ class TeamCommandsB:
                 )
                 self.db.commit()
                 added_names.append(member.name)
+                await self._sync_base_role_member(ctx.guild, member)
                 await self._dm(member, f"You have been added by an administrator to **{team['name']}**.")
                 await self._dm_captain(ctx.guild, team, f"An administrator added **{member.name}** to your team **{team['name']}**.")
             except sqlite3.IntegrityError:
@@ -488,6 +501,7 @@ class TeamCommandsB:
                 )
                 self.db.commit()
                 added_names.append(member.name)
+                await self._sync_base_role_member(ctx.guild, member)
             except sqlite3.IntegrityError:
                 skipped_names.append(f"{member.name} (already on this team)")
                 continue
@@ -611,6 +625,7 @@ class TeamCommandsB:
             self.db.execute("UPDATE registered_teams SET vice_captain_id=NULL WHERE id=?", (team["id"],))
         self.db.commit()
         await self._remove_team_role(ctx.guild, team["id"], member)
+        await self._sync_base_role_member(ctx.guild, member)
         await ctx.reply(f"Removed {member.name} from **{team['name']}**.", mention_author=False)
         await self._dm(member, f"An administrator has removed you from **{team['name']}**.")
         await self._dm_captain(ctx.guild, team, f"An administrator removed **{member.name}** from your team **{team['name']}**.")
