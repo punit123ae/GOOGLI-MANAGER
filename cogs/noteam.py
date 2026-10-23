@@ -250,15 +250,18 @@ class NoTeam(commands.Cog):
             return
 
         state = self.active_lists.get(str(ctx.guild.id), {})
+        was_active = bool(state.get("active", False))
+
+        # Every explicit +noteam command targets the channel where it was invoked.
+        # If the previous session was stopped, detach its old message IDs so those
+        # messages remain untouched and a fresh list is created in this channel.
+        if not was_active:
+            state["message_ids"] = []
         state["active"] = True
-        state["channel_id"] = ctx.channel.id if not state.get("message_ids") else state.get("channel_id", ctx.channel.id)
+        state["channel_id"] = ctx.channel.id
         self.active_lists[str(ctx.guild.id)] = state
         try:
-            channel = ctx.guild.get_channel(int(state["channel_id"]))
-            if channel is None:
-                channel = ctx.channel
-                state["channel_id"] = channel.id
-            await self._write_list(ctx.guild, channel, state)
+            await self._write_list(ctx.guild, ctx.channel, state)
         except LookupError as exc:
             await progress_message.edit(content=f"Couldn't build the list: {exc}")
             return
