@@ -210,6 +210,10 @@ class Unteamed(commands.Cog):
                 return
 
             self._save_tracking(ctx.guild.id, message.channel.id, message.id)
+            await ctx.reply(
+                f"Teamless-users list sent and saved as the target message: {message.jump_url}",
+                mention_author=False,
+            )
             return
 
         channel_id, message_id = map(int, tracking)
