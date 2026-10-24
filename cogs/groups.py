@@ -147,6 +147,74 @@ def make_round_robin(names):
     return rounds
 
 
+class ClearGroupConfirmView(discord.ui.View):
+    """Owner-triggered confirmation before clearing a group's assignments."""
+
+    def __init__(self, ctx, group_key, group_name):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.group_key = group_key
+        self.group_name = group_name
+        self.message = None
+        self.completed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can use these buttons.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Delete all teams", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        conn = connect_group_db()
+        try:
+            cursor = conn.execute(
+                "DELETE FROM team_groups WHERE guild_id = ? AND group_key = ?",
+                (self.ctx.guild.id, self.group_key),
+            )
+            deleted = cursor.rowcount
+            conn.execute(
+                "DELETE FROM generated_fixtures WHERE guild_id = ? AND group_key = ?",
+                (self.ctx.guild.id, self.group_key),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.completed = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Cleared **{deleted} team assignment(s)** from group **{self.group_name}** "
+                "and deleted that group's generated schedule. The group itself is still configured."
+            ),
+            view=self,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Cancelled. No team assignments were changed.", view=self
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None and not self.completed:
+            try:
+                await self.message.edit(
+                    content="Confirmation expired. No team assignments were changed.", view=self
+                )
+            except discord.HTTPException:
+                pass
+
+
 class Groups(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -310,6 +378,44 @@ class Groups(commands.Cog):
             lines.append("⚠️ Run `+groupstyle` first.")
         for chunk in split_chunks("\n".join(lines)):
             await ctx.send(chunk)
+
+    @commands.command(name="deletegroupteams")
+    async def deletegroupteams(self, ctx, *, group_name: str = None):
+        """Remove every team assignment from one group after button confirmation."""
+        if not await owner_only(ctx):
+            return
+        if not group_name:
+            await ctx.send("Usage: `+deletegroupteams <group>` (example: `+deletegroupteams A`)")
+            return
+
+        conn = connect_group_db()
+        try:
+            group = conn.execute(
+                "SELECT group_name, group_key FROM group_styles WHERE guild_id = ? AND group_key = ?",
+                (ctx.guild.id, norm(group_name)),
+            ).fetchone()
+            if group:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM team_groups WHERE guild_id = ? AND group_key = ?",
+                    (ctx.guild.id, group["group_key"]),
+                ).fetchone()[0]
+        finally:
+            conn.close()
+
+        if not group:
+            await ctx.send("That group isn't configured. Check `+groupstyle`.")
+            return
+        if count == 0:
+            await ctx.send(f"Group **{group['group_name']}** has no assigned teams to delete.")
+            return
+
+        view = ClearGroupConfirmView(ctx, group["group_key"], group["group_name"])
+        view.message = await ctx.send(
+            f"⚠️ **Confirm deletion**\nThis will remove all **{count} team assignment(s)** from "
+            f"group **{group['group_name']}** and delete its generated schedule.\n"
+            "The approved teams in `team_registration.db` will NOT be deleted, and the group name will remain configured.",
+            view=view,
+        )
 
     @commands.command(name="setformat")
     async def setformat(self, ctx):
