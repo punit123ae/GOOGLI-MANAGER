@@ -41,6 +41,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.results",
             "cogs.dm",
             "cogs.noteam",
+            "cogs.reserves",
         ):
             await self.load_extension(extension)
 
