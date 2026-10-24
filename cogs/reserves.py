@@ -39,6 +39,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 DB_PATH = Path(__file__).resolve().parent.parent / "reserve_matches.db"
 # Match the path used by cogs/teams.py, which opens team_registration.db
 # relative to the bot working directory. Fail closed if this DB is unavailable.
@@ -420,8 +422,8 @@ class Reserves(commands.Cog):
         _init_db()
 
     async def owner_only(self, ctx):
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        if not await owner_or_whitelisted(ctx, app_owner=True):
+            await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
             return False
         return True
 

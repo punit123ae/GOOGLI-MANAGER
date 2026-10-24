@@ -7,6 +7,8 @@ from typing import Optional
 
 import discord
 from discord.ext import commands
+
+from .utility import owner_or_whitelisted
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # Put mvp.py and mvp_background.png in the same cogs folder.
@@ -204,9 +206,8 @@ class MVP(commands.Cog):
     @commands.command(name="setmvp")
     @commands.guild_only()
     async def set_mvp(self, ctx: commands.Context) -> None:
-        # Uses Discord's configured application owner/team owner check; no hard-coded user ID.
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("Only the bot owner can use this command.")
+        if not await owner_or_whitelisted(ctx, app_owner=True):
+            await ctx.send("Only the bot owner or a role whitelisted for this command can use it.")
             return
 
         name = await self._ask(ctx, "**MVP setup — 1/5**\nEnter the player name (or mention a Discord member):")

@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 # Only this Discord user can use the commands in this cog.
 OWNER_ID = 1014568928682459198
 CONFIG_PATH = Path(__file__).with_name("results_config.json")
@@ -42,14 +44,15 @@ class ResultsCog(commands.Cog):
         self.result_channels = _load_config()
 
     async def cog_check(self, ctx: commands.Context) -> bool:
-        return ctx.author.id == OWNER_ID
+        # Resolve authorization per command, rather than granting cog-wide access.
+        return await owner_or_whitelisted(ctx)
 
     async def cog_command_error(
         self, ctx: commands.Context, error: commands.CommandError
     ) -> None:
         if isinstance(error, commands.CheckFailure):
             await ctx.reply(
-                "❌ Only the bot owner can use this command.",
+                "❌ Only the bot owner or a role whitelisted for this command can use it.",
                 mention_author=False,
             )
             return

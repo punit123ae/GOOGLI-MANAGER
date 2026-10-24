@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import discord
 from discord.ext import commands
+
+from .utility import owner_or_whitelisted
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
@@ -958,7 +960,7 @@ LB_METRICS = [
 # ============================================================
 
 class ResetServerStatsView(discord.ui.View):
-    """Confirmation controls for the bot-owner-only server stats reset."""
+    """Confirmation controls for the authorized user's server stats reset."""
 
     def __init__(self, cog, guild_id, owner_id):
         super().__init__(timeout=60)
@@ -970,7 +972,7 @@ class ResetServerStatsView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "Only the bot owner who started this reset can confirm or cancel it.",
+                "Only the user who started this reset can confirm or cancel it.",
                 ephemeral=True,
             )
             return False
@@ -1257,9 +1259,9 @@ class Stats(commands.Cog):
         """Reset imported stats for this server; restricted to the bot owner."""
         BOT_OWNER_ID = 1014568928682459198
 
-        if ctx.author.id != BOT_OWNER_ID:
+        if not await owner_or_whitelisted(ctx):
             await ctx.reply(
-                "❌ Only the bot owner can use this command.",
+                "❌ Only the bot owner or a role whitelisted for this command can use it.",
                 mention_author=False,
             )
             return
@@ -1271,7 +1273,7 @@ class Stats(commands.Cog):
             )
             return
 
-        view = ResetServerStatsView(self, ctx.guild.id, BOT_OWNER_ID)
+        view = ResetServerStatsView(self, ctx.guild.id, ctx.author.id)
         await ctx.reply(
             "⚠️ **Confirm server stats reset**\n"
             "This will permanently delete all imported match statistics for this server. "

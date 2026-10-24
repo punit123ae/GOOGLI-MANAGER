@@ -13,6 +13,8 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 OWNER_ID = 1014568928682459198
 TICK = "✅"
 CROSS = "❌"
@@ -96,8 +98,8 @@ class LiveDraws(commands.Cog):
     @commands.guild_only()
     async def setup_live_draws(self, ctx):
         """Interactively save a live-draw setting for this server."""
-        if ctx.author.id != OWNER_ID:
-            await ctx.send("You are not authorized to use live-draw commands.")
+        if not await owner_or_whitelisted(ctx):
+            await ctx.send("You are not authorized to use this command.")
             return
 
         try:
@@ -165,8 +167,8 @@ class LiveDraws(commands.Cog):
     @commands.guild_only()
     async def start_live_draw(self, ctx, *, setting_name: str):
         """Draw one team at a time, retaining the complete draw in each new message."""
-        if ctx.author.id != OWNER_ID:
-            await ctx.send("You are not authorized to use live-draw commands.")
+        if not await owner_or_whitelisted(ctx):
+            await ctx.send("You are not authorized to use this command.")
             return
 
         key = self._setting_key(setting_name)
@@ -232,7 +234,7 @@ class LiveDraws(commands.Cog):
 
                 def check(message):
                     return (
-                        message.author.id == OWNER_ID
+                        message.author.id == ctx.author.id
                         and message.channel.id == ctx.channel.id
                         and message.guild is not None
                         and message.guild.id == ctx.guild.id

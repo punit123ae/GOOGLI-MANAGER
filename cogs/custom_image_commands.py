@@ -18,6 +18,8 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 BOT_OWNER_ID = 1014568928682459198
 DB_PATH = Path("custom_image_commands.db")
 
@@ -67,9 +69,9 @@ class CustomImageCommands(commands.Cog):
         return await self.bot.wait_for("message", check=check, timeout=180)
 
     async def _owner_only(self, ctx):
-        if ctx.author.id == BOT_OWNER_ID:
+        if await owner_or_whitelisted(ctx):
             return True
-        await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
         return False
 
     @commands.command(name="createimagecommand", aliases=["addimagecommand", "setimagecommand"])

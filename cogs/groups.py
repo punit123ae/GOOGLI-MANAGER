@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 TEAM_DB = "team_registration.db"
 GROUP_DB = "groups_schedule.db"
 PROMPT_TIMEOUT = 180
@@ -84,8 +86,8 @@ def get_approved_teams(guild_id):
 
 
 async def owner_only(ctx):
-    if not await ctx.bot.is_owner(ctx.author):
-        await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+    if not await owner_or_whitelisted(ctx, app_owner=True):
+        await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
         return False
     if ctx.guild is None:
         await ctx.reply("Use this command in your server, not in DMs.", mention_author=False)

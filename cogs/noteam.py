@@ -13,6 +13,8 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 log = logging.getLogger(__name__)
 
 BOT_OWNER_ID = 1014568928682459198
@@ -54,8 +56,8 @@ class NoTeam(commands.Cog):
             except OSError:
                 log.exception("Could not save noteam state. Automatic updates may not survive a restart.")
 
-    def _is_bot_owner(self, ctx: commands.Context) -> bool:
-        return ctx.author.id == BOT_OWNER_ID
+    async def _is_bot_owner(self, ctx: commands.Context) -> bool:
+        return await owner_or_whitelisted(ctx)
 
     async def _members_without_role(self, guild: discord.Guild) -> list[discord.Member]:
         # Fetch/chunk when possible so the list is not limited to a partial member cache.
@@ -228,8 +230,8 @@ class NoTeam(commands.Cog):
     @commands.guild_only()
     async def noteam(self, ctx: commands.Context):
         """Create the list, or refresh the existing list for this server."""
-        if not self._is_bot_owner(ctx):
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        if not await self._is_bot_owner(ctx):
+            await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
             return
         role = ctx.guild.get_role(PARTICIPANTS_ROLE_ID)
         if role is None:
@@ -285,8 +287,8 @@ class NoTeam(commands.Cog):
     @commands.guild_only()
     async def stop_noteam(self, ctx: commands.Context):
         """Stop future automatic edits while leaving the current list messages in place."""
-        if not self._is_bot_owner(ctx):
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        if not await self._is_bot_owner(ctx):
+            await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
             return
         state = self.active_lists.get(str(ctx.guild.id))
         if not state or not state.get("active", False):

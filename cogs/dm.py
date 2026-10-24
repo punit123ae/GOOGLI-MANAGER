@@ -33,6 +33,8 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 OWNER_ID = 1014568928682459198
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
 
@@ -196,7 +198,7 @@ class DMExtension(commands.Cog):
     @commands.command(name="dm")
     async def dm_command(self, ctx: commands.Context, *, raw_args: str):
         """Owner-only: +dm <user ID/username/role ID/role name> <text or image URL>"""
-        if ctx.author.id != OWNER_ID:
+        if not await owner_or_whitelisted(ctx):
             await ctx.reply("You are not authorized to use this command.", mention_author=False)
             return
         if ctx.guild is None:
@@ -312,7 +314,7 @@ class DMExtension(commands.Cog):
     @commands.command(name="echo")
     async def echo_command(self, ctx: commands.Context, *, raw_args: str):
         """Owner-only: +echo <message> <#channel>"""
-        if ctx.author.id != OWNER_ID:
+        if not await owner_or_whitelisted(ctx):
             await ctx.reply("You are not authorized to use this command.", mention_author=False)
             return
         if ctx.guild is None:

@@ -46,6 +46,32 @@ def has_command_whitelist(bot, guild_id, member, command_name):
     return bool(role_ids(member) & allowed)
 
 
+async def owner_or_whitelisted(ctx, command_name=None, app_owner=False):
+    """Allow the command's original owner check, plus a role whitelisted for this exact command.
+
+    By default, preserve the configured BOT_OWNER_ID-only rule. Pass app_owner=True
+    only for commands that originally used bot.is_owner().
+    """
+    bot = getattr(ctx, "bot", None)
+    author = getattr(ctx, "author", None)
+    if bot is None or author is None:
+        return False
+    if int(getattr(author, "id", 0)) == BOT_OWNER_ID:
+        return True
+    if app_owner:
+        try:
+            if await bot.is_owner(author):
+                return True
+        except (AttributeError, discord.DiscordException):
+            pass
+    utility = bot.get_cog("Utility")
+    if utility is None:
+        return False
+    command = getattr(ctx, "command", None)
+    name = command_name or getattr(command, "name", "")
+    return await utility.command_allowed(ctx, name)
+
+
 class PostApprovedTeamsView(discord.ui.View):
     """Owner-only confirmation before publishing approved team embeds."""
     def __init__(self, cog, guild_id, channel_id, author_id):
@@ -56,17 +82,17 @@ class PostApprovedTeamsView(discord.ui.View):
         self.author_id = author_id
 
     async def interaction_check(self, interaction):
-        if interaction.user.id != self.author_id or interaction.user.id != BOT_OWNER_ID:
+        if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "Only the bot owner who started this action can confirm it.", ephemeral=True
+                "Only the user who started this action can confirm it.", ephemeral=True
             )
             return False
         return True
 
     @discord.ui.button(label="Confirm and post", style=discord.ButtonStyle.success)
     async def confirm(self, interaction, button):
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("Only the bot owner can do this.", ephemeral=True)
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the user who started this action can confirm it.", ephemeral=True)
             return
         for child in self.children:
             child.disabled = True
@@ -589,9 +615,9 @@ class Utility(commands.Cog):
     async def command_allowed(self, ctx_or_interaction, command_name):
         """Permission gate for formerly admin-only commands in any supported cog.
 
-        While unlocked, the exact command must be whitelisted for one of the
-        member's roles. During the global lock, any whitelisted role can use
-        commands. Channel locks always apply, except for recovery commands.
+        A member must have a role whitelisted for this exact command.
+        The global lock and disabled-channel rules remain restrictive; they
+        never turn one command whitelist into access to unrelated commands.
         """
         guild = getattr(ctx_or_interaction, "guild", None)
         guild_id = getattr(ctx_or_interaction, "guild_id", None) or getattr(guild, "id", None)
@@ -606,8 +632,8 @@ class Utility(commands.Cog):
             return False
         if self.is_channel_disabled(guild_id, channel_id) and name not in RECOVERY_COMMANDS:
             return False
-        if self.is_locked(guild_id):
-            return has_any_whitelisted_role(self.bot, guild_id, member)
+        # Lock mode still blocks ordinary commands, but whitelist access remains
+        # command-specific so one rule can never unlock unrelated commands.
         return has_command_whitelist(self.bot, guild_id, member, name)
 
     def is_bot_banned(self, user_id):
@@ -637,7 +663,7 @@ class Utility(commands.Cog):
                 return True
             return False
         if self.is_locked(ctx.guild.id):
-            return has_any_whitelisted_role(self.bot, ctx.guild.id, ctx.author)
+            return has_command_whitelist(self.bot, ctx.guild.id, ctx.author, name)
         return True
 
     async def global_interaction_check(self, interaction):
@@ -668,7 +694,7 @@ class Utility(commands.Cog):
         if self.is_channel_disabled(interaction.guild_id, interaction.channel_id):
             return False
         if self.is_locked(interaction.guild_id):
-            return has_any_whitelisted_role(self.bot, interaction.guild_id, interaction.user)
+            return has_command_whitelist(self.bot, interaction.guild_id, interaction.user, name)
         return True
 
     async def _can_manage_utility(self, guild_id, member):
@@ -703,6 +729,11 @@ class Utility(commands.Cog):
             await ctx.reply("That role ID doesn't exist in this server.", mention_author=False)
             return
         name = _normalise_command_name(command_name)
+        # Store the registered command's canonical name so aliases grant the
+        # same command permission without creating a separate permission scope.
+        resolved = self.bot.get_command(name)
+        if resolved is not None:
+            name = _normalise_command_name(resolved.name)
         if not re.fullmatch(r"[a-z0-9_-]+", name):
             await ctx.reply("Give one command name, without a prefix or arguments.", mention_author=False)
             return
@@ -737,6 +768,9 @@ class Utility(commands.Cog):
             return
         role_id = int(next(group for group in match.groups() if group))
         name = _normalise_command_name(command_name)
+        resolved = self.bot.get_command(name)
+        if resolved is not None:
+            name = _normalise_command_name(resolved.name)
         cur = self.db.execute(
             "DELETE FROM command_whitelist WHERE guild_id=? AND role_id=? AND command_name=?",
             (ctx.guild.id, role_id, name),
@@ -785,7 +819,7 @@ class Utility(commands.Cog):
         )
         self.db.commit()
         await ctx.reply(
-            "🔒 Server-wide command lock enabled. Only members with a role appearing in the whitelist can use commands until unlocked.",
+            "🔒 Server-wide command lock enabled. Only members whose roles are whitelisted for the specific command can use it until unlocked.",
             mention_author=False,
         )
 
@@ -843,9 +877,15 @@ class Utility(commands.Cog):
 
 
     async def _require_bot_owner(self, ctx):
-        if int(ctx.author.id) == BOT_OWNER_ID:
+        # Owner-only utility commands can be delegated individually, without
+        # changing Bot.is_owner() or granting access to other commands.
+        command_name = ctx.command.name if ctx.command else ""
+        if await self.command_allowed(ctx, command_name):
             return True
-        await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        await ctx.reply(
+            "Only the bot owner or a role whitelisted for this command can use it.",
+            mention_author=False,
+        )
         return False
 
     async def _resolve_botban_target(self, ctx, raw_target):
@@ -1074,8 +1114,8 @@ class Utility(commands.Cog):
     @commands.guild_only()
     async def send_single_approved_team(self, ctx, *, team_name: str):
         """Owner-only: post one approved team's announcement embed in this channel."""
-        if ctx.author.id != BOT_OWNER_ID:
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        if not await self.command_allowed(ctx, ctx.command.name if ctx.command else ""):
+            await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
             return
 
         import sqlite3
@@ -1167,8 +1207,8 @@ class Utility(commands.Cog):
     @commands.guild_only()
     async def set_approved_teams_channel(self, ctx, channel: discord.TextChannel):
         """Owner-only: choose the one channel for future approved-team announcements."""
-        if ctx.author.id != BOT_OWNER_ID:
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        if not await self.command_allowed(ctx, ctx.command.name if ctx.command else ""):
+            await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
             return
         if channel.guild.id != ctx.guild.id:
             await ctx.reply("Choose a text channel from this server.", mention_author=False)
@@ -1202,8 +1242,8 @@ class Utility(commands.Cog):
     @commands.guild_only()
     async def post_approved_teams(self, ctx, channel: discord.TextChannel):
         """Owner-only: preview and confirm posting every approved team to a channel."""
-        if ctx.author.id != BOT_OWNER_ID:
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+        if not await self.command_allowed(ctx, ctx.command.name if ctx.command else ""):
+            await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.", mention_author=False)
             return
 
         import sqlite3
