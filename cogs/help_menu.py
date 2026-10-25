@@ -1,261 +1,137 @@
-"""Interactive, category-based help menu for Googli Manager."""
-from __future__ import annotations
-
-import inspect
-from typing import Any
-
+import math
 import discord
 from discord.ext import commands
+from discord import app_commands
 
-CATEGORY_NAMES = {
-    "Scheduling": "Match Management",
-    "Stats": "Player Statistics",
-    "LeaderboardCog": "Leaderboards",
-    "PointsTable": "Points Table",
-    "TeamRegistration": "Team Management",
-    "LiveDraws": "Live Draws",
-    "CustomImageCommands": "Custom Image Commands",
-    "MVP": "MVP",
-    "ResultsCog": "Match Results",
-    "DMExtension": "DM & Echo",
-    "NoTeam": "No-Team Management",
-    "Reserves": "Reserves & Matchups",
-    "Groups": "Groups & Fixtures",
-    "Utility": "Administration & Utility",
-    "AutoLock": "AutoLock",
-    "Predictions": "Predictions",
-    "PointsTable": "Points Table",
+PER_PAGE = 6
+CATEGORY_ORDER = ["Match Management", "Team Management", "Statistics", "Leaderboards", "Results", "Reserves", "Groups & Scheduling", "Predictions & Draws", "MVP", "AutoLock", "DM & Messaging", "Utility & Administration", "Other"]
+COG_CATEGORIES = {
+    "scheduling": "Match Management", "teams1": "Team Management", "teams2": "Team Management", "teams3": "Team Management", "noteam": "Team Management",
+    "stats": "Statistics", "lb": "Leaderboards", "points_table": "Leaderboards", "results": "Results", "reserves": "Reserves",
+    "groups": "Groups & Scheduling", "predictions": "Predictions & Draws", "draws": "Predictions & Draws", "mvp": "MVP", "autolock": "AutoLock",
+    "dm": "DM & Messaging", "custom_image_commands": "DM & Messaging", "utility": "Utility & Administration"
 }
 
-CATEGORY_DESCRIPTIONS = {
-    "Match Management": "Slash commands for scheduling, viewing, and cancelling matches.",
-    "Player Statistics": "Import, view, and manage match statistics.",
-    "Leaderboards": "Leaderboard and ranking commands.",
-    "Points Table": "Points table commands.",
-    "Team Management": "Team registration, rosters, roles, and team settings.",
-    "Live Draws": "Configure and run live draws.",
-    "Custom Image Commands": "Create and manage custom image commands.",
-    "MVP": "MVP-related commands.",
-    "Match Results": "Post and configure match results.",
-    "DM & Echo": "Owner-restricted direct-message and echo utilities.",
-    "No-Team Management": "No-team tracking and related controls.",
-    "Reserves & Matchups": "Reserve players and matchup management.",
-    "Groups & Fixtures": "Groups, formats, and fixture generation.",
-    "Administration & Utility": "Bot administration, command whitelist, backups, and utilities.",
-    "AutoLock": "Automatically lock configured channels after match statistics appear.",
-    "Predictions": "Prediction-related commands.",
-}
+def category_for(command):
+    cog = getattr(command, "cog", None)
+    key = (getattr(cog, "qualified_name", "") or "").lower().replace(" ", "_")
+    return COG_CATEGORIES.get(key, "Other")
 
+def usage(command):
+    args = []
+    for p in getattr(command, "clean_params", {}).values():
+        if p.kind.name == "KEYWORD_ONLY": args.append(f"[{p.name}...]")
+        elif p.default is not p.empty: args.append(f"[{p.name}]")
+        else: args.append(f"<{p.name}>")
+    return "+" + command.qualified_name + (" " + " ".join(args) if args else "")
 
-def _source_for(command: commands.Command) -> str:
-    try:
-        return inspect.getsource(command.callback).lower()
-    except (OSError, TypeError):
-        return ""
+def access(command):
+    found = []
+    for check in getattr(command, "checks", []):
+        name = getattr(check, "__qualname__", getattr(check, "__name__", "")).lower()
+        if "is_owner" in name: found.append("Bot owner")
+        elif "has_permissions" in name or "has_guild_permissions" in name: found.append("Requires Discord permissions")
+        elif "guild_only" in name: found.append("Server only")
+    doc = (getattr(command, "help", None) or getattr(command, "description", None) or "").lower()
+    if "owner only" in doc or "bot owner" in doc: found.append("Bot owner only")
+    return ", ".join(dict.fromkeys(found)) or "Existing command checks apply"
 
+def prefix_entries(bot):
+    result = {}
+    for cmd in bot.walk_commands():
+        if cmd.hidden or cmd.name == "help": continue
+        cat = category_for(cmd)
+        result.setdefault(cat, []).append({"name": "+" + cmd.qualified_name, "usage": usage(cmd), "description": (cmd.short_doc or "No description provided.")[:160], "aliases": ", ".join("+" + a for a in cmd.aliases) if cmd.aliases else "None", "access": access(cmd)})
+    return result
 
-def _access_label(command: commands.Command) -> str:
-    src = _source_for(command)
-    name = command.name.lower()
-    if "owner_or_whitelisted" in src:
-        return "Bot owner or a role whitelisted for this command"
-    if "_command_allowed(" in src or "_allowed(" in src or "_feature_blocked(" in src:
-        return "Restricted by this command's built-in access checks"
-    checks = " ".join(getattr(check, "__qualname__", repr(check)) for check in command.checks).lower()
-    if "is_owner" in checks or "owner" in checks:
-        return "Bot owner only (unless the command's checks say otherwise)"
-    if "administrator" in checks or "has_permissions" in checks or "has_guild_permissions" in checks:
-        return "Server administrators / members with the required permissions"
-    if any(term in src for term in ("captain_id", "only an approved team captain", "team captain")):
-        return "Eligible team captain or user meeting the command's team rules"
-    if command.checks:
-        return "Users who pass this command's built-in checks"
-    if name in {"help", "lb", "leaderboard", "leaderboards", "stats", "teamlist", "teaminfo", "reservelist", "reservestatus", "match_list", "match_info"}:
-        return "Everyone (subject to the command's built-in rules)"
-    return "Check the command's own rules; additional restrictions may apply"
+def slash_entries(bot):
+    result = {}
+    for cmd in bot.tree.get_commands():
+        if isinstance(cmd, app_commands.Group):
+            for sub in cmd.commands:
+                result.setdefault("Match Management", []).append({"name": f"/{cmd.name} {sub.name}", "usage": f"/{cmd.name} {sub.name}", "description": (sub.description or "No description provided.")[:160], "aliases": "None (slash command)", "access": "Existing command checks apply"})
+        else:
+            result.setdefault("Match Management", []).append({"name": "/" + cmd.name, "usage": "/" + cmd.name, "description": (cmd.description or "No description provided.")[:160], "aliases": "None (slash command)", "access": "Existing command checks apply"})
+    return result
 
-
-def _prefix_entry(command: commands.Command) -> dict[str, str]:
-    usage = f"+{command.qualified_name}"
-    if command.signature:
-        usage += f" {command.signature}"
-    description = (command.short_doc or command.help or "No description provided.").strip().split("\n", 1)[0]
-    aliases = ", ".join(f"`+{alias}`" for alias in command.aliases) if command.aliases else "None"
-    return {
-        "sort": command.name.lower(),
-        "usage": usage,
-        "description": description[:240],
-        "aliases": aliases,
-        "access": _access_label(command),
-    }
-
-
-def _slash_entry(command: discord.app_commands.Command[Any, ..., Any]) -> dict[str, str]:
-    usage = f"/{command.qualified_name}"
-    params = []
-    for parameter in getattr(command, "parameters", []):
-        params.append(f"<{parameter.name}>" if parameter.required else f"[{parameter.name}]")
-    if params:
-        usage += " " + " ".join(params)
-    description = (getattr(command, "description", None) or "No description provided.").strip()
-    try:
-        src = inspect.getsource(command.callback).lower()
-    except (OSError, TypeError, AttributeError):
-        src = ""
-    if "command_allowed(" in src:
-        access = "Bot owner or a role whitelisted for this exact command"
-    elif "guild_permissions.administrator" in src or "has_permissions" in src:
-        access = "Server administrators / members with the required permissions"
-    else:
-        access = "Command-specific restrictions may apply"
-    return {
-        "sort": command.name.lower(),
-        "usage": usage,
-        "description": description[:240],
-        "aliases": "None — slash commands do not use prefix aliases",
-        "access": access,
-    }
-
-
-class HelpCategorySelect(discord.ui.Select):
-    def __init__(self, view: "HelpMenuView"):
-        self.help_view = view
-        options = []
-        for category in view.categories[:25]:
-            options.append(discord.SelectOption(
-                label=category[:100],
-                value=category,
-                description=CATEGORY_DESCRIPTIONS.get(category, f"Commands in {category}")[:100],
-                default=category == view.category,
-            ))
-        super().__init__(placeholder="Choose a command category…", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        self.help_view.category = self.values[0]
-        self.help_view.page = 0
-        self.help_view.refresh_select()
-        await interaction.response.edit_message(embed=self.help_view.make_embed(), view=self.help_view)
-
-
-class HelpMenuView(discord.ui.View):
-    PAGE_SIZE = 6
-
-    def __init__(self, ctx: commands.Context, categories: dict[str, list[dict[str, str]]]):
+class HelpView(discord.ui.View):
+    def __init__(self, author_id, entries, categories):
         super().__init__(timeout=180)
-        self.ctx = ctx
-        self.categories_data = categories
-        self.categories = list(categories.keys())[:25]
-        self.category = self.categories[0] if self.categories else "Help"
-        self.page = 0
-        self.message = None
-        self.add_item(HelpCategorySelect(self))
-        self._sync_buttons()
+        self.author_id, self.entries, self.categories = author_id, entries, categories
+        self.category, self.page, self.message = categories[0], 0, None
+        options = [discord.SelectOption(label=c[:100], value=c, default=(c == self.category)) for c in categories[:25]]
+        self.selector = discord.ui.Select(placeholder="Jump to a command category…", options=options, row=1)
+        self.selector.callback = self.choose_category
+        self.add_item(self.selector)
+        self.refresh()
 
-    def refresh_select(self):
-        for item in self.children:
-            if isinstance(item, HelpCategorySelect):
-                self.remove_item(item)
-                break
-        self.insert_item(0, HelpCategorySelect(self))
-        self._sync_buttons()
-
-    def _sync_buttons(self):
-        total = len(self.categories_data.get(self.category, []))
-        pages = max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                if item.custom_id == "gm_help_prev":
-                    item.disabled = self.page <= 0
-                elif item.custom_id == "gm_help_next":
-                    item.disabled = self.page >= pages - 1
-
-    def make_embed(self) -> discord.Embed:
-        entries = self.categories_data.get(self.category, [])
-        pages = max(1, (len(entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        start = self.page * self.PAGE_SIZE
-        shown = entries[start:start + self.PAGE_SIZE]
-        embed = discord.Embed(
-            title=f"Googli Manager • {self.category}",
-            description=CATEGORY_DESCRIPTIONS.get(self.category, "Commands in this category."),
-            color=discord.Color.from_rgb(55, 150, 255),
-        )
-        if not shown:
-            embed.add_field(name="No commands found", value="There are no visible commands in this category.", inline=False)
-        for entry in shown:
-            value = (
-                f"{entry['description']}\n"
-                f"**Aliases:** {entry['aliases']}\n"
-                f"**Who can use it:** {entry['access']}"
-            )
-            embed.add_field(name=f"`{entry['usage']}`", value=value[:1024], inline=False)
-        embed.set_footer(text=f"Category {self.categories.index(self.category) + 1}/{len(self.categories)} • Page {self.page + 1}/{pages} • Use the dropdown to switch categories")
-        self._sync_buttons()
-        return embed
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("Only the person who opened this help menu can use its controls.", ephemeral=True)
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Run `+help` to open your own help menu.", ephemeral=True)
             return False
         return True
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="gm_help_prev", row=1)
-    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.page = max(0, self.page - 1)
-        self._sync_buttons()
-        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+    def items(self): return self.entries.get(self.category, [])
+    def refresh(self):
+        pages = max(1, math.ceil(len(self.items()) / PER_PAGE))
+        self.page = max(0, min(self.page, pages - 1))
+        self.first.disabled = self.prev.disabled = self.page == 0
+        self.next.disabled = self.last.disabled = self.page >= pages - 1
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, custom_id="gm_help_next", row=1)
-    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
-        total = len(self.categories_data.get(self.category, []))
-        pages = max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-        self.page = min(pages - 1, self.page + 1)
-        self._sync_buttons()
-        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+    def embed(self):
+        items = self.items()
+        embed = discord.Embed(title="🤖 Googli Manager • Help", description=f"**Category:** {self.category}\nChoose a category below or use the page buttons.", color=discord.Color.blurple())
+        start = self.page * PER_PAGE
+        for item in items[start:start + PER_PAGE]:
+            value = f"{item['description']}\n**Usage:** `{item['usage']}`\n**Aliases:** {item['aliases']}\n**Who can use it:** {item['access']}"
+            embed.add_field(name="🔹 " + item['name'], value=value[:1024], inline=False)
+        if not items: embed.add_field(name="No commands", value="No commands are listed in this category.", inline=False)
+        embed.set_footer(text=f"Page {self.page + 1}/{max(1, math.ceil(len(items) / PER_PAGE))} • {len(items)} commands")
+        return embed
 
+    async def choose_category(self, interaction):
+        self.category = self.selector.values[0]
+        self.page = 0
+        for opt in self.selector.options: opt.default = opt.value == self.category
+        await self.update(interaction)
+
+    async def update(self, interaction):
+        self.refresh()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="⏮ First", style=discord.ButtonStyle.secondary, row=0)
+    async def first(self, interaction, button): self.page = 0; await self.update(interaction)
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
+    async def prev(self, interaction, button): self.page -= 1; await self.update(interaction)
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary, row=0)
+    async def next(self, interaction, button): self.page += 1; await self.update(interaction)
+    @discord.ui.button(label="Last ⏭", style=discord.ButtonStyle.secondary, row=0)
+    async def last(self, interaction, button): self.page = max(0, math.ceil(len(self.items()) / PER_PAGE) - 1); await self.update(interaction)
+
+    async def on_timeout(self):
+        for child in self.children: child.disabled = True
+        if self.message:
+            try: await self.message.edit(view=self)
+            except discord.HTTPException: pass
 
 class HelpMenu(commands.Cog):
-    """Category-based help for prefix and slash commands."""
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
+        self.bot.remove_command("help")
 
-    @commands.command(name="help", help="Open the interactive command help menu.")
-    async def help_menu(self, ctx: commands.Context):
-        categories: dict[str, list[dict[str, str]]] = {}
+    @commands.command(name="help", aliases=["commands"])
+    async def help_menu(self, ctx):
+        """Show commands organised by category in one interactive message."""
+        entries = {}
+        for source in (slash_entries(self.bot), prefix_entries(self.bot)):
+            for cat, items in source.items(): entries.setdefault(cat, []).extend(items)
+        categories = [c for c in CATEGORY_ORDER if c in entries]
+        categories.extend(sorted(c for c in entries if c not in categories))
+        if not categories:
+            await ctx.reply("No commands are currently loaded.", mention_author=False); return
+        for cat in entries: entries[cat].sort(key=lambda x: (not x["name"].startswith("/"), x["name"].lower()))
+        view = HelpView(ctx.author.id, entries, categories)
+        view.message = await ctx.reply(embed=view.embed(), view=view, mention_author=False)
 
-        # Prefix commands are grouped by their actual loaded cog.
-        for command in self.bot.walk_commands():
-            if command.hidden or command.name == "help":
-                continue
-            cog_name = command.cog_name or "Other Commands"
-            category = CATEGORY_NAMES.get(cog_name, cog_name)
-            categories.setdefault(category, []).append(_prefix_entry(command))
-
-        # Slash commands are grouped under Match Management (and any future app-command cogs).
-        for command in self.bot.tree.walk_commands():
-            if isinstance(command, discord.app_commands.Group):
-                continue
-            cog = getattr(command, "binding", None)
-            cog_name = type(cog).__name__ if cog is not None else "Scheduling"
-            category = CATEGORY_NAMES.get(cog_name, "Match Management" if cog_name == "Scheduling" else cog_name)
-            categories.setdefault(category, []).append(_slash_entry(command))
-
-        # Keep useful categories first, and list commands alphabetically within each category.
-        preferred = [
-            "Match Management", "Team Management", "Player Statistics", "Match Results",
-            "Reserves & Matchups", "Groups & Fixtures", "Leaderboards", "Points Table",
-            "AutoLock", "Administration & Utility", "DM & Echo", "No-Team Management",
-            "Live Draws", "Custom Image Commands", "MVP", "Predictions",
-        ]
-        categories = {key: sorted(value, key=lambda item: item["sort"]) for key, value in categories.items()}
-        ordered = {key: categories[key] for key in preferred if key in categories}
-        ordered.update({key: value for key, value in categories.items() if key not in ordered})
-        if not ordered:
-            await ctx.send("No commands are available to display.")
-            return
-
-        view = HelpMenuView(ctx, ordered)
-        await ctx.send(embed=view.make_embed(), view=view)
-
-
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(HelpMenu(bot))
