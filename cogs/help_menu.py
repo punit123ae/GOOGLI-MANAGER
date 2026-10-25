@@ -66,27 +66,25 @@ class HelpView(discord.ui.View):
         self.refresh()
 
     async def interaction_check(self, interaction):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Run `+help` to open your own help menu.", ephemeral=True)
-            return False
+        # Help is public: any server member may use the navigation controls.
         return True
 
     def items(self): return self.entries.get(self.category, [])
     def refresh(self):
         pages = max(1, math.ceil(len(self.items()) / PER_PAGE))
         self.page = max(0, min(self.page, pages - 1))
-        self.first.disabled = self.prev.disabled = self.page == 0
-        self.next.disabled = self.last.disabled = self.page >= pages - 1
+        self.prev.disabled = self.page == 0
+        self.next.disabled = self.page >= pages - 1
 
     def embed(self):
         items = self.items()
-        embed = discord.Embed(title="🤖 Googli Manager • Help", description=f"**Category:** {self.category}\nChoose a category below or use the page buttons.", color=discord.Color.blurple())
+        embed = discord.Embed(title="GOOGLI MANAGER  /  COMMAND INDEX", description=f"Browse the command directory using the category menu.\n\n**Section**  ·  {self.category}", color=discord.Color.from_rgb(35, 43, 58))
         start = self.page * PER_PAGE
         for item in items[start:start + PER_PAGE]:
             value = f"{item['description']}\n**Usage:** `{item['usage']}`\n**Aliases:** {item['aliases']}\n**Who can use it:** {item['access']}"
-            embed.add_field(name="🔹 " + item['name'], value=value[:1024], inline=False)
-        if not items: embed.add_field(name="No commands", value="No commands are listed in this category.", inline=False)
-        embed.set_footer(text=f"Page {self.page + 1}/{max(1, math.ceil(len(items) / PER_PAGE))} • {len(items)} commands")
+            embed.add_field(name=f"{item['name']}", value=value[:1024], inline=False)
+        if not items: embed.add_field(name="Nothing in this section yet", value="No commands are listed in this category.", inline=False)
+        embed.set_footer(text=f"DIRECTORY  •  PAGE {self.page + 1}/{max(1, math.ceil(len(items) / PER_PAGE))}  •  {len(items)} COMMANDS")
         return embed
 
     async def choose_category(self, interaction):
@@ -99,14 +97,10 @@ class HelpView(discord.ui.View):
         self.refresh()
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
-    @discord.ui.button(label="⏮ First", style=discord.ButtonStyle.secondary, row=0)
-    async def first(self, interaction, button): self.page = 0; await self.update(interaction)
-    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="◀", row=0)
     async def prev(self, interaction, button): self.page -= 1; await self.update(interaction)
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, emoji="▶", row=0)
     async def next(self, interaction, button): self.page += 1; await self.update(interaction)
-    @discord.ui.button(label="Last ⏭", style=discord.ButtonStyle.secondary, row=0)
-    async def last(self, interaction, button): self.page = max(0, math.ceil(len(self.items()) / PER_PAGE) - 1); await self.update(interaction)
 
     async def on_timeout(self):
         for child in self.children: child.disabled = True
