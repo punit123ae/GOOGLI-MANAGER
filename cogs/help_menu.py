@@ -128,13 +128,13 @@ class HelpView(discord.ui.View):
                 description=(
                     "Welcome to the command guide. Use the category menu to browse each part of the bot, "
                     "and use **Previous** / **Next** to move through longer lists.\n\n"
-                    "**Created and maintained by:** google.18.18\n"
+                    "**Created and maintained by:** .q2727. / punitaec\n"
                     "**What it does:** Helps manage tournament matches, teams, statistics, results, "
                     "points tables, predictions, and server utilities.\n\n"
                     "**How to use it:** Prefix commands start with `+`. Match-management slash commands "
                     "start with `/` and can also be selected from Discord's slash-command menu.\n\n"
                     "Access notes describe existing restrictions; this help menu does not grant permissions."
-                ), color=discord.Color.from_rgb(42, 52, 72)
+                ), color=discord.Color.from_rgb(35, 105, 145)
             )
             avatar = getattr(getattr(self.bot, "user", None), "display_avatar", None)
             if avatar:
@@ -148,7 +148,7 @@ class HelpView(discord.ui.View):
         embed = discord.Embed(
             title=f"Googli Manager | {self.category}",
             description=f"Commands in this category  ·  Page {self.page + 1} of {pages}",
-            color=discord.Color.from_rgb(42, 52, 72)
+            color=discord.Color.from_rgb(35, 105, 145)
         )
         start = self.page * PER_PAGE
         for index, item in enumerate(items[start:start + PER_PAGE], start=start + 1):
@@ -205,12 +205,12 @@ class HelpMenu(commands.Cog):
         """Show the public interactive command guide."""
         entries = {INTERFACE: []}
         for command in self.bot.walk_commands():
-            if command.hidden or command.name == "help":
+            if command.name == "help":
                 continue
             cat = category_for(command)
             aliases = ", ".join("+" + alias for alias in command.aliases) if command.aliases else "None"
             entries.setdefault(cat, []).append(make_entry(
-                "+" + command.qualified_name, command.short_doc or command.help or "No description provided.",
+                "+" + command.qualified_name, command.help or command.short_doc or "No description provided.",
                 prefix_usage(command), aliases, access_for(command)
             ))
         for command in self.bot.tree.get_commands():
