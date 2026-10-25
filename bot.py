@@ -44,6 +44,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.reserves",
             "cogs.groups",
             "cogs.autolock",
+            "cogs.help_menu",
         ):
             await self.load_extension(extension)
 
@@ -56,6 +57,7 @@ class GoogIManagerBot(commands.Bot):
 bot = GoogIManagerBot(
     command_prefix=("+"),
     intents=intents,
+    help_command=None,
 )
 
 bot.db = sqlite3.connect(DB_FILE)
