@@ -45,7 +45,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.groups",
             "cogs.autolock",
             "cogs.help_menu",
-            'cogs.fielding",
+            "cogs.fielding",
         ):
             await self.load_extension(extension)
 
