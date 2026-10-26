@@ -33,6 +33,11 @@ METRICS = {
         ("runs_leaked", "Most Runs Leaked"),
     ],
     "Fantasy Points": [("fantasy", "Total Fantasy Points")],
+    "Fielding": [
+        ("fld_caught", "Most Catches Caught"),
+        ("fld_dropped", "Most Catches Dropped"),
+        ("fld_eff", "Highest Catch Efficiency"),
+    ],
 }
 
 
@@ -153,7 +158,31 @@ def _eligible(key: str, rows: list[dict]) -> bool:
     return bool(rows)
 
 
+def _fielding_value(key: str, rec: tuple[int, int]) -> int | tuple[float, int, int]:
+    """rec = (catches_caught, catches_dropped) from the fielding_stats table."""
+    caught, dropped = rec
+    if key == "fld_caught":
+        return caught
+    if key == "fld_dropped":
+        return dropped
+    attempts = caught + dropped
+    pct = caught * 100 / attempts if attempts else 0.0  # no division by zero
+    return pct, caught, attempts
+
+
+def _fielding_eligible(key: str, rec: tuple[int, int]) -> bool:
+    caught, dropped = rec
+    if key == "fld_caught":
+        return caught > 0
+    if key == "fld_dropped":
+        return dropped > 0
+    return caught + dropped > 0
+
+
 def _sort_key(key: str, value: Any):
+    if key == "fld_eff":
+        # Highest efficiency first; ties go to the player with more attempts.
+        return (-value[0], -value[2])
     if key == "lowest_strike_rate":
         return (value,)
     if key in ("bowl_avg", "economy"):
@@ -164,6 +193,8 @@ def _sort_key(key: str, value: Any):
 
 
 def _display(key: str, value: Any) -> str:
+    if key == "fld_eff":
+        return f"{value[0]:.2f}% ({value[1]}/{value[2]})"
     if key == "best_figures":
         return f"{value[0]}/{value[1]}"
     return _fmt(value)
@@ -176,6 +207,7 @@ class CategorySelect(discord.ui.Select):
             "Batting": "<:cricketbat:1561294474951393360>",
             "Bowling": "<:cricketball:1561294577392951338>",
             "Fantasy Points": "<:Crown:1561296003104243803>",
+            "Fielding": "🧤",
         }
         options = [discord.SelectOption(label=name, emoji=category_emojis[name], default=name == view.category)
                    for name in METRICS]
@@ -247,11 +279,18 @@ class LeaderboardView(discord.ui.View):
         guild = self.ctx.guild
         rows_by_user = self.cog.rows_by_user
         computed = []
-        for uid, rows in rows_by_user.items():
-            if not _eligible(self.metric_key, rows):
-                continue
-            value = _value(self.metric_key, rows)
-            computed.append((uid, value))
+        if self.category == "Fielding":
+            # Fielding data comes from its own table, so fielding-only players count.
+            for uid, rec in self.cog.fielding_by_user.items():
+                if not _fielding_eligible(self.metric_key, rec):
+                    continue
+                computed.append((uid, _fielding_value(self.metric_key, rec)))
+        else:
+            for uid, rows in rows_by_user.items():
+                if not _eligible(self.metric_key, rows):
+                    continue
+                value = _value(self.metric_key, rows)
+                computed.append((uid, value))
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         total = len(computed)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -286,6 +325,23 @@ class LeaderboardCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.rows_by_user: dict[int, list[dict]] = {}
+        self.fielding_by_user: dict[int, tuple[int, int]] = {}
+
+    def _fielding_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
+        """Persistent fielding totals for this server only: {user_id: (caught, dropped)}."""
+        db = getattr(self.bot, "db", None)
+        if db is None:
+            return {}
+        try:
+            rows = db.execute(
+                "SELECT user_id, catches_caught, catches_dropped "
+                "FROM fielding_stats WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+        except Exception:
+            # Table not created yet (fielding cog not loaded): no fielding data.
+            return {}
+        return {int(r["user_id"]): (int(r["catches_caught"]), int(r["catches_dropped"])) for r in rows}
 
     def _rows(self, guild_id: int) -> dict[int, list[dict]]:
         db = getattr(self.bot, "db", None)
@@ -314,6 +370,7 @@ class LeaderboardCog(commands.Cog):
     async def leaderboard(self, ctx: commands.Context):
         try:
             self.rows_by_user = self._rows(ctx.guild.id)
+            self.fielding_by_user = self._fielding_rows(ctx.guild.id)
             view = LeaderboardView(self, ctx)
             message = await ctx.send(embed=view.make_embed(), view=view)
             view.message = message
