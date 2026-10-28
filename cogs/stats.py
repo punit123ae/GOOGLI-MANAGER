@@ -92,8 +92,20 @@ def totals(rows):
     }
 
 
-def classify_player(t):
-    """Classify from recorded batting/bowling contribution, not an AI guess."""
+def classify_player(t, rows=None):
+    """Classify using the player's batting and bowling fantasy-point contributions."""
+    if rows is not None:
+        batting_points, bowling_points, _ = fantasy_raw_points(rows, t)
+        # A genuine all-rounder must contribute positively in both disciplines,
+        # with the weaker contribution reaching at least half of the stronger one.
+        if batting_points > 0 and bowling_points > 0:
+            stronger = max(batting_points, bowling_points)
+            weaker = min(batting_points, bowling_points)
+            if weaker >= stronger * 0.5:
+                return "ALL-ROUNDER"
+        return "BATTER" if batting_points >= bowling_points else "BOWLER"
+
+    # Keep the original fallback for callers that only have season totals.
     bat = (t["runs"] >= 50 or t["balls_faced"] >= 20) and (
         t["runs"] / max(t["balls_faced"], 1) >= 0.75
     )
@@ -105,10 +117,10 @@ def classify_player(t):
     if bowl and not bat:
         return "BOWLER"
     if bat:
-        return "BATSMAN"
+        return "BATTER"
     if t["wickets"] > 0 and t["runs"] == 0:
         return "BOWLER"
-    return "BATSMAN" if t["runs"] >= t["wickets"] * 10 else "BOWLER"
+    return "BATTER" if t["runs"] >= t["wickets"] * 10 else "BOWLER"
 
 
 
@@ -204,7 +216,7 @@ def overall_rating(bat_score, bowl_score):
 def make_stats_image(member, rows, guild_icon=None, avatar=None):
     """Player performance card. Every displayed statistic is computed from imported DB rows."""
     t = totals(rows)
-    role = classify_player(t)
+    role = classify_player(t, rows)
     bat_impact, bowl_impact = impact_scores(rows, t)
     rating = round(
         (bat_impact * 0.55 + bowl_impact * 0.45)
@@ -594,30 +606,14 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     divider = (100, 142, 181, 190)
 
     t = totals(rows)
-    role = classify_player(t)
+    role = classify_player(t, rows)
     bat_impact, bowl_impact = impact_scores(rows, t)
     _, _, fantasy_points = fantasy_raw_points(rows, t)
     guild = getattr(member, "guild", None)
     guild_name = getattr(guild, "name", "DISCORD SERVER").upper()
     team_name = get_player_team_name(member).upper()
 
-    # Server name and matching server logos at the top.
-    logo_size, logo_y = 54, 24
-    logo_left_x, logo_right_x = 490, 1056
-    if guild_icon:
-        try:
-            logo = Image.open(io.BytesIO(guild_icon)).convert("RGBA")
-            logo = ImageOps.fit(logo, (logo_size, logo_size), method=Image.Resampling.LANCZOS)
-            mask = Image.new("L", (logo_size, logo_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, logo_size - 1, logo_size - 1), fill=255)
-            image.paste(logo, (logo_left_x, logo_y), mask)
-            image.paste(logo, (logo_right_x, logo_y), mask)
-            draw = ImageDraw.Draw(image)
-            for lx in (logo_left_x, logo_right_x):
-                draw.ellipse((lx, logo_y, lx + logo_size, logo_y + logo_size), outline=blue, width=3)
-        except Exception:
-            pass
-
+    # Server name only; Design 2 intentionally has no server logo.
     header_size = 34
     header_font = load_font(header_size, True)
     while draw.textbbox((0, 0), guild_name, font=header_font)[2] > 500 and header_size > 19:
