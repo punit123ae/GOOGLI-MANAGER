@@ -1081,7 +1081,113 @@ class Stats(commands.Cog):
             )
             """
         )
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_stats_report_channels (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL,
+                configured_by INTEGER NOT NULL,
+                configured_at REAL NOT NULL
+            )
+            """
+        )
         self.db.commit()
+
+    def get_raw_stats_report_channel_id(self, guild_id):
+        row = self.db.execute(
+            "SELECT channel_id FROM raw_stats_report_channels WHERE guild_id = ?",
+            (int(guild_id),),
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    async def send_raw_stats_report(self, ctx, source, rows, catch_counts, catch_points, hours):
+        """Post an audit report to the configured raw-stats channel."""
+        channel_id = self.get_raw_stats_report_channel_id(ctx.guild.id)
+        if not channel_id:
+            return
+        channel = ctx.guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+        if not hasattr(channel, "send"):
+            return
+
+        # Match IDs are not standardized in raw-stat messages, so extract common forms.
+        source_text = source.content or ""
+        match = re.search(
+            r"\bmatch\s*(?:id|no\.?|number)?\s*[:#-]?\s*#?([A-Za-z0-9_-]+)",
+            source_text, re.IGNORECASE,
+        )
+        match_id = match.group(1) if match else "Not found in raw-stat message"
+        source_link = f"https://discord.com/channels/{ctx.guild.id}/{source.channel.id}/{source.id}"
+
+        catch_lines = []
+        for user_id, values in sorted(catch_counts.items(), key=lambda item: item[0]):
+            member = ctx.guild.get_member(int(user_id))
+            name = member.display_name if member else f"User {user_id}"
+            name = discord.utils.escape_markdown(name)
+            catch_lines.append(
+                f"• **{name}** — caught: `{values['taken']}`, dropped: `{values['dropped']}`, "
+                f"fielding points: `{values['taken'] * 5 - values['dropped'] * 10:+}`"
+            )
+        if not catch_lines:
+            catch_lines = ["No catch events detected in the selected time range."]
+
+        point_lines = []
+        for row in rows:
+            user_id, runs, balls_faced, runs_conceded, balls_bowled, wickets, not_out = row
+            player_row = {
+                "user_id": user_id, "runs": runs, "balls_faced": balls_faced,
+                "runs_conceded": runs_conceded, "balls_bowled": balls_bowled,
+                "wickets": wickets, "not_out": bool(not_out),
+            }
+            _, _, without_fielding = fantasy_raw_points([player_row])
+            fielding = catch_points.get(int(user_id), 0)
+            with_fielding = without_fielding + fielding
+            member = ctx.guild.get_member(int(user_id))
+            name = member.display_name if member else f"User {user_id}"
+            name = discord.utils.escape_markdown(name)
+            point_lines.append(
+                f"• **{name}** — without fielding: `{without_fielding:.2f}`, "
+                f"with fielding: `{with_fielding:.2f}` (fielding `{fielding:+.2f}`)"
+            )
+
+        header = discord.Embed(
+            title=f"📊 Raw Stats Report — Match {match_id}",
+            color=discord.Color.from_rgb(55, 150, 255),
+            timestamp=datetime.now(timezone.utc),
+        )
+        header.description = (
+            f"**Added by:** {ctx.author.mention}\n"
+            f"**Raw stats:** [Open original message]({source_link})\n"
+            f"**Catch scan:** {hours} hour(s)\n" if hours else "**Catch scan:** skipped\n"
+            f"**Imported players:** {len(rows)}\n"
+            f"**Catch points:** +5 caught / -10 dropped"
+        )
+        await channel.send(embed=header, allowed_mentions=discord.AllowedMentions.none())
+
+        # Discord embeds have field/description limits. Split each report section safely.
+        async def send_section(title, lines):
+            chunks, current = [], ""
+            for line in lines:
+                if len(current) + len(line) + 1 > 3800:
+                    chunks.append(current)
+                    current = ""
+                current += ("\n" if current else "") + line
+            if current:
+                chunks.append(current)
+            for index, chunk in enumerate(chunks, start=1):
+                embed = discord.Embed(
+                    title=title + (f" (part {index})" if len(chunks) > 1 else ""),
+                    description=chunk[:4000],
+                    color=discord.Color.from_rgb(55, 150, 255),
+                )
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+        await send_section("🧤 Catch Sync — Fielders", catch_lines)
+        await send_section("🏏 Fantasy Points — All Imported Players", point_lines or ["No player rows found."])
 
     def get_selected_design(self, guild_id):
         row = self.db.execute(
@@ -1206,6 +1312,31 @@ class Stats(commands.Cog):
             for user_id, values in counts.items()
         }, counts
 
+    @commands.command(name="setrawstats")
+    @commands.guild_only()
+    async def set_raw_stats_channel(self, ctx, channel: discord.TextChannel):
+        """Configure where +as import audit reports are sent."""
+        if not await self.command_allowed(ctx, "setrawstats"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO raw_stats_report_channels (guild_id, channel_id, configured_by, configured_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    channel_id=excluded.channel_id,
+                    configured_by=excluded.configured_by,
+                    configured_at=excluded.configured_at
+                """,
+                (ctx.guild.id, channel.id, ctx.author.id, datetime.now(timezone.utc).timestamp()),
+            )
+        await ctx.reply(
+            f"✅ Raw-stat reports will be sent to {channel.mention}.",
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.command(name="as", aliases=["addstats"])
     async def add_stats(self, ctx):
         if not await self.command_allowed(ctx, "as"):
@@ -1247,6 +1378,7 @@ class Stats(commands.Cog):
 
         catch_points = {}
         catch_counts = {}
+        hours = 0
         if prompt.choice:
             def valid_hours(message):
                 return (
@@ -1310,6 +1442,13 @@ class Stats(commands.Cog):
                     f"❌ Import failed; no rows were saved. Error: `{type(exc).__name__}`"
                 )
             return
+
+        try:
+            await self.send_raw_stats_report(ctx, source, rows, catch_counts, catch_points, hours)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            await ctx.send(
+                f"⚠️ Stats imported, but the raw-stats report could not be sent ({type(exc).__name__}). Check the configured channel permissions."
+            )
 
         player_points = []
         for row in rows:
