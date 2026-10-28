@@ -576,7 +576,7 @@ def _cached_design2_background():
         )
 
 
-def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
+def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fielding_points=0):
     """Render Design 2: batting left, player profile centre, bowling right."""
     width, height = 1600, 900
     # Cached pre-resized background avoids disk I/O and resampling per request.
@@ -609,6 +609,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None):
     role = classify_player(t, rows)
     bat_impact, bowl_impact = impact_scores(rows, t)
     _, _, fantasy_points = fantasy_raw_points(rows, t)
+    fantasy_points += float(fielding_points)
     guild = getattr(member, "guild", None)
     guild_name = getattr(guild, "name", "DISCORD SERVER").upper()
     team_name = get_player_team_name(member).upper()
@@ -1048,6 +1049,19 @@ class Stats(commands.Cog):
         ).fetchone()
         return int(row[0]) if row else 1
 
+    def get_fielding_stats(self, guild_id, user_id):
+        """Return persistent catch totals and fielding fantasy points for this server/player."""
+        try:
+            row = self.db.execute(
+                "SELECT catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=? AND user_id=?",
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+        except Exception:
+            # Fielding tracker may not have created its table yet.
+            return 0, 0, 0
+        caught, dropped = (int(row[0]), int(row[1])) if row else (0, 0)
+        return caught, dropped, caught * 5 - dropped * 10
+
     async def command_allowed(self, ctx, command_name):
         """Use the shared utility cog for command whitelist/lock checks."""
         utility = self.bot.get_cog("Utility")
@@ -1402,6 +1416,9 @@ class Stats(commands.Cog):
             pass
 
         design = self.get_selected_design(ctx.guild.id)
+        catches_caught, catches_dropped, fielding_points = self.get_fielding_stats(
+            ctx.guild.id, member.id
+        )
 
         try:
             if design == 2:
@@ -1412,6 +1429,7 @@ class Stats(commands.Cog):
                     rows,
                     avatar=avatar,
                     guild_icon=guild_icon,
+                    fielding_points=fielding_points,
                 )
             else:
                 # Design 1 continues to use the original renderer.
@@ -1443,6 +1461,7 @@ class Stats(commands.Cog):
 
         t = totals(rows)
         batting_points, bowling_points, total_points = fantasy_raw_points(rows, t)
+        total_points += fielding_points
         fifties = sum(50 <= r["runs"] < 100 for r in rows)
         hundreds = sum(r["runs"] >= 100 for r in rows)
         ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
@@ -1484,6 +1503,15 @@ class Stats(commands.Cog):
                 f"**Economy:** `{t['economy']:.2f}`\n"
                 f"**BFB:** `{t['balls_bowled']}`\n"
                 f"**Fantasy points:** `{bowling_points:.2f}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🧤 **__FIELDING__**",
+            value=(
+                f"**Catches caught:** `{catches_caught}`\n"
+                f"**Catches dropped:** `{catches_dropped}`\n"
+                f"**Fantasy points:** `{fielding_points:.2f}`"
             ),
             inline=True,
         )
@@ -1554,6 +1582,15 @@ class Stats(commands.Cog):
                 f"**Runs conceded:** `{t['runs_conceded']}`\n"
                 f"**Best bowling figures:** `{best_bowling_text}`\n"
                 f"**Fantasy points:** `{bowling_points:.2f}`"
+            ),
+            inline=True,
+        )
+        deep_embed.add_field(
+            name="🧤 **__FIELDING__**",
+            value=(
+                f"**Catches caught:** `{catches_caught}`\n"
+                f"**Catches dropped:** `{catches_dropped}`\n"
+                f"**Fantasy points:** `{fielding_points:.2f}`"
             ),
             inline=True,
         )
