@@ -3,7 +3,7 @@ import asyncio
 import io
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from functools import lru_cache
 from types import SimpleNamespace
@@ -1024,6 +1024,47 @@ class ResetServerStatsView(discord.ui.View):
             item.disabled = True
 
 
+
+
+class CatchSyncView(discord.ui.View):
+    """Ask whether +as should scan recent Hand Cricket catch messages."""
+
+    def __init__(self, requester_id):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.choice = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who ran `+as` can choose this.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, sync catches", style=discord.ButtonStyle.success)
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content="How many hours back should I scan? Send a whole number (for example, `3`).",
+            view=self,
+        )
+        self.stop()
+
+    @discord.ui.button(label="No, skip", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = False
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(
+            content="Catch sync skipped. Calculating fantasy points without fielding points…",
+            view=self,
+        )
+        self.stop()
+
+
 class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -1107,6 +1148,64 @@ class Stats(commands.Cog):
         ).fetchall()
         return [dict(row) for row in records]
 
+    async def scan_recent_catches(self, ctx, hours):
+        """Return per-player catch points from recent Hand Cricket messages only.
+
+        This is read-only: it never updates the permanent fielding tracker database.
+        """
+        hand_cricket_bot_id = 753191385296928808
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        tracker = self.bot.get_cog("CatchTracker")
+        counts = defaultdict(lambda: {"taken": 0, "dropped": 0})
+        pending_fielder_id = None
+
+        async for message in ctx.channel.history(
+            limit=None, after=cutoff, oldest_first=True
+        ):
+            if message.author.id != hand_cricket_bot_id:
+                continue
+            if tracker is not None:
+                opportunity = tracker._parse_opportunity(message)
+                if opportunity is not None:
+                    pending_fielder_id = opportunity[0]
+                    continue
+                result = tracker._result_kind(message)
+            else:
+                # Fallback if the fielding cog is not loaded: the catch-result
+                # text is enough, while opportunities still need a player mention.
+                text = (message.content or "") + "\n" + "\n".join(
+                    (e.title or "") + "\n" + (e.description or "")
+                    for e in message.embeds
+                )
+                upper = text.upper()
+                if "CHANCE OF WICKET!" in upper:
+                    match = re.search(
+                        r"coming\s+toward\s+<@!?(\d+)>|coming\s+toward\s+@?([A-Za-z0-9_.-]{2,32})",
+                        text, re.IGNORECASE,
+                    )
+                    if match:
+                        if match.group(1):
+                            pending_fielder_id = int(match.group(1))
+                        else:
+                            name = match.group(2).casefold()
+                            member = discord.utils.find(
+                                lambda m: m.name.casefold() == name or m.display_name.casefold() == name,
+                                ctx.guild.members,
+                            )
+                            pending_fielder_id = member.id if member else None
+                    continue
+                result = ("dropped" if "BOZO DROPPED THE CATCH" in upper
+                          else "taken" if "TOOK THE CATCH" in upper else None)
+
+            if result and pending_fielder_id is not None:
+                counts[pending_fielder_id][result] += 1
+                pending_fielder_id = None
+
+        return {
+            user_id: values["taken"] * 5 - values["dropped"] * 10
+            for user_id, values in counts.items()
+        }, counts
+
     @commands.command(name="as", aliases=["addstats"])
     async def add_stats(self, ctx):
         if not await self.command_allowed(ctx, "as"):
@@ -1133,6 +1232,48 @@ class Stats(commands.Cog):
         except ValueError as exc:
             await ctx.reply(f"❌ {exc}", mention_author=False)
             return
+
+        prompt = CatchSyncView(ctx.author.id)
+        prompt_message = await ctx.reply(
+            "🧤 Do you want to sync catch stats from this channel before calculating fantasy points?",
+            view=prompt, mention_author=False,
+        )
+        await prompt.wait()
+        if prompt.choice is None:
+            await prompt_message.edit(
+                content="⌛ Catch-sync prompt timed out. Run `+as` again.", view=None
+            )
+            return
+
+        catch_points = {}
+        catch_counts = {}
+        if prompt.choice:
+            def valid_hours(message):
+                return (
+                    message.author.id == ctx.author.id
+                    and message.channel.id == ctx.channel.id
+                    and not message.author.bot
+                )
+            try:
+                hours_message = await self.bot.wait_for(
+                    "message", check=valid_hours, timeout=60
+                )
+                hours_text = hours_message.content.strip()
+                if not re.fullmatch(r"[1-9]\d{0,3}", hours_text):
+                    await ctx.send("❌ Enter a whole number of hours from `1` to `9999`. Run `+as` again.")
+                    return
+                hours = int(hours_text)
+            except asyncio.TimeoutError:
+                await ctx.send("⌛ Hours prompt timed out. Run `+as` again.")
+                return
+            try:
+                catch_points, catch_counts = await self.scan_recent_catches(ctx, hours)
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                await ctx.send(
+                    f"❌ I couldn't read this channel's message history ({type(exc).__name__}).\n"
+                    "Give the bot Read Message History permission and try again."
+                )
+                return
 
         try:
             with self.db:
@@ -1163,39 +1304,28 @@ class Stats(commands.Cog):
                 "UNIQUE constraint failed" in str(exc)
                 or "PRIMARY KEY" in str(exc)
             ):
-                await ctx.reply(
-                    "❌ These raw statistics have already been imported.",
-                    mention_author=False,
-                )
+                await ctx.send("❌ These raw statistics have already been imported.")
             else:
-                await ctx.reply(
-                    f"❌ Import failed; no rows were saved. "
-                    f"Error: `{type(exc).__name__}`",
-                    mention_author=False,
+                await ctx.send(
+                    f"❌ Import failed; no rows were saved. Error: `{type(exc).__name__}`"
                 )
             return
 
-        # Calculate each player's fantasy points for this match only, using
-        # the existing fantasy_raw_points() formula.
         player_points = []
         for row in rows:
             user_id, runs, balls_faced, runs_conceded, balls_bowled, wickets, not_out = row
             player_row = {
-                "user_id": user_id,
-                "runs": runs,
-                "balls_faced": balls_faced,
-                "runs_conceded": runs_conceded,
-                "balls_bowled": balls_bowled,
-                "wickets": wickets,
-                "not_out": bool(not_out),
+                "user_id": user_id, "runs": runs, "balls_faced": balls_faced,
+                "runs_conceded": runs_conceded, "balls_bowled": balls_bowled,
+                "wickets": wickets, "not_out": bool(not_out),
             }
-            _, _, points = fantasy_raw_points([player_row])
+            _, _, base_points = fantasy_raw_points([player_row])
+            points = base_points + catch_points.get(user_id, 0)
             player_points.append((user_id, points))
 
         highest_points = max(points for _, points in player_points)
         top_players = [
-            (user_id, points)
-            for user_id, points in player_points
+            (user_id, points) for user_id, points in player_points
             if abs(points - highest_points) < 1e-9
         ]
         top_names = []
@@ -1204,11 +1334,20 @@ class Stats(commands.Cog):
             player_name = member.mention if member else f"<@{user_id}>"
             top_names.append(f"{player_name} (**{points:.2f} points**)")
 
-        await ctx.reply(
+        catch_summary = ""
+        if prompt.choice:
+            caught_total = sum(v["taken"] for v in catch_counts.values())
+            dropped_total = sum(v["dropped"] for v in catch_counts.values())
+            catch_summary = (
+                f"\n🧤 **Catch sync ({hours}h):** `{caught_total}` taken (+{caught_total * 5}), "
+                f"`{dropped_total}` dropped (-{dropped_total * 10})."
+            )
+        await ctx.send(
             f"✅ Imported statistics for **{len(rows)} players**.\n"
             f"Match record: `{source.id}`\n"
-            f"🏆 **Highest fantasy points:** {', '.join(top_names)}",
-            mention_author=False,
+            f"🏆 **Highest fantasy points:** {', '.join(top_names)}"
+            f"{catch_summary}",
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @commands.command(name="rs", aliases=["removestats"])
