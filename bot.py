@@ -46,6 +46,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.autolock",
             "cogs.help_menu",
             "cogs.fielding",
+            "cogs.points_table",
         ):
             await self.load_extension(extension)
 
