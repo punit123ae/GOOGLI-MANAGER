@@ -1083,6 +1083,18 @@ class Stats(commands.Cog):
         )
         self.db.execute(
             """
+            CREATE TABLE IF NOT EXISTS player_match_fielding (
+                source_message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                opportunities INTEGER NOT NULL DEFAULT 0,
+                catches_taken INTEGER NOT NULL DEFAULT 0,
+                catches_dropped INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (source_message_id, user_id)
+            )
+            """
+        )
+        self.db.execute(
+            """
             CREATE TABLE IF NOT EXISTS raw_stats_report_channels (
                 guild_id INTEGER PRIMARY KEY,
                 channel_id INTEGER NOT NULL,
@@ -1263,6 +1275,7 @@ class Stats(commands.Cog):
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         tracker = self.bot.get_cog("CatchTracker")
         counts = defaultdict(lambda: {"taken": 0, "dropped": 0})
+        opportunities = defaultdict(int)
         pending_fielder_id = None
 
         async for message in ctx.channel.history(
@@ -1274,6 +1287,7 @@ class Stats(commands.Cog):
                 opportunity = tracker._parse_opportunity(message)
                 if opportunity is not None:
                     pending_fielder_id = opportunity[0]
+                    opportunities[pending_fielder_id] += 1
                     continue
                 result = tracker._result_kind(message)
             else:
@@ -1299,6 +1313,8 @@ class Stats(commands.Cog):
                                 ctx.guild.members,
                             )
                             pending_fielder_id = member.id if member else None
+                        if pending_fielder_id is not None:
+                            opportunities[pending_fielder_id] += 1
                     continue
                 result = ("dropped" if "BOZO DROPPED THE CATCH" in upper
                           else "taken" if "TOOK THE CATCH" in upper else None)
@@ -1310,7 +1326,7 @@ class Stats(commands.Cog):
         return {
             user_id: values["taken"] * 5 - values["dropped"] * 10
             for user_id, values in counts.items()
-        }, counts
+        }, counts, opportunities
 
     @commands.command(name="setrawstats")
     @commands.guild_only()
@@ -1378,6 +1394,7 @@ class Stats(commands.Cog):
 
         catch_points = {}
         catch_counts = {}
+        catch_opportunities = {}
         hours = 0
         if prompt.choice:
             def valid_hours(message):
@@ -1399,7 +1416,7 @@ class Stats(commands.Cog):
                 await ctx.send("⌛ Hours prompt timed out. Run `+as` again.")
                 return
             try:
-                catch_points, catch_counts = await self.scan_recent_catches(ctx, hours)
+                catch_points, catch_counts, catch_opportunities = await self.scan_recent_catches(ctx, hours)
             except (discord.Forbidden, discord.HTTPException) as exc:
                 await ctx.send(
                     f"❌ I couldn't read this channel's message history ({type(exc).__name__}).\n"
@@ -1430,6 +1447,15 @@ class Stats(commands.Cog):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [(source.id, *row) for row in rows],
+                )
+                self.db.executemany(
+                    """INSERT INTO player_match_fielding
+                       (source_message_id, user_id, opportunities, catches_taken, catches_dropped)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    [(source.id, int(uid), int(catch_opportunities.get(uid, 0)),
+                      int(catch_counts.get(uid, {}).get("taken", 0)),
+                      int(catch_counts.get(uid, {}).get("dropped", 0)))
+                     for uid in set(catch_opportunities) | set(catch_counts)]
                 )
         except Exception as exc:
             if (
@@ -1532,6 +1558,10 @@ class Stats(commands.Cog):
                 (source.id,),
             )
             self.db.execute(
+                "DELETE FROM player_match_fielding WHERE source_message_id = ?",
+                (source.id,),
+            )
+            self.db.execute(
                 "DELETE FROM stats_imports WHERE source_message_id = ?",
                 (source.id,),
             )
@@ -1541,6 +1571,22 @@ class Stats(commands.Cog):
             "Other match records remain unchanged.",
             mention_author=False,
         )
+        report_channel_id = self.get_raw_stats_report_channel_id(ctx.guild.id)
+        report_channel = ctx.guild.get_channel(report_channel_id) if report_channel_id else None
+        if report_channel is not None:
+            source_link = f"https://discord.com/channels/{ctx.guild.id}/{source.channel.id}/{source.id}"
+            audit = discord.Embed(
+                title="🗑️ Raw Stats Removal Report",
+                description=(f"**Removed by:** {discord.utils.escape_markdown(ctx.author.display_name)} (`{ctx.author.id}`)\n"
+                             f"**Original raw stats:** [Open original message]({source_link})\n"
+                             f"**Match record ID:** `{source.id}`"),
+                color=discord.Color.red(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            try:
+                await report_channel.send(embed=audit, allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
     @commands.command(name="resetstats")
     async def reset_server_stats(self, ctx):
@@ -1807,9 +1853,17 @@ class Stats(commands.Cog):
         recent_lines = []
         for index, row in enumerate(recent_rows, start=1):
             status = "*" if row["not_out"] else ""
+            fielding_row = self.db.execute(
+                "SELECT opportunities, catches_taken, catches_dropped FROM player_match_fielding WHERE source_message_id=? AND user_id=?",
+                (row["source_message_id"], member.id),
+            ).fetchone()
+            if fielding_row and int(fielding_row[0]) > 0:
+                fielding_text = f"<:gloves_ios:1564891803067613245> `{fielding_row[1]}/{fielding_row[2]}`"
+            else:
+                fielding_text = "<:gloves_ios:1564891803067613245> `DNF`"
             recent_lines.append(
                 f"**{index}.** <:cricketbat:1561294474951393360> `{row['runs']}{status} ({row['balls_faced']})`  ·  "
-                f"<:cricketball:1561294577392951338> `{row['wickets']}/{row['runs_conceded']}`"
+                f"<:cricketball:1561294577392951338> `{row['wickets']}/{row['runs_conceded']}`  ·  {fielding_text}"
             )
         recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
         best_batting_text = (
