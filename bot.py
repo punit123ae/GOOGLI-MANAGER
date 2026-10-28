@@ -32,7 +32,6 @@ class GoogIManagerBot(commands.Bot):
             "cogs.scheduling",
             "cogs.stats",
             "cogs.lb",
-            "cogs.points_table",
             "cogs.teams1",
             "cogs.predictions",
             "cogs.draws",
