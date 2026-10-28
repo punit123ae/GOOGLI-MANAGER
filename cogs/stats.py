@@ -606,7 +606,10 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     divider = (100, 142, 181, 190)
 
     t = totals(rows)
+    batting_points, bowling_points, _ = fantasy_raw_points(rows, t)
     role = classify_player(t, rows)
+    if float(fielding_points) > batting_points and float(fielding_points) > bowling_points:
+        role = "FIELDER"
     bat_impact, bowl_impact = impact_scores(rows, t)
     _, _, fantasy_points = fantasy_raw_points(rows, t)
     fantasy_points += float(fielding_points)
@@ -887,9 +890,9 @@ class StatsSelect(discord.ui.Select):
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=[
-                discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="📊", value="overview", default=True),
-                discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="📈", value="deep"),
-                discord.SelectOption(label="Image", description="Show the generated stats image", emoji="🖼️", value="image"),
+                discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview", default=True),
+                discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="<:deep_stats:1564906372187947008>", value="deep"),
+                discord.SelectOption(label="Image", description="Show the generated stats image", emoji="💎", value="image"),
             ],
         )
 
@@ -1198,7 +1201,7 @@ class Stats(commands.Cog):
                 )
                 await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
-        await send_section("🧤 Catch Sync — Fielders", catch_lines)
+        await send_section("<:gloves_ios:1564891803067613245> Catch Sync — Fielders", catch_lines)
         await send_section("🏏 Fantasy Points — All Imported Players", point_lines or ["No player rows found."])
 
     def get_selected_design(self, guild_id):
@@ -1382,7 +1385,7 @@ class Stats(commands.Cog):
 
         prompt = CatchSyncView(ctx.author.id)
         prompt_message = await ctx.reply(
-            "🧤 Do you want to sync catch stats from this channel before calculating fantasy points?",
+            "<:gloves_ios:1564891803067613245> Do you want to sync catch stats from this channel before calculating fantasy points?",
             view=prompt, mention_author=False,
         )
         await prompt.wait()
@@ -1504,7 +1507,7 @@ class Stats(commands.Cog):
             caught_total = sum(v["taken"] for v in catch_counts.values())
             dropped_total = sum(v["dropped"] for v in catch_counts.values())
             catch_summary = (
-                f"\n🧤 **Catch sync ({hours}h):** `{caught_total}` taken (+{caught_total * 5}), "
+                f"\n<:gloves_ios:1564891803067613245> **Catch sync ({hours}h):** `{caught_total}` taken (+{caught_total * 5}), "
                 f"`{dropped_total}` dropped (-{dropped_total * 10})."
             )
         await ctx.send(
@@ -1831,7 +1834,7 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="🧤 **__FIELDING__**",
+            name="<:gloves_ios:1564891803067613245> **__FIELDING__**",
             value=(
                 f"**Catches caught:** `{catches_caught}`\n"
                 f"**Catches dropped:** `{catches_dropped}`\n"
@@ -1861,9 +1864,17 @@ class Stats(commands.Cog):
                 fielding_text = f"<:gloves_ios:1564891803067613245> `{fielding_row[1]}/{fielding_row[2]}`"
             else:
                 fielding_text = "<:gloves_ios:1564891803067613245> `DNF`"
+            batting_text = (
+                f"{row['runs']}{status} ({row['balls_faced']})"
+                if int(row["balls_faced"]) > 0 else "DNB"
+            )
+            bowling_text = (
+                f"{row['wickets']}/{row['runs_conceded']}"
+                if int(row["balls_bowled"]) > 0 else "DNB"
+            )
             recent_lines.append(
-                f"**{index}.** <:cricketbat:1561294474951393360> `{row['runs']}{status} ({row['balls_faced']})`  ·  "
-                f"<:cricketball:1561294577392951338> `{row['wickets']}/{row['runs_conceded']}`  ·  {fielding_text}"
+                f"**{index}.** <:cricketbat:1561294474951393360> `{batting_text}`  ·  "
+                f"<:cricketball:1561294577392951338> `{bowling_text}`  ·  {fielding_text}"
             )
         recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
         best_batting_text = (
@@ -1918,7 +1929,7 @@ class Stats(commands.Cog):
             inline=True,
         )
         deep_embed.add_field(
-            name="🧤 **__FIELDING__**",
+            name="<:gloves_ios:1564891803067613245> **__FIELDING__**",
             value=(
                 f"**Catches caught:** `{catches_caught}`\n"
                 f"**Catches dropped:** `{catches_dropped}`\n"
