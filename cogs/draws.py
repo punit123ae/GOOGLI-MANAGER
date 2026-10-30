@@ -51,6 +51,7 @@ class LiveDraws(commands.Cog):
         )
         self.db.commit()
         self.active_guilds = set()
+        self.cancel_events = {}
 
     def cog_unload(self):
         self.db.close()
@@ -398,6 +399,22 @@ class LiveDraws(commands.Cog):
             "and all associated secret assignments for this server."
         )
 
+    @commands.command(name="cancel", aliases=["canceldraw", "stopdraw"])
+    @commands.guild_only()
+    async def cancel_live_draw(self, ctx):
+        """Stop the currently running live draw in this server."""
+        if not await owner_or_whitelisted(ctx):
+            await ctx.send("You are not authorized to cancel the live draw.")
+            return
+
+        cancel_event = self.cancel_events.get(ctx.guild.id)
+        if cancel_event is None or cancel_event.is_set():
+            await ctx.send("There is no live draw running in this server.")
+            return
+
+        cancel_event.set()
+        await ctx.send("🛑 Live-draw cancellation requested. The draw will stop now.")
+
     @commands.command(name="startgroupdraws", aliases=["startlivedraw", "startlivedraws"])
     @commands.guild_only()
     async def start_live_draw(self, ctx, *, setting_name: str):
@@ -466,19 +483,45 @@ class LiveDraws(commands.Cog):
         for name in remaining_teams:
             draw_order.append((name, next_group_index))
             next_group_index = (next_group_index + 1) % group_count
+        cancel_event = asyncio.Event()
         self.active_guilds.add(ctx.guild.id)
+        self.cancel_events[ctx.guild.id] = cancel_event
         try:
             total = len(draw_order)
             for drawn_count, (team_name, group_index) in enumerate(draw_order, 1):
+                if cancel_event.is_set():
+                    await ctx.send(
+                        f"🛑 Live draw **{discord.utils.escape_markdown(setting['setting_name'])}** cancelled. "
+                        f"**{drawn_count - 1}/{total} teams drawn.**"
+                    )
+                    return
+
                 rolling = await ctx.send(
                     f"Randomly rolling a team from **{total} teams** in **3 seconds...**"
                 )
+                cancelled = False
                 for seconds in (2, 1):
-                    await asyncio.sleep(1)
-                    await rolling.edit(
-                        content=f"Randomly rolling a team from **{total} teams** in **{seconds} second{'s' if seconds != 1 else ''}...**"
+                    try:
+                        await asyncio.wait_for(cancel_event.wait(), timeout=1)
+                        cancelled = True
+                        break
+                    except asyncio.TimeoutError:
+                        await rolling.edit(
+                            content=f"Randomly rolling a team from **{total} teams** in **{seconds} second{'s' if seconds != 1 else ''}...**"
+                        )
+                if not cancelled:
+                    try:
+                        await asyncio.wait_for(cancel_event.wait(), timeout=1)
+                        cancelled = True
+                    except asyncio.TimeoutError:
+                        pass
+                if cancelled:
+                    await rolling.edit(content="🛑 Live draw cancelled.")
+                    await ctx.send(
+                        f"🛑 Live draw **{discord.utils.escape_markdown(setting['setting_name'])}** cancelled. "
+                        f"**{drawn_count - 1}/{total} teams drawn.**"
                     )
-                await asyncio.sleep(1)
+                    return
 
                 await rolling.edit(
                     content=f"🎲 Randomly rolled **{discord.utils.escape_markdown(team_name)}** from **{total} teams**."
@@ -502,8 +545,23 @@ class LiveDraws(commands.Cog):
                         and message.content.strip().casefold() in {"next", "next draw"}
                     )
 
+                next_task = asyncio.create_task(
+                    self.bot.wait_for("message", check=check, timeout=300)
+                )
+                cancel_task = asyncio.create_task(cancel_event.wait())
+                done, pending = await asyncio.wait(
+                    {next_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                if cancel_task in done and cancel_event.is_set():
+                    await ctx.send(
+                        f"🛑 Live draw **{discord.utils.escape_markdown(setting['setting_name'])}** cancelled. "
+                        f"**{drawn_count}/{total} teams drawn.**"
+                    )
+                    return
                 try:
-                    await self.bot.wait_for("message", check=check, timeout=300)
+                    await next_task
                 except asyncio.TimeoutError:
                     await ctx.send(
                         f"Live draw **{setting['setting_name']}** ended due to 5 minutes of inactivity. "
@@ -516,6 +574,7 @@ class LiveDraws(commands.Cog):
             )
         finally:
             self.active_guilds.discard(ctx.guild.id)
+            self.cancel_events.pop(ctx.guild.id, None)
 
     @staticmethod
     def _format_results(setting_name, groups, drawn_count, total):
