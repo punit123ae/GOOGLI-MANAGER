@@ -38,6 +38,10 @@ METRICS = {
         ("fld_dropped", "Most Catches Dropped"),
         ("fld_eff", "Highest Catch Efficiency"),
     ],
+    "Batter Impact": [
+        ("runs_after_drops", "Most Runs After Dropped Catches"),
+        ("runs_without_drops", "Most Runs Without Catch Drops"),
+    ],
 }
 
 
@@ -208,6 +212,7 @@ class CategorySelect(discord.ui.Select):
             "Bowling": "<:cricketball:1561294577392951338>",
             "Fantasy Points": "<:Crown:1561296003104243803>",
             "Fielding": "🧤",
+            "Batter Impact": "🏏",
         }
         options = [discord.SelectOption(label=name, emoji=category_emojis[name], default=name == view.category)
                    for name in METRICS]
@@ -285,6 +290,12 @@ class LeaderboardView(discord.ui.View):
                 if not _fielding_eligible(self.metric_key, rec):
                     continue
                 computed.append((uid, _fielding_value(self.metric_key, rec)))
+        elif self.category == "Batter Impact":
+            # Experimental batter-impact totals are written by cogs.batfds.
+            for uid, rec in self.cog.batter_impact_by_user.items():
+                value = int(rec[0] if self.metric_key == "runs_after_drops" else rec[1])
+                if value > 0:
+                    computed.append((uid, value))
         else:
             for uid, rows in rows_by_user.items():
                 if not _eligible(self.metric_key, rows):
@@ -326,6 +337,26 @@ class LeaderboardCog(commands.Cog):
         self.bot = bot
         self.rows_by_user: dict[int, list[dict]] = {}
         self.fielding_by_user: dict[int, tuple[int, int]] = {}
+        self.batter_impact_by_user: dict[int, tuple[int, int]] = {}
+
+    def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
+        """Return {user_id: (runs_affected, runs_without_drops)} for this server."""
+        db = getattr(self.bot, "db", None)
+        if db is None:
+            return {}
+        try:
+            rows = db.execute(
+                "SELECT user_id, runs_affected, runs_without_drops "
+                "FROM batter_drop_lb WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+        except Exception:
+            # batfds may not have been loaded yet; keep the rest of +lb usable.
+            return {}
+        return {
+            int(row["user_id"]): (int(row["runs_affected"]), int(row["runs_without_drops"]))
+            for row in rows
+        }
 
     def _fielding_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
         """Persistent fielding totals for this server only: {user_id: (caught, dropped)}."""
@@ -371,6 +402,7 @@ class LeaderboardCog(commands.Cog):
         try:
             self.rows_by_user = self._rows(ctx.guild.id)
             self.fielding_by_user = self._fielding_rows(ctx.guild.id)
+            self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id)
             view = LeaderboardView(self, ctx)
             message = await ctx.send(embed=view.make_embed(), view=view)
             view.message = message
