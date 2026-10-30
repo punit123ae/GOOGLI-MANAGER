@@ -38,6 +38,17 @@ class LiveDraws(commands.Cog):
                 PRIMARY KEY (guild_id, setting_key)
             )"""
         )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS secret_draw_groups (
+                guild_id INTEGER NOT NULL,
+                setting_key TEXT NOT NULL,
+                team_key TEXT NOT NULL,
+                team_name TEXT NOT NULL,
+                group_index INTEGER NOT NULL,
+                assigned_by INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, setting_key, team_key)
+            )"""
+        )
         self.db.commit()
         self.active_guilds = set()
 
@@ -160,10 +171,120 @@ class LiveDraws(commands.Cog):
         await ctx.send(
             f"Live-draw setting **{discord.utils.escape_markdown(setting_name)}** saved.\n"
             f"Teams: **{len(teams)}** | Groups: **{group_count}**\n"
-            f"Start it with `+startlivedraw {setting_name}`."
+            f"Start it with `+startgroupdraws {setting_name}`."
         )
 
-    @commands.command(name="startlivedraw", aliases=["startlivedraws"])
+    def _is_bot_owner(self, ctx):
+        return ctx.author.id == OWNER_ID
+
+    @staticmethod
+    def _group_labels(group_count):
+        return [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(group_count)]
+
+    async def _delete_private_command(self, ctx):
+        # The command contains secret team/group details, so remove it from the channel.
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            pass
+
+    @commands.command(name="setdrawgroup")
+    @commands.guild_only()
+    async def set_draw_group(self, ctx, *, details: str):
+        """Privately assign one team to a group for a saved draw setting."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can manage secret draw assignments.")
+            return
+
+        await self._delete_private_command(ctx)
+        parts = [part.strip() for part in details.split("|", 2)]
+        if len(parts) != 3 or not all(parts):
+            await ctx.author.send(
+                "Usage: `+setdrawgroup SETTING NAME | TEAM NAME | GROUP`\n"
+                "Example: `+setdrawgroup KASHMIR TITANS S1 | Team Alpha | A`"
+            )
+            return
+
+        setting_name, team_name, group_label = parts
+        setting_key = self._setting_key(setting_name)
+        setting = self.db.execute(
+            "SELECT * FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, setting_key),
+        ).fetchone()
+        if not setting:
+            await ctx.author.send(f"Draw setting **{discord.utils.escape_markdown(setting_name)}** was not found.")
+            return
+
+        import json
+        saved_teams = json.loads(setting["team_names_json"])
+        matching = [name for name in saved_teams if name.casefold() == team_name.casefold()]
+        if not matching:
+            await ctx.author.send(f"Team **{discord.utils.escape_markdown(team_name)}** is not in this draw setting's approved team list.")
+            return
+        actual_team = matching[0]
+        labels = self._group_labels(setting["group_count"])
+        normalized_label = group_label.strip().upper()
+        if normalized_label not in labels:
+            await ctx.author.send(f"Invalid group. Choose one of: {', '.join(labels)}.")
+            return
+
+        self.db.execute(
+            "INSERT INTO secret_draw_groups(guild_id, setting_key, team_key, team_name, group_index, assigned_by) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(guild_id, setting_key, team_key) DO UPDATE SET "
+            "team_name=excluded.team_name, group_index=excluded.group_index, assigned_by=excluded.assigned_by",
+            (ctx.guild.id, setting_key, self._setting_key(actual_team), actual_team,
+             labels.index(normalized_label), ctx.author.id),
+        )
+        self.db.commit()
+        await ctx.author.send(
+            f"Secret assignment saved for **{discord.utils.escape_markdown(setting["setting_name"])}**. "
+            f"The team will be placed in Group {normalized_label}."
+        )
+
+    @commands.command(name="listdrawgroups")
+    @commands.guild_only()
+    async def list_draw_groups(self, ctx, *, setting_name: str):
+        """Show secret assignments to the bot owner by DM only."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can view secret draw assignments.")
+            return
+        await self._delete_private_command(ctx)
+        key = self._setting_key(setting_name)
+        setting = self.db.execute(
+            "SELECT * FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        ).fetchone()
+        if not setting:
+            await ctx.author.send("That draw setting was not found.")
+            return
+        rows = self.db.execute(
+            "SELECT team_name, group_index FROM secret_draw_groups WHERE guild_id=? AND setting_key=? ORDER BY team_name COLLATE NOCASE",
+            (ctx.guild.id, key),
+        ).fetchall()
+        if not rows:
+            await ctx.author.send(f"No secret assignments are saved for **{discord.utils.escape_markdown(setting["setting_name"])}**.")
+            return
+        labels = self._group_labels(setting["group_count"])
+        lines = [f"**{discord.utils.escape_markdown(row['team_name'])}** → Group {labels[row['group_index']]}" for row in rows]
+        await ctx.author.send(f"**Private assignments — {discord.utils.escape_markdown(setting['setting_name'])}**\n" + "\n".join(lines))
+
+    @commands.command(name="cleardrawgroups")
+    @commands.guild_only()
+    async def clear_draw_groups(self, ctx, *, setting_name: str):
+        """Clear all secret team assignments for one draw setting."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can clear secret draw assignments.")
+            return
+        await self._delete_private_command(ctx)
+        key = self._setting_key(setting_name)
+        cursor = self.db.execute(
+            "DELETE FROM secret_draw_groups WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        )
+        self.db.commit()
+        await ctx.author.send(f"Cleared **{cursor.rowcount}** secret assignment(s) for **{discord.utils.escape_markdown(setting_name)}**.")
+
+    @commands.command(name="startgroupdraws", aliases=["startlivedraw", "startlivedraws"])
     @commands.guild_only()
     async def start_live_draw(self, ctx, *, setting_name: str):
         """Draw one team at a time, retaining the complete draw in each new message."""
@@ -203,12 +324,39 @@ class LiveDraws(commands.Cog):
 
         group_count = setting["group_count"]
         groups = [[] for _ in range(group_count)]
-        random_teams = list(saved_teams)
-        random.shuffle(random_teams)
+        preset_rows = self.db.execute(
+            "SELECT team_name, group_index FROM secret_draw_groups WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        ).fetchall()
+        saved_lookup = {self._setting_key(name): name for name in saved_teams}
+        preset = {}
+        for row in preset_rows:
+            team_key = self._setting_key(row["team_name"])
+            if team_key in saved_lookup and 0 <= row["group_index"] < group_count:
+                preset[saved_lookup[team_key]] = row["group_index"]
+
+        preset_teams = list(preset.keys())
+        random.shuffle(preset_teams)
+        remaining_teams = [name for name in saved_teams if name not in preset]
+        random.shuffle(remaining_teams)
+        draw_order = [(name, preset[name]) for name in preset_teams]
+
+        # Account for all pre-assigned teams before distributing the others.
+        group_sizes = [0] * group_count
+        for group_index in preset.values():
+            group_sizes[group_index] += 1
+
+        for name in remaining_teams:
+            # Keep final groups balanced where possible; randomize equal-size choices.
+            smallest_size = min(group_sizes)
+            candidates = [i for i, size in enumerate(group_sizes) if size == smallest_size]
+            group_index = random.choice(candidates)
+            draw_order.append((name, group_index))
+            group_sizes[group_index] += 1
         self.active_guilds.add(ctx.guild.id)
         try:
-            total = len(random_teams)
-            for drawn_count, team_name in enumerate(random_teams, 1):
+            total = len(draw_order)
+            for drawn_count, (team_name, group_index) in enumerate(draw_order, 1):
                 rolling = await ctx.send(
                     f"Randomly rolling a team from **{total} teams** in **3 seconds...**"
                 )
@@ -223,8 +371,8 @@ class LiveDraws(commands.Cog):
                     content=f"🎲 Randomly rolled **{discord.utils.escape_markdown(team_name)}** from **{total} teams**."
                 )
 
-                # Distribute in order A, B, C... then cycle back to A.
-                group_index = (drawn_count - 1) % group_count
+                # The destination is fixed privately before the draw starts.
+                # Pre-assigned teams are processed first; other teams have random balanced destinations.
                 groups[group_index].append(team_name)
                 content = self._format_results(setting["setting_name"], groups, drawn_count, total)
                 await ctx.send(content)
