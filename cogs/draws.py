@@ -191,7 +191,7 @@ class LiveDraws(commands.Cog):
 
         parts = [part.strip() for part in details.split("|", 2)]
         if len(parts) != 3 or not all(parts):
-            await ctx.author.send(
+            await ctx.send(
                 "Usage: `+setdrawgroup SETTING NAME | TEAM NAME | GROUP`\n"
                 "Example: `+setdrawgroup KASHMIR TITANS S1 | Team Alpha | A`"
             )
@@ -204,20 +204,20 @@ class LiveDraws(commands.Cog):
             (ctx.guild.id, setting_key),
         ).fetchone()
         if not setting:
-            await ctx.author.send(f"Draw setting **{discord.utils.escape_markdown(setting_name)}** was not found.")
+            await ctx.send(f"Draw setting **{discord.utils.escape_markdown(setting_name)}** was not found.")
             return
 
         import json
         saved_teams = json.loads(setting["team_names_json"])
         matching = [name for name in saved_teams if name.casefold() == team_name.casefold()]
         if not matching:
-            await ctx.author.send(f"Team **{discord.utils.escape_markdown(team_name)}** is not in this draw setting's approved team list.")
+            await ctx.send(f"Team **{discord.utils.escape_markdown(team_name)}** is not in this draw setting's approved team list.")
             return
         actual_team = matching[0]
         labels = self._group_labels(setting["group_count"])
         normalized_label = group_label.strip().upper()
         if normalized_label not in labels:
-            await ctx.author.send(f"Invalid group. Choose one of: {', '.join(labels)}.")
+            await ctx.send(f"Invalid group. Choose one of: {', '.join(labels)}.")
             return
 
         self.db.execute(
@@ -228,7 +228,7 @@ class LiveDraws(commands.Cog):
              labels.index(normalized_label), ctx.author.id),
         )
         self.db.commit()
-        await ctx.author.send(
+        await ctx.send(
             f"Secret assignment saved for **{discord.utils.escape_markdown(setting["setting_name"])}**. "
             f"The team will be placed in Group {normalized_label}."
         )
@@ -246,18 +246,18 @@ class LiveDraws(commands.Cog):
             (ctx.guild.id, key),
         ).fetchone()
         if not setting:
-            await ctx.author.send("That draw setting was not found.")
+            await ctx.send("That draw setting was not found.")
             return
         rows = self.db.execute(
             "SELECT team_name, group_index FROM secret_draw_groups WHERE guild_id=? AND setting_key=? ORDER BY team_name COLLATE NOCASE",
             (ctx.guild.id, key),
         ).fetchall()
         if not rows:
-            await ctx.author.send(f"No secret assignments are saved for **{discord.utils.escape_markdown(setting['setting_name'])}**.")
+            await ctx.send(f"No secret assignments are saved for **{discord.utils.escape_markdown(setting['setting_name'])}**.")
             return
         labels = self._group_labels(setting["group_count"])
         lines = [f"**{discord.utils.escape_markdown(row['team_name'])}** → Group {labels[row['group_index']]}" for row in rows]
-        await ctx.author.send(f"**Private assignments — {discord.utils.escape_markdown(setting['setting_name'])}**\n" + "\n".join(lines))
+        await ctx.send(f"**Private assignments — {discord.utils.escape_markdown(setting['setting_name'])}**\n" + "\n".join(lines))
 
     @commands.command(name="cleardrawgroups")
     @commands.guild_only()
@@ -272,7 +272,7 @@ class LiveDraws(commands.Cog):
             (ctx.guild.id, key),
         )
         self.db.commit()
-        await ctx.author.send(f"Cleared **{cursor.rowcount}** secret assignment(s) for **{discord.utils.escape_markdown(setting_name)}**.")
+        await ctx.send(f"Cleared **{cursor.rowcount}** secret assignment(s) for **{discord.utils.escape_markdown(setting_name)}**.")
 
     @commands.command(name="viewgroupsetups", aliases=["listgroupsetups"])
     @commands.guild_only()
@@ -289,7 +289,7 @@ class LiveDraws(commands.Cog):
         ).fetchall()
 
         if not settings:
-            await ctx.author.send("There are no saved draw setups in this server.")
+            await ctx.send("There are no saved draw setups in this server.")
             return
 
         lines = []
@@ -314,7 +314,7 @@ class LiveDraws(commands.Cog):
         if current:
             chunks.append(current)
         for chunk in chunks:
-            await ctx.author.send(chunk)
+            await ctx.send(chunk)
 
     @commands.command(name="deletegroupsetup", aliases=["removegroupsetup"])
     @commands.guild_only()
@@ -326,7 +326,7 @@ class LiveDraws(commands.Cog):
 
         parts = [part.strip() for part in details.split("|", 1)]
         if len(parts) != 2 or not all(parts):
-            await ctx.author.send(
+            await ctx.send(
                 "Usage: `+deletegroupsetup SETTING NAME | TEAM NAME`\n"
                 "Example: `+deletegroupsetup KASHMIR TITANS S1 | Kashmir Titans`"
             )
@@ -339,7 +339,7 @@ class LiveDraws(commands.Cog):
             (ctx.guild.id, setting_key),
         ).fetchone()
         if not setting:
-            await ctx.author.send(
+            await ctx.send(
                 f"Draw setting **{discord.utils.escape_markdown(setting_name)}** was not found."
             )
             return
@@ -350,15 +350,53 @@ class LiveDraws(commands.Cog):
         )
         self.db.commit()
         if cursor.rowcount:
-            await ctx.author.send(
+            await ctx.send(
                 f"Removed the secret group assignment for **{discord.utils.escape_markdown(team_name)}** "
                 f"from **{discord.utils.escape_markdown(setting['setting_name'])}**."
             )
         else:
-            await ctx.author.send(
+            await ctx.send(
                 f"No secret assignment was found for **{discord.utils.escape_markdown(team_name)}** "
                 f"in **{discord.utils.escape_markdown(setting['setting_name'])}**."
             )
+
+    @commands.command(name="deleteallgroupsetups", aliases=["deleteallgroupsetup", "resetgroupsetups"])
+    @commands.guild_only()
+    async def delete_all_group_setups(self, ctx):
+        """Delete every saved live-draw setup and secret assignment in this server."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can delete all group draw setups.")
+            return
+
+        await ctx.send(
+            "⚠️ **Confirm deletion of ALL group draw setups?**\n"
+            "This removes every saved draw setting and every secret team-to-group assignment "
+            "for this server. Reply `yes` to confirm or `no` to cancel."
+        )
+        try:
+            reply = await self._wait_for_reply(ctx, timeout=30)
+        except asyncio.TimeoutError:
+            await ctx.send("Deletion cancelled because no confirmation was received.")
+            return
+
+        answer = reply.content.strip().casefold()
+        if answer not in {"yes", "y"}:
+            await ctx.send("Deletion cancelled. No group draw setups were changed.")
+            return
+
+        self.db.execute(
+            "DELETE FROM secret_draw_groups WHERE guild_id=?",
+            (ctx.guild.id,),
+        )
+        settings_cursor = self.db.execute(
+            "DELETE FROM live_draw_settings WHERE guild_id=?",
+            (ctx.guild.id,),
+        )
+        self.db.commit()
+        await ctx.send(
+            f"Deleted **{settings_cursor.rowcount}** saved group draw setup(s) "
+            "and all associated secret assignments for this server."
+        )
 
     @commands.command(name="startgroupdraws", aliases=["startlivedraw", "startlivedraws"])
     @commands.guild_only()
