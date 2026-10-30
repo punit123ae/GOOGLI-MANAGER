@@ -53,7 +53,7 @@ def parse_match_status(message: discord.Message):
     for line in text.splitlines():
         clean_line = re.sub(r"[`*_~]", "", line).strip()
         match = re.match(
-            r"^(.{1,64}?)\\s*:\\s*(\\d+)\\s*\\(\\s*\\d+\\s*\\)\\s*runs\\s*$",
+            r"^(.{1,64}?)\s*:\s*(\d+)\s*\(\s*\d+\s*\)\s*runs\s*$",
             clean_line,
             re.IGNORECASE,
         )
@@ -64,13 +64,13 @@ def parse_match_status(message: discord.Message):
     if not scores:
         return None
 
-    inning_match = re.search(r"^\\s*Innings\\s*\\n\\s*(ONE|TWO|1ST|2ND)\\b", text,
+    inning_match = re.search(r"^\s*Innings\s*\n\s*(ONE|TWO|1ST|2ND)\b", text,
                              re.IGNORECASE | re.MULTILINE)
     innings = None
     if inning_match:
         token = inning_match.group(1).upper()
         innings = "ONE" if token in ("ONE", "1ST") else "TWO"
-    ended = bool(re.search(r"\\bMatch\\s+has\\s+ended\\s*\\.?", text, re.IGNORECASE))
+    ended = bool(re.search(r"\bMatch\s+has\s+ended\s*\.?", text, re.IGNORECASE))
     return {"scores": scores, "innings": innings, "ended": ended}
 
 
@@ -130,7 +130,7 @@ def parse_opportunity(message: discord.Message):
     # Format: "If @Fielder takes this catch, @Batter will be out!"
     # The first mention is the fielder; the second is the batter.
     match = re.search(
-        r"takes\\s+this\\s+catch,\\s*<@!?(\\d+)>\\s+will\\s+be\\s+out",
+        r"takes\s+this\s+catch,\s*<@!?(\d+)>\s+will\s+be\s+out",
         text,
         re.IGNORECASE,
     )
@@ -138,7 +138,7 @@ def parse_opportunity(message: discord.Message):
         return int(match.group(1)), None
 
     match = re.search(
-        r"takes\\s+this\\s+catch,\\s*@?([A-Za-z0-9_.-]{2,32})\\s+will\\s+be\\s+out",
+        r"takes\s+this\s+catch,\s*@?([A-Za-z0-9_.-]{2,32})\s+will\s+be\s+out",
         text,
         re.IGNORECASE,
     )
@@ -775,7 +775,7 @@ class BatterFieldingDropStats(commands.Cog):
             name = discord.utils.escape_markdown(member.display_name if member else f"Unknown ({str(uid)[-4:]})")
             lines.append(f"**{name}** — After drops: `{affected}` | Without drops: `{without}` | Drops: `{drops}`")
         await ctx.send(embed=discord.Embed(title=f"Preview Backup {backup_no}",
-                                           description="\\n".join(lines)[:4000],
+                                           description="\n".join(lines)[:4000],
                                            colour=discord.Colour.blurple()))
 
     @previewlb.command(name="view")
