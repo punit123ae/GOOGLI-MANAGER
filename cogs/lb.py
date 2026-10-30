@@ -291,7 +291,9 @@ class LeaderboardView(discord.ui.View):
                     continue
                 computed.append((uid, _fielding_value(self.metric_key, rec)))
         elif self.category == "Batter Impact":
-            # Experimental batter-impact totals are written by cogs.batfds.
+            # Re-read the database on every render so owner edits/resets appear
+            # when the leaderboard is refreshed, not only after a bot restart.
+            self.cog.batter_impact_by_user = self.cog._batter_impact_rows(guild.id)
             for uid, rec in self.cog.batter_impact_by_user.items():
                 value = int(rec[0] if self.metric_key == "runs_after_drops" else rec[1])
                 if value > 0:
