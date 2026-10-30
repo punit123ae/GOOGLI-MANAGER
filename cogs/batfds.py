@@ -34,6 +34,11 @@ def message_text(message: discord.Message) -> str:
     return "\n".join(parts)
 
 
+def _clean_discord_name(value: str) -> str:
+    """Remove common Discord markdown wrappers around a displayed player name."""
+    return re.sub(r"[`*_~]", "", value or "").strip().casefold()
+
+
 def parse_match_status(message: discord.Message):
     if not message.embeds:
         return None
@@ -42,17 +47,30 @@ def parse_match_status(message: discord.Message):
         if "MATCH STATUS" not in text.upper() or "OVERS" not in text.upper():
             return None
 
-    scores = {name.strip().casefold(): int(runs) for name, runs in BATTER_LINE.findall(text)}
+    # Hand Cricket embeds may wrap player names in Discord markdown. Parse each
+    # batter line independently so formatting does not prevent score updates.
+    scores = {}
+    for line in text.splitlines():
+        clean_line = re.sub(r"[`*_~]", "", line).strip()
+        match = re.match(
+            r"^(.{1,64}?)\\s*:\\s*(\\d+)\\s*\\(\\s*\\d+\\s*\\)\\s*runs\\s*$",
+            clean_line,
+            re.IGNORECASE,
+        )
+        if match:
+            name = _clean_discord_name(match.group(1))
+            if name:
+                scores[name] = int(match.group(2))
     if not scores:
         return None
 
-    inning_match = re.search(r"^\s*Innings\s*\n\s*(ONE|TWO|1ST|2ND)\b", text,
+    inning_match = re.search(r"^\\s*Innings\\s*\\n\\s*(ONE|TWO|1ST|2ND)\\b", text,
                              re.IGNORECASE | re.MULTILINE)
     innings = None
     if inning_match:
         token = inning_match.group(1).upper()
         innings = "ONE" if token in ("ONE", "1ST") else "TWO"
-    ended = bool(re.search(r"\bMatch\s+has\s+ended\s*\.?", text, re.IGNORECASE))
+    ended = bool(re.search(r"\\bMatch\\s+has\\s+ended\\s*\\.?", text, re.IGNORECASE))
     return {"scores": scores, "innings": innings, "ended": ended}
 
 
@@ -76,23 +94,54 @@ def parse_batter_out(message: discord.Message):
     return None
 
 
+def _compact_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", _clean_discord_name(value))
+
+
 def find_member_id(guild: discord.Guild, name: str):
-    key = name.strip().casefold().lstrip("@")
-    for member in guild.members:
-        if member.name.casefold() == key or member.display_name.casefold() == key:
-            return member.id
-    return None
+    key = _clean_discord_name(name).lstrip("@")
+    exact = [
+        member for member in guild.members
+        if _clean_discord_name(member.name) == key
+        or _clean_discord_name(member.display_name) == key
+    ]
+    if len(exact) == 1:
+        return exact[0].id
+
+    # Hand Cricket sometimes prints usernames without spaces/punctuation.
+    # Use this fallback only when it identifies exactly one server member.
+    compact = _compact_name(key)
+    matches = [
+        member for member in guild.members
+        if compact and (
+            _compact_name(member.name) == compact
+            or _compact_name(member.display_name) == compact
+        )
+    ]
+    return matches[0].id if len({m.id for m in matches}) == 1 and matches else None
 
 
 def parse_opportunity(message: discord.Message):
+    """Return the batter who would be out, not the fielder taking the catch."""
     text = message_text(message)
     if "CHANCE OF WICKET!" not in text.upper():
         return None
-    match = re.search(r"takes\s+this\s+catch,\s*<@!?(\d+)>", text, re.IGNORECASE)
+
+    # Format: "If @Fielder takes this catch, @Batter will be out!"
+    # The first mention is the fielder; the second is the batter.
+    match = re.search(
+        r"takes\\s+this\\s+catch,\\s*<@!?(\\d+)>\\s+will\\s+be\\s+out",
+        text,
+        re.IGNORECASE,
+    )
     if match:
         return int(match.group(1)), None
-    match = re.search(r"takes\s+this\s+catch,\s*@?([A-Za-z0-9_.-]{2,32})",
-                      text, re.IGNORECASE)
+
+    match = re.search(
+        r"takes\\s+this\\s+catch,\\s*@?([A-Za-z0-9_.-]{2,32})\\s+will\\s+be\\s+out",
+        text,
+        re.IGNORECASE,
+    )
     return (None, match.group(1).casefold()) if match else None
 
 
@@ -442,11 +491,11 @@ class BatterFieldingDropStats(commands.Cog):
                     member = await message.guild.fetch_member(user_id)
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     return
-            possible_names = {member.name.casefold(), member.display_name.casefold()}
+            possible_names = {_clean_discord_name(member.name), _clean_discord_name(member.display_name)}
             if batter_name:
-                possible_names.add(batter_name.casefold())
+                possible_names.add(_clean_discord_name(batter_name))
             batter_score = next((score for name, score in latest[2].items()
-                                 if name.casefold() in possible_names), None)
+                                 if _clean_discord_name(name) in possible_names), None)
             if batter_score is None:
                 return
             session_key = self._session_key(latest[0], latest[1])
@@ -485,7 +534,9 @@ class BatterFieldingDropStats(commands.Cog):
             """, (guild_id, channel_id, session_key, user_id, score, score))
             self.bot.db.commit()
         else:
-            self._finalize_batter(guild_id, channel_id, session_key, user_id, score)
+            # A catch being taken is not a batter finalisation event. The
+            # authoritative Batter out! embed supplies the batter's final score.
+            return
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
