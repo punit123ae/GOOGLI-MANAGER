@@ -181,13 +181,6 @@ class LiveDraws(commands.Cog):
     def _group_labels(group_count):
         return [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(group_count)]
 
-    async def _delete_private_command(self, ctx):
-        # The command contains secret team/group details, so remove it from the channel.
-        try:
-            await ctx.message.delete()
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-            pass
-
     @commands.command(name="setdrawgroup")
     @commands.guild_only()
     async def set_draw_group(self, ctx, *, details: str):
@@ -196,7 +189,6 @@ class LiveDraws(commands.Cog):
             await ctx.send("Only the bot owner can manage secret draw assignments.")
             return
 
-        await self._delete_private_command(ctx)
         parts = [part.strip() for part in details.split("|", 2)]
         if len(parts) != 3 or not all(parts):
             await ctx.author.send(
@@ -248,7 +240,6 @@ class LiveDraws(commands.Cog):
         if not self._is_bot_owner(ctx):
             await ctx.send("Only the bot owner can view secret draw assignments.")
             return
-        await self._delete_private_command(ctx)
         key = self._setting_key(setting_name)
         setting = self.db.execute(
             "SELECT * FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
@@ -262,7 +253,7 @@ class LiveDraws(commands.Cog):
             (ctx.guild.id, key),
         ).fetchall()
         if not rows:
-            await ctx.author.send(f"No secret assignments are saved for **{discord.utils.escape_markdown(setting["setting_name"])}**.")
+            await ctx.author.send(f"No secret assignments are saved for **{discord.utils.escape_markdown(setting['setting_name'])}**.")
             return
         labels = self._group_labels(setting["group_count"])
         lines = [f"**{discord.utils.escape_markdown(row['team_name'])}** → Group {labels[row['group_index']]}" for row in rows]
@@ -275,7 +266,6 @@ class LiveDraws(commands.Cog):
         if not self._is_bot_owner(ctx):
             await ctx.send("Only the bot owner can clear secret draw assignments.")
             return
-        await self._delete_private_command(ctx)
         key = self._setting_key(setting_name)
         cursor = self.db.execute(
             "DELETE FROM secret_draw_groups WHERE guild_id=? AND setting_key=?",
@@ -341,18 +331,12 @@ class LiveDraws(commands.Cog):
         random.shuffle(remaining_teams)
         draw_order = [(name, preset[name]) for name in preset_teams]
 
-        # Account for all pre-assigned teams before distributing the others.
-        group_sizes = [0] * group_count
-        for group_index in preset.values():
-            group_sizes[group_index] += 1
-
-        for name in remaining_teams:
-            # Keep final groups balanced where possible; randomize equal-size choices.
-            smallest_size = min(group_sizes)
-            candidates = [i for i, size in enumerate(group_sizes) if size == smallest_size]
-            group_index = random.choice(candidates)
+        # Pre-assigned teams are drawn first and keep their configured groups.
+        # Then remaining teams are randomly shuffled and assigned in strict order:
+        # Group A, Group B, Group C, then back to Group A.
+        for index, name in enumerate(remaining_teams):
+            group_index = index % group_count
             draw_order.append((name, group_index))
-            group_sizes[group_index] += 1
         self.active_guilds.add(ctx.guild.id)
         try:
             total = len(draw_order)
