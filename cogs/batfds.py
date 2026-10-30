@@ -133,6 +133,46 @@ class CommitConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Commit cancelled. Preview data was not changed.", view=self)
 
 
+class MarkEndedConfirmView(discord.ui.View):
+    """Owner confirmation before manually closing a missed match-end event."""
+    def __init__(self, cog: "BatterFieldingDropStats", ctx: commands.Context, channel_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.ctx = ctx
+        self.channel_id = int(channel_id)
+        self.done = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm: mark ended", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.done:
+            return await interaction.response.send_message("This action has already been handled.", ephemeral=True)
+        try:
+            finalized = self.cog._mark_match_ended(self.ctx.guild.id, self.channel_id)
+        except (RuntimeError, ValueError) as exc:
+            return await interaction.response.send_message(str(exc), ephemeral=True)
+        self.done = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=(f"Marked <#{self.channel_id}> as ended. Finalised **{finalized}** unfinished batter record(s). "
+                     "Preview data has been preserved."),
+            view=self,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.done = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Cancelled. No tracking data was changed.", view=self)
+
+
 class BatterFieldingDropStats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -455,6 +495,57 @@ class BatterFieldingDropStats(commands.Cog):
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         await self.on_handcricket_message(after)
 
+    def _mark_match_ended(self, guild_id: int, channel_id: int) -> int:
+        """Atomically finalise the current innings and close one missed match-end."""
+        db = self.bot.db
+        row = db.execute(
+            "SELECT match_id,innings,ended FROM batter_drop_matches WHERE guild_id=? AND channel_id=?",
+            (int(guild_id), int(channel_id)),
+        ).fetchone()
+        if row is None:
+            raise ValueError("No tracked match was found for that channel.")
+        if int(row[2]):
+            raise ValueError("That tracked match is already marked as ended.")
+
+        session_key = self._session_key(str(row[0]), str(row[1]))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            batter_rows = db.execute(
+                "SELECT user_id,first_drop_score,drop_count,last_score FROM batter_drop_sessions "
+                "WHERE guild_id=? AND channel_id=? AND session_key=?",
+                (int(guild_id), int(channel_id), session_key),
+            ).fetchall()
+            for uid, first_drop, drops, last_score in batter_rows:
+                affected = max(0, int(last_score) - int(first_drop)) if first_drop is not None else 0
+                without = int(first_drop) if first_drop is not None else int(last_score)
+                db.execute("""
+                    INSERT INTO batter_drop_preview
+                        (guild_id,user_id,matches_affected,drops,runs_affected,runs_without_drops)
+                    VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(guild_id,user_id) DO UPDATE SET
+                        matches_affected=matches_affected+excluded.matches_affected,
+                        drops=drops+excluded.drops,
+                        runs_affected=runs_affected+excluded.runs_affected,
+                        runs_without_drops=runs_without_drops+excluded.runs_without_drops
+                """, (int(guild_id), int(uid), 1 if int(drops) else 0, int(drops), affected, without))
+            db.execute(
+                "DELETE FROM batter_drop_sessions WHERE guild_id=? AND channel_id=? AND session_key=?",
+                (int(guild_id), int(channel_id), session_key),
+            )
+            db.execute(
+                "DELETE FROM batter_drop_pending WHERE guild_id=? AND channel_id=?",
+                (int(guild_id), int(channel_id)),
+            )
+            db.execute(
+                "UPDATE batter_drop_matches SET ended=1 WHERE guild_id=? AND channel_id=?",
+                (int(guild_id), int(channel_id)),
+            )
+            db.commit()
+            return len(batter_rows)
+        except Exception:
+            db.rollback()
+            raise
+
     def _preview_rows(self, guild_id: int):
         rows = self.bot.db.execute(
             "SELECT user_id,matches_affected,drops,runs_affected,runs_without_drops "
@@ -544,6 +635,52 @@ class BatterFieldingDropStats(commands.Cog):
                               colour=discord.Colour.blurple())
         embed.set_footer(text="Live provisional figures are included. Commit only after every tracked match has ended.")
         await ctx.send(embed=embed)
+
+    @previewlb.command(name="markended")
+    @commands.guild_only()
+    async def previewlb_markended(self, ctx: commands.Context, channel_id: int = None):
+        """Manually close a match when Hand Cricket's end message was missed.
+
+        Usage: +previewlb markended [channel_id]
+        """
+        if ctx.author.id != BOT_OWNER_ID:
+            return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        db = self.bot.db
+        if channel_id is None:
+            active = db.execute(
+                "SELECT channel_id,match_id,innings FROM batter_drop_matches "
+                "WHERE guild_id=? AND ended=0 ORDER BY channel_id",
+                (ctx.guild.id,),
+            ).fetchall()
+            if not active:
+                return await ctx.reply("There are no unfinished tracked matches.", mention_author=False)
+            if len(active) > 1:
+                lines = [f"Channel ID `{int(r[0])}` — innings **{r[2]}**" for r in active]
+                return await ctx.reply(
+                    "More than one tracked match is unfinished. Specify the channel ID:\n" + "\n".join(lines) +
+                    "\nExample: `+previewlb markended 123456789012345678`",
+                    mention_author=False,
+                )
+            channel_id = int(active[0][0])
+        else:
+            channel_id = int(channel_id)
+        row = db.execute(
+            "SELECT innings,ended FROM batter_drop_matches WHERE guild_id=? AND channel_id=?",
+            (ctx.guild.id, channel_id),
+        ).fetchone()
+        if row is None:
+            return await ctx.reply("No tracked match was found for that channel ID.", mention_author=False)
+        if int(row[1]):
+            return await ctx.reply("That tracked match is already marked as ended.", mention_author=False)
+        channel = ctx.guild.get_channel(channel_id)
+        channel_label = channel.mention if channel else f"channel `{channel_id}`"
+        view = MarkEndedConfirmView(self, ctx, channel_id)
+        await ctx.send(
+            f"Are you sure you want to manually mark the match in {channel_label} as ended (innings **{row[0]}**)?\n"
+            "The bot will finalise unfinished batters using their latest saved scores. Preview data will be kept, "
+            "but any score updates missed after the last Match Status will not be included.",
+            view=view,
+        )
 
     @previewlb.command(name="backups")
     async def previewlb_backups(self, ctx: commands.Context):
