@@ -274,6 +274,92 @@ class LiveDraws(commands.Cog):
         self.db.commit()
         await ctx.author.send(f"Cleared **{cursor.rowcount}** secret assignment(s) for **{discord.utils.escape_markdown(setting_name)}**.")
 
+    @commands.command(name="viewgroupsetups", aliases=["listgroupsetups"])
+    @commands.guild_only()
+    async def view_group_setups(self, ctx):
+        """Show all saved draw settings and their secret assignment counts to the bot owner."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can view secret group setups.")
+            return
+
+        settings = self.db.execute(
+            "SELECT setting_key, setting_name, group_count FROM live_draw_settings "
+            "WHERE guild_id=? ORDER BY setting_name COLLATE NOCASE",
+            (ctx.guild.id,),
+        ).fetchall()
+
+        if not settings:
+            await ctx.author.send("There are no saved draw setups in this server.")
+            return
+
+        lines = []
+        for setting in settings:
+            count = self.db.execute(
+                "SELECT COUNT(*) FROM secret_draw_groups WHERE guild_id=? AND setting_key=?",
+                (ctx.guild.id, setting["setting_key"]),
+            ).fetchone()[0]
+            labels = ", ".join(self._group_labels(setting["group_count"]))
+            lines.append(
+                f"**{discord.utils.escape_markdown(setting['setting_name'])}** — "
+                f"{setting['group_count']} groups ({labels}) | "
+                f"{count} secret assignment(s)"
+            )
+
+        chunks, current = [], "**Saved group draw setups (private)**\n"
+        for line in lines:
+            if len(current) + len(line) + 1 > 1900:
+                chunks.append(current)
+                current = ""
+            current += line + "\n"
+        if current:
+            chunks.append(current)
+        for chunk in chunks:
+            await ctx.author.send(chunk)
+
+    @commands.command(name="deletegroupsetup", aliases=["removegroupsetup"])
+    @commands.guild_only()
+    async def delete_group_setup(self, ctx, *, details: str):
+        """Remove one team's secret group assignment from a draw setup."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can delete secret group assignments.")
+            return
+
+        parts = [part.strip() for part in details.split("|", 1)]
+        if len(parts) != 2 or not all(parts):
+            await ctx.author.send(
+                "Usage: `+deletegroupsetup SETTING NAME | TEAM NAME`\n"
+                "Example: `+deletegroupsetup KASHMIR TITANS S1 | Kashmir Titans`"
+            )
+            return
+
+        setting_name, team_name = parts
+        setting_key = self._setting_key(setting_name)
+        setting = self.db.execute(
+            "SELECT setting_name FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, setting_key),
+        ).fetchone()
+        if not setting:
+            await ctx.author.send(
+                f"Draw setting **{discord.utils.escape_markdown(setting_name)}** was not found."
+            )
+            return
+
+        cursor = self.db.execute(
+            "DELETE FROM secret_draw_groups WHERE guild_id=? AND setting_key=? AND team_key=?",
+            (ctx.guild.id, setting_key, self._setting_key(team_name)),
+        )
+        self.db.commit()
+        if cursor.rowcount:
+            await ctx.author.send(
+                f"Removed the secret group assignment for **{discord.utils.escape_markdown(team_name)}** "
+                f"from **{discord.utils.escape_markdown(setting['setting_name'])}**."
+            )
+        else:
+            await ctx.author.send(
+                f"No secret assignment was found for **{discord.utils.escape_markdown(team_name)}** "
+                f"in **{discord.utils.escape_markdown(setting['setting_name'])}**."
+            )
+
     @commands.command(name="startgroupdraws", aliases=["startlivedraw", "startlivedraws"])
     @commands.guild_only()
     async def start_live_draw(self, ctx, *, setting_name: str):
@@ -332,11 +418,16 @@ class LiveDraws(commands.Cog):
         draw_order = [(name, preset[name]) for name in preset_teams]
 
         # Pre-assigned teams are drawn first and keep their configured groups.
-        # Then remaining teams are randomly shuffled and assigned in strict order:
-        # Group A, Group B, Group C, then back to Group A.
-        for index, name in enumerate(remaining_teams):
-            group_index = index % group_count
-            draw_order.append((name, group_index))
+        # Continue the normal A -> B -> C rotation AFTER the group of the
+        # last pre-assigned team drawn. For example, if the last preset team
+        # goes into Group A, the next random team starts in Group B.
+        next_group_index = (
+            (preset[preset_teams[-1]] + 1) % group_count
+            if preset_teams else 0
+        )
+        for name in remaining_teams:
+            draw_order.append((name, next_group_index))
+            next_group_index = (next_group_index + 1) % group_count
         self.active_guilds.add(ctx.guild.id)
         try:
             total = len(draw_order)
