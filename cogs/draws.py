@@ -473,16 +473,18 @@ class LiveDraws(commands.Cog):
             if team_key in saved_lookup and 0 <= row["group_index"] < group_count:
                 preset[saved_lookup[team_key]] = row["group_index"]
 
-        preset_teams = list(preset.keys())
-        random.shuffle(preset_teams)
+        preset_teams = [
+            name
+            for group_index in range(group_count)
+            for name in saved_teams
+            if preset.get(name) == group_index
+        ]
         remaining_teams = [name for name in saved_teams if name not in preset]
         random.shuffle(remaining_teams)
         draw_order = [(name, preset[name]) for name in preset_teams]
 
-        # Pre-assigned teams are drawn first and keep their configured groups.
-        # Continue the normal A -> B -> C rotation AFTER the group of the
-        # last pre-assigned team drawn. For example, if the last preset team
-        # goes into Group A, the next random team starts in Group B.
+        # Draw pre-assigned teams in group order, keeping teams in the same
+        # group together. Continue the rotation after the last preset group.
         next_group_index = (
             (preset[preset_teams[-1]] + 1) % group_count
             if preset_teams else 0
