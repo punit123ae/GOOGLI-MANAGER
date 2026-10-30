@@ -52,6 +52,7 @@ class LiveDraws(commands.Cog):
         self.db.commit()
         self.active_guilds = set()
         self.cancel_events = {}
+        self.active_draw_owners = {}
 
     def cog_unload(self):
         self.db.close()
@@ -177,6 +178,12 @@ class LiveDraws(commands.Cog):
 
     def _is_bot_owner(self, ctx):
         return ctx.author.id == OWNER_ID
+
+    def can_cancel_live_draw(self, ctx):
+        return (
+            ctx.guild is not None
+            and self.active_draw_owners.get(ctx.guild.id) == ctx.author.id
+        )
 
     @staticmethod
     def _group_labels(group_count):
@@ -403,7 +410,7 @@ class LiveDraws(commands.Cog):
     @commands.guild_only()
     async def cancel_live_draw(self, ctx):
         """Stop the currently running live draw in this server."""
-        if not await owner_or_whitelisted(ctx):
+        if not self.can_cancel_live_draw(ctx) and not await owner_or_whitelisted(ctx):
             await ctx.send("You are not authorized to cancel the live draw.")
             return
 
@@ -486,6 +493,7 @@ class LiveDraws(commands.Cog):
         cancel_event = asyncio.Event()
         self.active_guilds.add(ctx.guild.id)
         self.cancel_events[ctx.guild.id] = cancel_event
+        self.active_draw_owners[ctx.guild.id] = ctx.author.id
         try:
             total = len(draw_order)
             for drawn_count, (team_name, group_index) in enumerate(draw_order, 1):
@@ -554,6 +562,8 @@ class LiveDraws(commands.Cog):
                 )
                 for task in pending:
                     task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
                 if cancel_task in done and cancel_event.is_set():
                     await ctx.send(
                         f"🛑 Live draw **{discord.utils.escape_markdown(setting['setting_name'])}** cancelled. "
@@ -575,6 +585,7 @@ class LiveDraws(commands.Cog):
         finally:
             self.active_guilds.discard(ctx.guild.id)
             self.cancel_events.pop(ctx.guild.id, None)
+            self.active_draw_owners.pop(ctx.guild.id, None)
 
     @staticmethod
     def _format_results(setting_name, groups, drawn_count, total):

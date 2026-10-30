@@ -655,6 +655,10 @@ class Utility(commands.Cog):
             except discord.HTTPException:
                 pass
             return False
+        if getattr(getattr(ctx, "command", None), "name", "") == "cancel":
+            live_draws = self.bot.get_cog("LiveDraws")
+            if live_draws is not None and live_draws.can_cancel_live_draw(ctx):
+                return True
         if not ctx.guild:
             return True
         name = _normalise_command_name(getattr(ctx.command, "name", ""))
