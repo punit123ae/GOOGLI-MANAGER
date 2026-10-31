@@ -1,4 +1,5 @@
 import asyncio
+import re
 import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -8,8 +9,24 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 IST = ZoneInfo("Asia/Kolkata")
-MATCH_EMOJI = "<a:emoji_57:1559610804389675048>"
+MATCH_EMOJI = "<a:arrow_arrow:1565966619291811984>"
 VS_EMOJI = "<:VS128:1559620966709993472>"
+
+
+def parse_start_time(date_text, time_text):
+    """Parse 'YYYY-MM-DD' plus a 12-hour time such as '8:30 PM', '8pm' or '08:30 p.m.'.
+
+    Returns a timezone-aware datetime in India time. Raises ValueError if invalid.
+    """
+    cleaned = re.sub(r"\s+", "", time_text or "").upper().replace(".", "")
+    for time_format in ("%I:%M%p", "%I%p"):
+        try:
+            return datetime.strptime(
+                f"{date_text.strip()} {cleaned}", f"%Y-%m-%d {time_format}"
+            ).replace(tzinfo=IST)
+        except ValueError:
+            continue
+    raise ValueError("Invalid date or 12-hour time")
 
 
 async def command_allowed(interaction, command_name):
@@ -262,7 +279,7 @@ class Scheduling(commands.Cog):
 
             unix_time = int(self.start_dt.timestamp())
             announcement = (
-                f"{self.team_a.mention} {VS_EMOJI} {self.team_b.mention}\n"
+                f"{self.team_a.mention} {VS_EMOJI} {self.team_b.mention}\n\n"
                 f"{MATCH_EMOJI} **Match at** <t:{unix_time}:F>"
             )
             announcement_message_id = None
@@ -312,7 +329,7 @@ class Scheduling(commands.Cog):
     @app_commands.describe(
         team_a="First team's role", team_b="Second team's role",
         channel="Match announcement channel", date="Date in YYYY-MM-DD format, India time",
-        time="Time in 24-hour HH:MM format, India time"
+        time="Time in 12-hour format with AM/PM, India time (example: 8:30 PM)"
     )
     async def match_schedule(self, interaction: discord.Interaction, team_a: discord.Role, team_b: discord.Role, channel: discord.TextChannel, date: str, time: str):
         if not await command_allowed(interaction, "match_schedule"):
@@ -322,9 +339,9 @@ class Scheduling(commands.Cog):
             await interaction.response.send_message("Choose two different team roles.", ephemeral=True)
             return
         try:
-            start_dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+            start_dt = parse_start_time(date, time)
         except ValueError:
-            await interaction.response.send_message("Use date `YYYY-MM-DD` and time `HH:MM` (24-hour India time). Example: `2026-11-01` and `20:30`.", ephemeral=True)
+            await interaction.response.send_message("Use date `YYYY-MM-DD` and a 12-hour time with AM/PM (India time). Example: `2026-11-01` and `8:30 PM`.", ephemeral=True)
             return
         if start_dt.timestamp() <= datetime.now(timezone.utc).timestamp():
             await interaction.response.send_message("The match time must be in the future.", ephemeral=True)
