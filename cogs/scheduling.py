@@ -11,6 +11,9 @@ from discord.ext import commands, tasks
 IST = ZoneInfo("Asia/Kolkata")
 MATCH_EMOJI = "<a:arrow_arrow:1565966619291811984>"
 VS_EMOJI = "<:VS128:1559620966709993472>"
+HEADER_EMOJI = "<:emoji_60:1562481891037290637>"
+TIME_EMOJI = "<:time:1565970550067691710>"
+PIN_EMOJI = "<:pin:1565975934882943066>"
 
 
 def parse_start_time(date_text, time_text):
@@ -108,11 +111,13 @@ class Scheduling(commands.Cog):
         if not team_a or not team_b or not channel:
             return 0, 0
 
+        # Backticks inside a role name would break the inline-code formatting.
+        name_a = team_a.name.replace("`", "'")
+        name_b = team_b.name.replace("`", "'")
         message = (
-            f"🏏 **MATCH FIXTURE**\n"
-            f"⚔️ **{team_a.name} vs {team_b.name}**\n"
-            f"🗓️ **Match Time:** <t:{int(row['start_time'])}:F>\n"
-            f"📍 **Match Channel:** [Join Match]({channel.jump_url})"
+            f"# {HEADER_EMOJI} `{name_a}` {VS_EMOJI} `{name_b}` {HEADER_EMOJI}\n"
+            f"{TIME_EMOJI}  **Match Time:** <t:{int(row['start_time'])}:F>\n"
+            f"{PIN_EMOJI} **Match Channel:** [Join Match]({channel.jump_url})"
         )
         member_ids = set()
         sent = failed = 0
@@ -161,9 +166,9 @@ class Scheduling(commands.Cog):
         if channel and team_a and team_b:
             try:
                 await channel.send(
-                    f"🏏 **MATCH TIME!**\n"
+                    f"# {HEADER_EMOJI} `MATCH TIME!` {HEADER_EMOJI}\n"
                     f"{team_a.mention} {VS_EMOJI} {team_b.mention}\n"
-                    f"⏰ The scheduled match starts now!",
+                    f"{TIME_EMOJI}  The scheduled match starts now!",
                     allowed_mentions=self.role_mentions(team_a, team_b)
                 )
             except discord.HTTPException as exc:
