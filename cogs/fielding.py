@@ -528,7 +528,9 @@ class CatchTracker(commands.Cog):
         lines_cog = self.bot.get_cog("FielderLines")
         if lines_cog is not None:
             try:
-                await lines_cog.send_line(message.channel, pending["fielder_id"], result)
+                await lines_cog.send_line(
+                    message.channel, pending["fielder_id"], result,
+                    batter_id=pending.get("batsman_id"))
             except Exception as exc:
                 print(f"[fielding] custom fielder line failed: {type(exc).__name__}: {exc}")
 
