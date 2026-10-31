@@ -14,16 +14,10 @@ then the batter's line.
 Lines are stored in the bot's SQLite database (bot.db) per (server, player), so
 they survive restarts and 100+ players is no problem.
 
-Player commands
-    +setceleb                 menu to set / change / remove all four lines
-    +mylines                  show your saved lines
-    +clearlines [which]       remove lines (all if you give no argument)
-    +settakeline <text>       quick set: fielder, I took the catch
-    +setdropline <text>       quick set: fielder, I dropped the catch
-Admin commands (bot owner or Manage Server)
-    +clearlinesfor @user [which]
-
-``which`` is one of: all, take, drop, bat_take, bat_drop
+Commands
+    +setceleb                 menu to set / change / remove your four lines
+    +resetceleb               bot owner only: remove EVERYONE's lines in this server
+    +resetceleb <user>        bot owner only: remove one user's lines
 """
 from __future__ import annotations
 
@@ -90,13 +84,6 @@ def clean_line(raw: str) -> tuple[Optional[str], Optional[str]]:
     if text[0] in "+/!":
         return None, "A line can't start with `+`, `/` or `!` (it could trigger other bots)."
     return text, None
-
-
-def _kinds_for(which: str):
-    which = (which or "all").lower()
-    if which in ("all", "both"):
-        return list(SLOTS)
-    return [which] if which in SLOTS else None
 
 
 # --------------------------------------------------------------------------- menu UI
@@ -173,6 +160,66 @@ class CelebView(discord.ui.View):
         if self.message is not None:
             try:
                 await self.message.edit(view=self)
+            except Exception:
+                pass
+
+
+class ResetView(discord.ui.View):
+    """Confirm / Cancel buttons for +resetceleb, usable only by the person who ran it."""
+
+    def __init__(self, cog, owner_id: int, guild_id: int, target=None):
+        super().__init__(timeout=30)
+        self.cog, self.owner_id, self.guild_id, self.target = cog, owner_id, guild_id, target
+        self.message = None
+        self.finished = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can confirm or cancel it.", ephemeral=True)
+            return False
+        return True
+
+    def _disable(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Confirm reset", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            await interaction.response.defer()
+            return
+        self.finished = True
+        if self.target is None:
+            count = self.cog.reset_guild(self.guild_id)
+            text = f"✅ Removed the celebration lines of {count} player(s) in this server."
+        else:
+            count = self.cog.reset_user(self.guild_id, self.target.id)
+            text = (f"✅ Removed all celebration lines of **{discord.utils.escape_markdown(self.target.name)}**."
+                    if count else
+                    f"ℹ️ **{discord.utils.escape_markdown(self.target.name)}** had no celebration lines saved.")
+        self._disable()
+        self.stop()
+        await interaction.response.edit_message(content=text, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            await interaction.response.defer()
+            return
+        self.finished = True
+        self._disable()
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled. Nothing was removed.", view=self)
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        self._disable()
+        if self.message is not None:
+            try:
+                await self.message.edit(content="Reset timed out. Nothing was removed.", view=self)
             except Exception:
                 pass
 
@@ -294,79 +341,37 @@ class FielderLines(commands.Cog):
             embed=self.build_embed(ctx.guild.id, ctx.author.id, ctx.author),
             view=view, mention_author=False, allowed_mentions=NO_MENTIONS)
 
-    # ------------------------------------------------------------------ player commands
-    async def _save(self, ctx, kind: str, text: str):
-        cleaned, error = clean_line(text)
-        if error:
-            await ctx.reply(f"❌ {error}", mention_author=False, allowed_mentions=NO_MENTIONS)
-            return
-        self._set(ctx.guild.id, ctx.author.id, kind, cleaned)
-        label = "take a catch" if kind == "take" else "drop a catch"
-        await ctx.reply(
-            f"✅ Saved. When you {label}, I'll send:\n{cleaned}\n"
-            f"*Tip: `+setceleb` sets your batter lines too.*",
-            mention_author=False, allowed_mentions=NO_MENTIONS)
+    # ------------------------------------------------------------------ owner reset
+    def reset_user(self, guild_id: int, user_id: int) -> int:
+        cur = self.bot.db.execute(
+            "DELETE FROM fielder_lines WHERE guild_id=? AND user_id=?", (int(guild_id), int(user_id)))
+        self.bot.db.commit()
+        return cur.rowcount
 
-    @commands.command(name="settakeline")
-    @commands.guild_only()
-    async def set_take_line(self, ctx, *, text: str = ""):
-        """Set the line sent when you take a catch."""
-        if not text.strip():
-            await ctx.reply("Usage: `+settakeline <your line>` (or use `+setceleb`)", mention_author=False)
-            return
-        await self._save(ctx, "take", text)
+    def reset_guild(self, guild_id: int) -> int:
+        cur = self.bot.db.execute("DELETE FROM fielder_lines WHERE guild_id=?", (int(guild_id),))
+        self.bot.db.commit()
+        return cur.rowcount
 
-    @commands.command(name="setdropline")
+    @commands.command(name="resetceleb")
     @commands.guild_only()
-    async def set_drop_line(self, ctx, *, text: str = ""):
-        """Set the line sent when you drop a catch."""
-        if not text.strip():
-            await ctx.reply("Usage: `+setdropline <your line>` (or use `+setceleb`)", mention_author=False)
+    async def reset_celeb(self, ctx, user: discord.User = None):
+        """Bot owner only: remove everyone's celebration lines, or one user's."""
+        if ctx.author.id != BOT_OWNER_ID:
+            await ctx.reply("❌ Only the bot owner can use this command.", mention_author=False)
             return
-        await self._save(ctx, "drop", text)
-
-    @commands.command(name="mylines")
-    @commands.guild_only()
-    async def my_lines(self, ctx):
-        """Show your saved celebration lines."""
-        await ctx.reply(
-            embed=self.build_embed(ctx.guild.id, ctx.author.id, ctx.author),
-            mention_author=False, allowed_mentions=NO_MENTIONS)
-
-    @commands.command(name="clearlines")
-    @commands.guild_only()
-    async def clear_lines(self, ctx, which: str = "all"):
-        """Remove your lines: all, take, drop, bat_take or bat_drop."""
-        kinds = _kinds_for(which)
-        if kinds is None:
-            await ctx.reply("Usage: `+clearlines` or `+clearlines take|drop|bat_take|bat_drop`",
-                            mention_author=False)
-            return
-        for kind in kinds:
-            self._set(ctx.guild.id, ctx.author.id, kind, None)
-        await ctx.reply("🗑️ Removed." if len(kinds) == len(SLOTS) else f"🗑️ Removed your `{which.lower()}` line.",
-                        mention_author=False)
-
-    # ------------------------------------------------------------------ admin
-    @commands.command(name="clearlinesfor")
-    @commands.guild_only()
-    async def clear_lines_for(self, ctx, member: discord.Member, which: str = "all"):
-        """Admin: remove a player's custom lines (e.g. an inappropriate one)."""
-        if ctx.author.id != BOT_OWNER_ID and not ctx.author.guild_permissions.manage_guild:
-            await ctx.reply("❌ You need the Manage Server permission for this.", mention_author=False)
-            return
-        kinds = _kinds_for(which)
-        if kinds is None:
-            await ctx.reply("Usage: `+clearlinesfor @user [take|drop|bat_take|bat_drop]`", mention_author=False)
-            return
-        for kind in kinds:
-            self._set(ctx.guild.id, member.id, kind, None)
-        await ctx.reply(
-            f"🗑️ Removed {'all' if len(kinds) == len(SLOTS) else which.lower()} custom line(s) for "
-            f"**{discord.utils.escape_markdown(member.name)}**.",
-            mention_author=False, allowed_mentions=NO_MENTIONS)
+        if user is None:
+            count = self.bot.db.execute(
+                "SELECT COUNT(*) FROM fielder_lines WHERE guild_id=?", (ctx.guild.id,)).fetchone()[0]
+            text = (f"⚠️ This will permanently remove the celebration lines of **everyone** in this "
+                    f"server ({count} player(s)). Continue?")
+        else:
+            text = (f"⚠️ This will permanently remove **all** celebration lines of "
+                    f"**{discord.utils.escape_markdown(user.name)}**. Continue?")
+        view = ResetView(self, ctx.author.id, ctx.guild.id, user)
+        view.message = await ctx.reply(text, view=view, mention_author=False, allowed_mentions=NO_MENTIONS)
 
 
 async def setup(bot):
     await bot.add_cog(FielderLines(bot))
-    print("[fielderlines] loaded: +setceleb +mylines +clearlines +settakeline +setdropline")
+    print("[fielderlines] loaded: +setceleb +resetceleb")
