@@ -88,6 +88,18 @@ class FielderLines(commands.Cog):
         )
         bot.db.commit()
 
+    # ------------------------------------------------------------------ diagnostics
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx, error):
+        """Print why one of OUR commands failed or was blocked (console only)."""
+        if ctx.command is not None and ctx.command.cog is self:
+            print(f"[fielderlines] +{ctx.command.name} failed: {type(error).__name__}: {error}")
+
+    @commands.Cog.listener()
+    async def on_command(self, ctx):
+        if ctx.command is not None and ctx.command.cog is self:
+            print(f"[fielderlines] +{ctx.command.name} used by {ctx.author.id}")
+
     # ------------------------------------------------------------------ storage
     def _get(self, guild_id: int, user_id: int) -> tuple[Optional[str], Optional[str]]:
         row = self.bot.db.execute(
@@ -199,3 +211,4 @@ class FielderLines(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(FielderLines(bot))
+    print("[fielderlines] loaded: +settakeline +setdropline +mylines +clearlines")
