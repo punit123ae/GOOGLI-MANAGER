@@ -523,6 +523,15 @@ class CatchTracker(commands.Cog):
 
         self._increment(message.guild.id, pending["fielder_id"], result)
 
+        # Optional custom fielder line (fielderlines.py), sent right after the
+        # Hand Cricket result message. Any failure here must never affect catch tracking.
+        lines_cog = self.bot.get_cog("FielderLines")
+        if lines_cog is not None:
+            try:
+                await lines_cog.send_line(message.channel, pending["fielder_id"], result)
+            except Exception as exc:
+                print(f"[fielding] custom fielder line failed: {type(exc).__name__}: {exc}")
+
         # Post a separate embed showing updated stats and result colour.
         await self._send_stats_embed(message.channel, pending["fielder_id"], result=result)
 

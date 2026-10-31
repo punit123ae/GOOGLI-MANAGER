@@ -131,7 +131,9 @@ class FielderLines(commands.Cog):
         take, drop = self._get(channel.guild.id, fielder_id)
         text = take if result == "taken" else drop
         if not text:
+            print(f"[fielderlines] {result}: no saved line for user {fielder_id}")
             return False
+        print(f"[fielderlines] {result}: sending line for user {fielder_id}")
         await channel.send(text, allowed_mentions=NO_MENTIONS)
         return True
 
