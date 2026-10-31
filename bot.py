@@ -47,6 +47,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.fielding",
             "cogs.points_table",
             "cogs.batfds",
+            "cogs.fieldinglines",
         ):
             await self.load_extension(extension)
 
