@@ -333,6 +333,10 @@ class BatterFieldingDropStats(commands.Cog):
                 channel_id INTEGER NOT NULL, user_id INTEGER NOT NULL)
         """)
         db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_reaction_messages (
+                message_id INTEGER PRIMARY KEY)
+        """)
+        db.execute("""
             CREATE TABLE IF NOT EXISTS batter_drop_backups (
                 backup_no INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER NOT NULL, created_at TEXT NOT NULL)
@@ -430,6 +434,14 @@ class BatterFieldingDropStats(commands.Cog):
             self._finalize_batter(guild_id, channel_id, session_key, int(uid), int(score))
 
     async def _add_tracking_reaction(self, message: discord.Message):
+        db = self.bot.db
+        cursor = db.execute(
+            "INSERT OR IGNORE INTO batter_drop_reaction_messages(message_id) VALUES(?)",
+            (message.id,),
+        )
+        db.commit()
+        if cursor.rowcount == 0:
+            return
         try:
             await message.add_reaction("☑️")
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
