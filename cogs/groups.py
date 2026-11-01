@@ -467,6 +467,82 @@ class Groups(commands.Cog):
             "Each full round will finish before the next round starts."
         )
 
+    @commands.command(name="synchomestadiums")
+    async def synchomestadiums(self, ctx):
+        """Sync home stadium channels from channel topics; bot owner only."""
+        if ctx.guild is None:
+            await ctx.reply("Use this command in your server, not in DMs.", mention_author=False)
+            return
+        if not await ctx.bot.is_owner(ctx.author):
+            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
+            return
+
+        conn = connect_group_db()
+        try:
+            teams = conn.execute(
+                "SELECT team_name_key, team_name FROM team_groups WHERE guild_id = ?",
+                (ctx.guild.id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not teams:
+            await ctx.send("No teams are assigned to groups yet. Run `+setteamgroups` first.")
+            return
+
+        teams_by_name = {norm(row["team_name"]): row for row in teams}
+        found = {}
+        ambiguous = {}
+        for channel in ctx.guild.text_channels:
+            topic = channel.topic or ""
+            marker = re.search(r"home\s+stadium\s+of\s+(.+?)\s*$", topic, re.IGNORECASE)
+            if not marker:
+                continue
+            described_name = marker.group(1).strip().strip(" <>`*_~.,;:!。")
+            team = teams_by_name.get(norm(described_name))
+            if team is None:
+                continue
+            key = team["team_name_key"]
+            if key in found:
+                ambiguous.setdefault(key, [found.pop(key)]).append(channel)
+            elif key in ambiguous:
+                ambiguous[key].append(channel)
+            else:
+                found[key] = channel
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = connect_group_db()
+        try:
+            for key, channel in found.items():
+                team = next(row for row in teams if row["team_name_key"] == key)
+                conn.execute(
+                    "INSERT INTO team_home_stadiums "
+                    "(guild_id, team_name_key, team_name, channel_id, updated_by, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
+                    "team_name=excluded.team_name, channel_id=excluded.channel_id, "
+                    "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                    (ctx.guild.id, key, team["team_name"], channel.id, ctx.author.id, now),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        lines = [f"✅ Synced home stadiums for **{len(found)} team(s)**."]
+        for key, channel in found.items():
+            team = next(row for row in teams if row["team_name_key"] == key)
+            lines.append(f"• **{team['team_name']}** → {channel.mention}")
+        if ambiguous:
+            lines.append("\n⚠️ Multiple matching stadium channels found; left these teams unchanged:")
+            for key, channels in ambiguous.items():
+                team = next(row for row in teams if row["team_name_key"] == key)
+                lines.append(f"• **{team['team_name']}**: " + ", ".join(ch.mention for ch in channels))
+        missing = [row["team_name"] for row in teams
+                   if row["team_name_key"] not in found and row["team_name_key"] not in ambiguous]
+        if missing:
+            lines.append("\nNo matching channel topic found for: " + ", ".join(missing))
+        for chunk in split_chunks("\n".join(lines)):
+            await ctx.send(chunk)
+
     @commands.command(name="sethomestadium")
     async def sethomestadium(self, ctx, *, details: str = None):
         """Set a team's home stadium channel: +sethomestadium Team Name #channel"""
