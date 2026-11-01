@@ -5,6 +5,7 @@ records) and a separate groups_schedule.db for configuration and generated fixtu
 """
 
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -36,6 +37,15 @@ def connect_group_db():
             team_name_key TEXT NOT NULL,
             team_name TEXT NOT NULL,
             group_key TEXT NOT NULL,
+            updated_by INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, team_name_key)
+        );
+        CREATE TABLE IF NOT EXISTS team_home_stadiums (
+            guild_id INTEGER NOT NULL,
+            team_name_key TEXT NOT NULL,
+            team_name TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
             updated_by INTEGER NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (guild_id, team_name_key)
@@ -453,7 +463,180 @@ class Groups(commands.Cog):
             conn.close()
         await ctx.send(
             f"Schedule format saved: every pair plays **{count} time(s)**. "
+            "With `2`, each pair alternates home stadiums across its two matches. "
             "Each full round will finish before the next round starts."
+        )
+
+    @commands.command(name="sethomestadium")
+    async def sethomestadium(self, ctx, *, details: str = None):
+        """Set a team's home stadium channel: +sethomestadium Team Name #channel"""
+        if not await owner_only(ctx):
+            return
+        if not details:
+            await ctx.send("Usage: `+sethomestadium <team name> <#channel>`")
+            return
+        match = re.fullmatch(r"\s*(.+?)\s+(?:<#(\d+)>|(\d+))\s*", details)
+        if not match:
+            await ctx.send("Usage: `+sethomestadium <team name> <#channel>` (example: `+sethomestadium Kashmir Titans #team-stadium`)")
+            return
+        team_name = match.group(1).strip()
+        channel_id = int(match.group(2) or match.group(3))
+        channel = ctx.guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send("Please provide a text channel from this server.")
+            return
+
+        conn = connect_group_db()
+        try:
+            assigned_teams = conn.execute(
+                "SELECT team_name_key, team_name FROM team_groups WHERE guild_id = ?",
+                (ctx.guild.id,),
+            ).fetchall()
+            team = next(
+                (row for row in assigned_teams
+                 if norm(row["team_name"]) == norm(team_name)
+                 or row["team_name_key"] == norm(team_name)),
+                None,
+            )
+            if team:
+                conn.execute(
+                    "INSERT INTO team_home_stadiums "
+                    "(guild_id, team_name_key, team_name, channel_id, updated_by, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
+                    "team_name=excluded.team_name, channel_id=excluded.channel_id, "
+                    "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                    (ctx.guild.id, team["team_name_key"], team["team_name"], channel.id,
+                     ctx.author.id, datetime.now(timezone.utc).isoformat()),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        if not team:
+            await ctx.send("That team isn't assigned to a group yet. Check `+setteamgroups`.")
+            return
+        await ctx.send(f"Home stadium for **{team['team_name']}** set to {channel.mention}.")
+
+    @commands.command(name="schedule")
+    async def schedule(self, ctx, group_name: str = None, matchday: int = None):
+        """Post a generated matchday as a plain, role-mentioning message."""
+        if not await owner_only(ctx):
+            return
+        if not group_name or matchday is None or matchday < 1:
+            await ctx.send("Usage: `+schedule <group> <matchday>` (example: `+schedule A 1`)")
+            return
+
+        conn = connect_group_db()
+        try:
+            group = conn.execute(
+                "SELECT group_name, group_key FROM group_styles WHERE guild_id = ? AND group_key = ?",
+                (ctx.guild.id, norm(group_name)),
+            ).fetchone()
+            if group:
+                fixtures = conn.execute(
+                    "SELECT team_one, team_two FROM generated_fixtures "
+                    "WHERE guild_id = ? AND group_key = ? AND day_no = ? ORDER BY id",
+                    (ctx.guild.id, group["group_key"], matchday),
+                ).fetchall()
+                assigned = conn.execute(
+                    "SELECT team_name FROM team_groups WHERE guild_id = ? AND group_key = ? "
+                    "ORDER BY team_name COLLATE NOCASE",
+                    (ctx.guild.id, group["group_key"]),
+                ).fetchall()
+                home_stadiums = conn.execute(
+                    "SELECT team_name, channel_id FROM team_home_stadiums WHERE guild_id = ?",
+                    (ctx.guild.id,),
+                ).fetchall()
+            else:
+                fixtures, assigned, home_stadiums = [], [], []
+        finally:
+            conn.close()
+
+        if not group:
+            await ctx.send("That group isn't configured. Check `+groupstyle`.")
+            return
+        if not fixtures:
+            await ctx.send(
+                f"No fixtures found for Group {group['group_name']} matchday {matchday}. "
+                f"Generate the schedule first with `+generateschedule {group['group_name']}`."
+            )
+            return
+
+        # Resolve each assigned team to the role already configured in team registration.
+        if not os.path.exists(TEAM_DB):
+            await ctx.send(f"I couldn't find `{TEAM_DB}` to resolve the team roles.")
+            return
+        team_conn = sqlite3.connect(TEAM_DB)
+        try:
+            role_rows = team_conn.execute(
+                "SELECT t.name, s.role_id FROM registered_teams t "
+                "JOIN team_role_settings s ON s.team_id = t.id "
+                "WHERE t.guild_id = ? AND LOWER(t.status) = 'approved'",
+                (ctx.guild.id,),
+            ).fetchall()
+        finally:
+            team_conn.close()
+        role_by_team = {norm(name): int(role_id) for name, role_id in role_rows}
+
+        resolved = []
+        missing_roles = []
+        for fixture in fixtures:
+            names = (fixture["team_one"], fixture["team_two"])
+            role_ids = [role_by_team.get(norm(name)) for name in names]
+            for name, role_id in zip(names, role_ids):
+                if role_id is None or ctx.guild.get_role(role_id) is None:
+                    missing_roles.append(name)
+            if all(role_ids) and all(ctx.guild.get_role(role_id) for role_id in role_ids):
+                resolved.append((names, role_ids))
+        if missing_roles:
+            await ctx.send("Couldn't find configured Discord roles for: " + ", ".join(sorted(set(missing_roles))))
+            return
+
+        stadium_by_team = {norm(row["team_name"]): int(row["channel_id"]) for row in home_stadiums}
+        missing_channels = [names[0] for names, _ in resolved if norm(names[0]) not in stadium_by_team]
+        if missing_channels:
+            await ctx.send(
+                "Set a home stadium channel first for: " + ", ".join(sorted(set(missing_channels))) +
+                ". Use `+sethomestadium <team name> <#channel>`."
+            )
+            return
+
+        playing = {norm(name) for fixture in fixtures for name in (fixture["team_one"], fixture["team_two"])}
+        rest_roles = []
+        for row in assigned:
+            if norm(row["team_name"]) not in playing:
+                role_id = role_by_team.get(norm(row["team_name"]))
+                role = ctx.guild.get_role(role_id) if role_id else None
+                if role is None:
+                    await ctx.send(f"Couldn't find the configured Discord role for resting team {row['team_name']}.")
+                    return
+                rest_roles.append(role)
+
+        header_emoji = "<:emoji_60:1562481891037290637>"
+        vs_emoji = "<:VS128:1559620966709993472>"
+        lines = [
+            f"# {header_emoji}『 KASHMIR TITANS S1 』{header_emoji}",
+            f"## MATCHUPS FOR ROUND {matchday}",
+            f"# __GROUP {group['group_name']}__",
+        ]
+        all_ping_roles = []
+        for index, (names, role_ids) in enumerate(resolved, start=1):
+            role_a, role_b = role_ids
+            channel_id = stadium_by_team[norm(names[0])]
+            all_ping_roles.extend((ctx.guild.get_role(role_a), ctx.guild.get_role(role_b)))
+            lines.extend([
+                "",
+                f"**Match {index}**",
+                f"- <@&{role_a}> {vs_emoji} <@&{role_b}> in <#{channel_id}>",
+            ])
+        if rest_roles:
+            lines.append("### Rest: " + ", ".join(role.mention for role in rest_roles))
+            all_ping_roles.extend(rest_roles)
+        await ctx.send(
+            "\n".join(lines),
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, users=False, roles=all_ping_roles, replied_user=False
+            ),
         )
 
     @commands.command(name="generateschedule")
@@ -490,11 +673,23 @@ class Groups(commands.Cog):
             await ctx.send(f"Group {group['group_name']} needs at least 2 assigned teams to create a schedule.")
             return
         one_round = make_round_robin(names)
+        team_position = {norm(name): index for index, name in enumerate(names)}
         fixtures = []
         day_number = 1
         for round_no in range(1, fmt["matches_per_pair"] + 1):
             for matches in one_round:
                 for team_one, team_two in matches:
+                    # For odd-sized groups, orient the single round robin as a
+                    # regular tournament so every team has exactly half its games at home.
+                    if len(names) % 2:
+                        distance = (
+                            team_position[norm(team_two)] - team_position[norm(team_one)]
+                        ) % len(names)
+                        if distance > len(names) // 2:
+                            team_one, team_two = team_two, team_one
+                    # Alternate home teams on repeat meetings so two legs are home and away.
+                    if round_no % 2 == 0:
+                        team_one, team_two = team_two, team_one
                     fixtures.append((round_no, day_number, team_one, team_two))
                 day_number += 1
         now = datetime.now(timezone.utc).isoformat()
