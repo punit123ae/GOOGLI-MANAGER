@@ -98,7 +98,8 @@ def _compact_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", _clean_discord_name(value))
 
 
-def find_member_id(guild: discord.Guild, name: str):
+def _find_member_id_scan(guild: discord.Guild, name: str):
+    """Original full member scan. Kept as the reference behaviour (and for tests)."""
     key = _clean_discord_name(name).lstrip("@")
     exact = [
         member for member in guild.members
@@ -119,6 +120,62 @@ def find_member_id(guild: discord.Guild, name: str):
         )
     ]
     return matches[0].id if len({m.id for m in matches}) == 1 and matches else None
+
+
+
+# --- fast name lookup ---------------------------------------------------------
+# find_member_id() used to read the whole member list on every call. It now keeps
+# a per-server table of cleaned name -> member ids. The table is rebuilt only when
+# members join / leave / rename (see the cog listeners) and, as a safety net, when a
+# name is not found and the table is older than _NAME_INDEX_MAX_AGE seconds.
+_NAME_INDEX_MAX_AGE = 30.0
+_name_index: dict = {}  # guild_id -> {"exact": {...}, "compact": {...}, "built": monotonic}
+
+
+def invalidate_name_index(guild_id=None):
+    """Forget the cached table for one server (or all servers)."""
+    if guild_id is None:
+        _name_index.clear()
+    else:
+        _name_index.pop(int(guild_id), None)
+
+
+def _build_name_index(guild: discord.Guild) -> dict:
+    exact: dict = {}
+    compact: dict = {}
+    for member in guild.members:
+        for raw in (member.name, member.display_name):
+            exact.setdefault(_clean_discord_name(raw), set()).add(member.id)
+            short = _compact_name(raw)
+            if short:
+                compact.setdefault(short, set()).add(member.id)
+    index = {"exact": exact, "compact": compact, "built": time.monotonic()}
+    _name_index[guild.id] = index
+    return index
+
+
+def _lookup_name(index: dict, key: str):
+    ids = index["exact"].get(key, ())
+    if len(ids) == 1:
+        return next(iter(ids))
+    # Hand Cricket sometimes prints usernames without spaces/punctuation.
+    # Use this fallback only when it identifies exactly one server member.
+    short = _compact_name(key)
+    ids = index["compact"].get(short, ()) if short else ()
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
+def find_member_id(guild: discord.Guild, name: str):
+    key = _clean_discord_name(name).lstrip("@")
+    index = _name_index.get(guild.id)
+    if index is None:
+        index = _build_name_index(guild)
+    result = _lookup_name(index, key)
+    if result is None and time.monotonic() - index["built"] > _NAME_INDEX_MAX_AGE:
+        # Not found in an old table: members may have changed. Rebuild once and retry.
+        index = _build_name_index(guild)
+        result = _lookup_name(index, key)
+    return result
 
 
 def parse_opportunity(message: discord.Message):
@@ -537,6 +594,26 @@ class BatterFieldingDropStats(commands.Cog):
             # A catch being taken is not a batter finalisation event. The
             # authoritative Batter out! embed supplies the batter's final score.
             return
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        invalidate_name_index(member.guild.id)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        invalidate_name_index(member.guild.id)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        # Fires for role changes too, so only react to name changes.
+        if before.name != after.name or before.display_name != after.display_name:
+            invalidate_name_index(after.guild.id)
+
+    @commands.Cog.listener()
+    async def on_user_update(self, before: discord.User, after: discord.User):
+        # A global username change affects every server the person is in.
+        if before.name != after.name:
+            invalidate_name_index()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
