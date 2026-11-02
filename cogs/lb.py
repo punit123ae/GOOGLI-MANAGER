@@ -4,11 +4,16 @@ Uses the existing stats_imports/player_match_stats tables. No image generation.
 """
 from __future__ import annotations
 
+import sqlite3
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import discord
 from discord.ext import commands
+
+# Use the exact fantasy-point formula that +stats uses (batting + bowling).
+from .stats import fantasy_raw_points
 
 BLUE = discord.Colour.from_rgb(20, 117, 255)
 PAGE_SIZE = 10
@@ -32,7 +37,6 @@ METRICS = {
         ("overs", "Most Overs Bowled"),
         ("runs_leaked", "Most Runs Leaked"),
     ],
-    "Fantasy Points": [("fantasy", "Total Fantasy Points")],
     "Fielding": [
         ("fld_caught", "Most Catches Caught"),
         ("fld_dropped", "Most Catches Dropped"),
@@ -41,6 +45,14 @@ METRICS = {
     "Batter Impact": [
         ("runs_after_drops", "Most Runs After Dropped Catches"),
         ("runs_without_drops", "Most Runs Without Catch Drops"),
+    ],
+    "Fantasy Points": [("fantasy", "Total Fantasy Points")],
+    "Team Fielding": [
+        ("team_best_fielder", "Team's Best Fielder"),
+        ("team_eff", "Best Team Catch Efficiency"),
+        ("team_caught", "Most Catches as a Team"),
+        ("team_dropped", "Most Catch Drops as a Team"),
+        ("team_opps", "Most Catch Opportunities as a Team"),
     ],
 }
 
@@ -72,53 +84,20 @@ def _totals(rows: list[dict]) -> dict[str, float | int]:
     }
 
 
+def _fielding_fantasy_points(rec: tuple[int, int] | None) -> float:
+    """Fielding fantasy points exactly as +stats: caught * 5 - dropped * 10."""
+    if not rec:
+        return 0
+    caught, dropped = rec
+    return caught * 5 - dropped * 10
+
+
 def _fantasy_points(rows: list[dict]) -> float:
-    """Sum fantasy points per match using the exact stats-cog formula."""
-    total_points = 0.0
+    """Batting + bowling fantasy points using the +stats formula itself.
 
-    # The +stats command calculates each imported match row independently.
-    # Do the same here so +lb matches the points shown when stats are added.
-    for row in rows:
-        batting_raw = 0.0
-        bowling_raw = 0.0
-
-        runs = int(row.get("runs", 0))
-        balls_faced = int(row.get("balls_faced", 0))
-        not_out = bool(row.get("not_out", 0))
-
-        # Batting points and milestones for this match/innings.
-        if runs > 0 or balls_faced > 0:
-            batting_raw += runs - (balls_faced * 0.1)
-            if runs >= 100:
-                batting_raw += 30
-            elif runs >= 50:
-                batting_raw += 15
-            if runs == 0 and not not_out:
-                batting_raw -= 15
-
-        # Bowling penalty is based on this match row, exactly like +stats.
-        balls_bowled = int(row.get("balls_bowled", 0))
-        wickets = int(row.get("wickets", 0))
-        if balls_bowled > 0:
-            runs_conceded = int(row.get("runs_conceded", 0))
-            run_penalty = 1.0 if wickets == 0 and balls_bowled > 5 else 0.5
-            bowling_raw += (
-                (wickets * 18)
-                - (runs_conceded * run_penalty)
-                - (balls_bowled * 0.1)
-            )
-            if wickets >= 9:
-                bowling_raw += 20
-            elif wickets >= 7:
-                bowling_raw += 12
-            elif wickets >= 5:
-                bowling_raw += 15
-            elif wickets >= 3:
-                bowling_raw += 6
-
-        total_points += batting_raw + bowling_raw
-
-    return total_points
+    Fielding points are added separately in LeaderboardView.make_embed().
+    """
+    return fantasy_raw_points(rows)[2]
 
 
 def _value(key: str, rows: list[dict]) -> float | int | tuple[int, int]:
@@ -183,8 +162,109 @@ def _fielding_eligible(key: str, rec: tuple[int, int]) -> bool:
     return caught + dropped > 0
 
 
+def _team_db_path() -> Path | None:
+    """Locate team_registration.db the same way the +stats team lookup does."""
+    path = Path(__file__).resolve().parent.parent / "team_registration.db"
+    if path.is_file():
+        return path
+    fallback = Path("team_registration.db")
+    return fallback if fallback.is_file() else None
+
+
+def _team_rosters(guild_id: int) -> dict[int, dict]:
+    """Approved teams of this server: {team_id: {"name": str, "members": [user_id, ...]}}.
+
+    A player belongs to one team. Same membership rule as +stats: captain,
+    vice-captain, or a team_players entry (captains are assigned first).
+    """
+    path = _team_db_path()
+    if path is None:
+        return {}
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=3)
+        teams = conn.execute(
+            "SELECT id, name, captain_id, vice_captain_id FROM registered_teams "
+            "WHERE guild_id = ? AND status = 'approved' ORDER BY name COLLATE NOCASE",
+            (int(guild_id),),
+        ).fetchall()
+        players = conn.execute(
+            "SELECT p.team_id, p.user_id FROM team_players p "
+            "JOIN registered_teams t ON t.id = p.team_id "
+            "WHERE t.guild_id = ? AND t.status = 'approved' ORDER BY p.team_id, p.user_id",
+            (int(guild_id),),
+        ).fetchall()
+    except (sqlite3.Error, OSError, ValueError):
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+    result = {int(t[0]): {"name": str(t[1]), "members": []} for t in teams}
+    assigned: set[int] = set()
+
+    def add(team_id: int, user_id) -> None:
+        if user_id is None:
+            return
+        user_id = int(user_id)
+        if user_id in assigned or team_id not in result:
+            return
+        assigned.add(user_id)
+        result[team_id]["members"].append(user_id)
+
+    for t in teams:
+        add(int(t[0]), t[2])
+    for t in teams:
+        add(int(t[0]), t[3])
+    for team_id, user_id in players:
+        add(int(team_id), user_id)
+    return result
+
+
+def _team_fielding(guild_id: int, fielding_by_user: dict[int, tuple[int, int]]) -> dict[int, dict]:
+    """Team totals built from each current member's saved fielding totals."""
+    teams: dict[int, dict] = {}
+    for team_id, info in _team_rosters(guild_id).items():
+        caught = dropped = 0
+        best = None  # (user_id, caught, dropped)
+        for uid in info["members"]:
+            c, d = fielding_by_user.get(uid, (0, 0))
+            caught += c
+            dropped += d
+            if (c or d) and (best is None or (c, -d) > (best[1], -best[2])):
+                best = (uid, c, d)
+        teams[team_id] = {"name": info["name"], "caught": caught, "dropped": dropped, "best": best}
+    return teams
+
+
+def _team_value(key: str, team: dict, guild) -> Any:
+    """Return the leaderboard value for one team, or None if it doesn't qualify."""
+    caught, dropped = team["caught"], team["dropped"]
+    attempts = caught + dropped
+    if key == "team_caught":
+        return caught if caught > 0 else None
+    if key == "team_dropped":
+        return dropped if dropped > 0 else None
+    if key == "team_opps":
+        return attempts if attempts > 0 else None
+    if key == "team_eff":
+        if attempts <= 0:
+            return None
+        return caught * 100 / attempts, caught, attempts
+    if key == "team_best_fielder":
+        best = team["best"]
+        if best is None or best[1] <= 0:
+            return None
+        member = guild.get_member(best[0]) if guild else None
+        name = member.name if member else f"Unknown player ({str(best[0])[-4:]})"
+        return best[1], name
+    return None
+
+
 def _sort_key(key: str, value: Any):
-    if key == "fld_eff":
+    if key == "team_best_fielder":
+        return (-value[0], value[1].casefold())
+    if key in ("fld_eff", "team_eff"):
         # Highest efficiency first; ties go to the player with more attempts.
         return (-value[0], -value[2])
     if key == "lowest_strike_rate":
@@ -197,7 +277,9 @@ def _sort_key(key: str, value: Any):
 
 
 def _display(key: str, value: Any) -> str:
-    if key == "fld_eff":
+    if key == "team_best_fielder":
+        return f"{discord.utils.escape_markdown(value[1])} ({value[0]} catches)"
+    if key in ("fld_eff", "team_eff"):
         return f"{value[0]:.2f}% ({value[1]}/{value[2]})"
     if key == "best_figures":
         return f"{value[0]}/{value[1]}"
@@ -212,7 +294,8 @@ class CategorySelect(discord.ui.Select):
             "Bowling": "<:cricketball:1561294577392951338>",
             "Fantasy Points": "<:Crown:1561296003104243803>",
             "Fielding": "🧤",
-            "Batter Impact": "🏏",
+            "Batter Impact": "💥",
+            "Team Fielding": "🛡️",
         }
         options = [discord.SelectOption(label=name, emoji=category_emojis[name], default=name == view.category)
                    for name in METRICS]
@@ -264,6 +347,7 @@ class LeaderboardView(discord.ui.View):
         self.category = "Batting"
         self.metric_key, self.metric_label = METRICS[self.category][0]
         self.page = 0
+        self.team_names: dict[int, str] = {}
         self._rebuild_items()
 
     def _rebuild_items(self):
@@ -290,6 +374,15 @@ class LeaderboardView(discord.ui.View):
                 if not _fielding_eligible(self.metric_key, rec):
                     continue
                 computed.append((uid, _fielding_value(self.metric_key, rec)))
+        elif self.category == "Team Fielding":
+            # Re-read both databases on every render so new catches and roster changes show up.
+            self.cog.fielding_by_user = self.cog._fielding_rows(guild.id)
+            teams = _team_fielding(guild.id, self.cog.fielding_by_user)
+            self.team_names = {team_id: t["name"] for team_id, t in teams.items()}
+            for team_id, t in teams.items():
+                value = _team_value(self.metric_key, t, guild)
+                if value is not None:
+                    computed.append((team_id, value))
         elif self.category == "Batter Impact":
             # Re-read the database on every render so owner edits/resets appear
             # when the leaderboard is refreshed, not only after a bot restart.
@@ -299,10 +392,16 @@ class LeaderboardView(discord.ui.View):
                 if value > 0:
                     computed.append((uid, value))
         else:
+            if self.metric_key == "fantasy":
+                # Re-read so catch totals edited elsewhere show up, like +stats does.
+                self.cog.fielding_by_user = self.cog._fielding_rows(guild.id)
             for uid, rows in rows_by_user.items():
                 if not _eligible(self.metric_key, rows):
                     continue
                 value = _value(self.metric_key, rows)
+                if self.metric_key == "fantasy":
+                    # Total = batting + bowling + fielding, same as +stats.
+                    value += _fielding_fantasy_points(self.cog.fielding_by_user.get(uid))
                 computed.append((uid, value))
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         total = len(computed)
@@ -310,19 +409,23 @@ class LeaderboardView(discord.ui.View):
         self.page = max(0, min(self.page, pages - 1))
         current = computed[self.page * PAGE_SIZE:(self.page + 1) * PAGE_SIZE]
 
+        noun = "teams" if self.category == "Team Fielding" else "players"
         embed = discord.Embed(
             title="# **`KASHMIR TITANS S1`**",
             description=f"**{self.category.upper()} LEADERBOARD — {self.metric_label.upper()}**\n"
-                        f"**{total} players in this category**\n\n",
+                        f"**{total} {noun} in this category**\n\n",
             colour=BLUE,
         )
         lines = []
         for index, (uid, value) in enumerate(current, start=self.page * PAGE_SIZE + 1):
-            member = guild.get_member(uid) if guild else None
-            username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
+            if self.category == "Team Fielding":
+                username = self.team_names.get(uid, f"Team {uid}")
+            else:
+                member = guild.get_member(uid) if guild else None
+                username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
             lines.append(f"`{index}.` **{discord.utils.escape_markdown(username)}** → `{_display(self.metric_key, value)}`")
         embed.description += "\n".join(lines) if lines else "No players qualify for this statistic yet."
-        embed.set_footer(text=f"Kashmir Titans S1 • Page {self.page + 1}/{pages} • {PAGE_SIZE} players per page")
+        embed.set_footer(text=f"Kashmir Titans S1 • Page {self.page + 1}/{pages} • {PAGE_SIZE} {noun} per page")
         self.children[-2].disabled = self.page == 0
         self.children[-1].disabled = self.page >= pages - 1
         return embed

@@ -1224,6 +1224,65 @@ class Stats(commands.Cog):
         caught, dropped = (int(row[0]), int(row[1])) if row else (0, 0)
         return caught, dropped, caught * 5 - dropped * 10
 
+    def get_batter_impact(self, guild_id, user_id):
+        """Return (runs_after_catch_drops, runs_without_catch_drops) for this server/player.
+
+        Same table and columns the +lb "Batter Impact" category reads
+        (batter_drop_lb.runs_affected / runs_without_drops).
+        """
+        try:
+            row = self.db.execute(
+                "SELECT runs_affected, runs_without_drops FROM batter_drop_lb "
+                "WHERE guild_id=? AND user_id=?",
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+        except Exception:
+            # batfds may not have created its table yet.
+            return 0, 0
+        return (int(row[0]), int(row[1])) if row else (0, 0)
+
+    async def find_member_by_name(self, guild, query):
+        """Resolve a username, display name or nickname to a server member.
+
+        Returns (member_or_None, candidates). member is None when nothing matched
+        or when several members matched and none could be chosen safely.
+        """
+        needle = str(query or "").strip().lstrip("@").strip().casefold()
+        if not needle:
+            return None, []
+
+        def names(m):
+            raw = (m.name, getattr(m, "global_name", None), getattr(m, "nick", None), m.display_name)
+            return {n.casefold() for n in raw if n}
+
+        def search(members):
+            exact_username = [m for m in members if m.name.casefold() == needle]
+            if exact_username:
+                return exact_username
+            exact_display = [m for m in members if needle in names(m)]
+            if exact_display:
+                return exact_display
+            if len(needle) >= 3:
+                return [m for m in members if any(n.startswith(needle) for n in names(m))]
+            return []
+
+        found = search(list(guild.members))
+        if not found:
+            # The member cache can be incomplete; ask Discord for prefix matches.
+            try:
+                found = search(await guild.query_members(query=needle, limit=10))
+            except Exception:
+                found = []
+        found = list({m.id: m for m in found}.values())
+        if len(found) == 1:
+            return found[0], found
+        if len(found) > 1:
+            # Prefer the one candidate who actually has imported stats.
+            with_stats = [m for m in found if self.get_player_rows(guild.id, m.id)]
+            if len(with_stats) == 1:
+                return with_stats[0], found
+        return None, found
+
     async def command_allowed(self, ctx, command_name):
         """Use the shared utility cog for command whitelist/lock checks."""
         utility = self.bot.get_cog("Utility")
@@ -1683,37 +1742,56 @@ class Stats(commands.Cog):
         )
 
     @commands.command(name="stats")
-    async def player_stats(self, ctx, user_id: str = None):
-        # Accept a server member, a mention, or a numeric Discord user ID.
+    async def player_stats(self, ctx, *, user_id: str = None):
+        # Accept a server member, a mention, a numeric Discord user ID,
+        # or a username / display name / nickname.
         if not user_id:
             member = ctx.author
         else:
             cleaned_id = user_id.strip().strip("<@!>")
             if not cleaned_id.isdigit():
-                await ctx.reply(
-                    "Use `+stats`, `+stats @user`, or `+stats USER_ID`.",
-                    mention_author=False,
-                )
-                return
-            target_id = int(cleaned_id)
-            member = ctx.guild.get_member(target_id)
-            if member is None:
-                user = self.bot.get_user(target_id)
-                if user is None:
-                    try:
-                        user = await self.bot.fetch_user(target_id)
-                    except (discord.NotFound, discord.HTTPException):
-                        user = None
-                # A departed user may no longer be a Guild Member. Keep the
-                # same rendering interface while using their stored ID/stats.
-                member = SimpleNamespace(
-                    id=target_id,
-                    name=getattr(user, "name", f"User {target_id}"),
-                    display_name=getattr(user, "name", f"User {target_id}"),
-                    mention=f"<@{target_id}>",
-                    display_avatar=getattr(user, "display_avatar", None),
-                    guild=ctx.guild,
-                )
+                member, candidates = await self.find_member_by_name(ctx.guild, user_id)
+                if member is None:
+                    shown = discord.utils.escape_markdown(discord.utils.escape_mentions(user_id.strip()))
+                    if candidates:
+                        options = ", ".join(
+                            f"`{discord.utils.escape_markdown(m.name)}` ({m.id})" for m in candidates[:5]
+                        )
+                        message = (
+                            f"More than one member matches **{shown}**: {options}. "
+                            "Use a mention or user ID instead."
+                        )
+                    else:
+                        message = (
+                            f"I couldn't find a member matching **{shown}**. "
+                            "Use `+stats`, `+stats @user`, `+stats USER_ID`, or `+stats username`."
+                        )
+                    await ctx.reply(
+                        message,
+                        mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return
+            else:
+                target_id = int(cleaned_id)
+                member = ctx.guild.get_member(target_id)
+                if member is None:
+                    user = self.bot.get_user(target_id)
+                    if user is None:
+                        try:
+                            user = await self.bot.fetch_user(target_id)
+                        except (discord.NotFound, discord.HTTPException):
+                            user = None
+                    # A departed user may no longer be a Guild Member. Keep the
+                    # same rendering interface while using their stored ID/stats.
+                    member = SimpleNamespace(
+                        id=target_id,
+                        name=getattr(user, "name", f"User {target_id}"),
+                        display_name=getattr(user, "name", f"User {target_id}"),
+                        mention=f"<@{target_id}>",
+                        display_avatar=getattr(user, "display_avatar", None),
+                        guild=ctx.guild,
+                    )
 
         rows = self.get_player_rows(ctx.guild.id, member.id)
         if not rows:
@@ -1746,6 +1824,7 @@ class Stats(commands.Cog):
         catches_caught, catches_dropped, fielding_points = self.get_fielding_stats(
             ctx.guild.id, member.id
         )
+        runs_after_drops, runs_without_drops = self.get_batter_impact(ctx.guild.id, member.id)
 
         try:
             if design == 2:
@@ -1901,6 +1980,8 @@ class Stats(commands.Cog):
             value=(
                 f"**Innings:** `{t['matches']}`\n"
                 f"**Runs:** `{t['runs']}`\n"
+                f"**Runs without catch drops:** `{runs_without_drops}`\n"
+                f"**Runs after catch drops:** `{runs_after_drops}`\n"
                 f"**Balls played:** `{t['balls_faced']}`\n"
                 f"**Strike rate:** `{t['strike_rate']:.2f}`\n"
                 f"**Average:** `{t['bat_avg']:.2f}`\n"
