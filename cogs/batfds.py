@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
+from .utility import owner_or_whitelisted
+
 HANDCRICKET_BOT_ID = 753191385296928808
 BOT_OWNER_ID = 1014568928682459198
 PENDING_TTL_SECONDS = 120
@@ -23,6 +25,30 @@ BATTER_LINE = re.compile(
     r"^\s*([^:\n]{1,64})\s*:\s*(\d+)\s*\(\s*\d+\s*\)\s*runs\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+def parse_rep_raw_stats(message: discord.Message) -> list[tuple[int, int]]:
+    """Parse the final fenced code block: (user_id, runs_scored) for each rep."""
+    blocks = re.findall(r"```(?:[A-Za-z0-9_-]+)?\s*([\s\S]*?)```", message.content or "")
+    if not blocks:
+        return []
+    reps = []
+    seen = set()
+    for line in blocks[-1].splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 7:
+            continue
+        try:
+            user_id = int(parts[0])
+            runs = int(parts[1])
+            # Validate the full seven-field raw-stat record.
+            [int(value) for value in parts[2:7]]
+        except (TypeError, ValueError):
+            continue
+        if user_id > 0 and runs >= 0 and user_id not in seen:
+            seen.add(user_id)
+            reps.append((user_id, runs))
+    return reps
 
 
 def message_text(message: discord.Message) -> str:
@@ -279,84 +305,6 @@ class MarkEndedConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Cancelled. No tracking data was changed.", view=self)
 
 
-class ResetBatterImpactConfirmView(discord.ui.View):
-    """Owner-only confirmation for destructive Batter Impact reset."""
-    def __init__(self, cog: "BatterFieldingDropStats", ctx: commands.Context, member: discord.Member = None):
-        super().__init__(timeout=60)
-        self.cog, self.ctx, self.member = cog, ctx, member
-        self.done = False
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Confirm reset", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.done:
-            return await interaction.response.send_message("This reset has already been handled.", ephemeral=True)
-        backup_no = self.cog._backup_before_reset(self.ctx.guild.id, self.member.id if self.member else None)
-        self.cog._perform_reset(self.ctx.guild.id, self.member.id if self.member else None)
-        self.done = True
-        for child in self.children:
-            child.disabled = True
-        target = self.member.mention if self.member else "everyone"
-        await interaction.response.edit_message(
-            content=f"Batter Impact reset for {target}. Automatic backup created: `+previewlb {backup_no}`.", view=self
-        )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.done = True
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content="Reset cancelled. No data was changed.", view=self)
-
-
-class RemoveRepStatsConfirmView(discord.ui.View):
-    def __init__(self, cog: "BatterFieldingDropStats", ctx: commands.Context, user_ids: list[int]):
-        super().__init__(timeout=60)
-        self.cog, self.ctx, self.user_ids, self.done = cog, ctx, user_ids, False
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != BOT_OWNER_ID:
-            await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Confirm remove reps", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.done:
-            return await interaction.response.send_message("This action was already handled.", ephemeral=True)
-        db = self.cog.bot.db
-        cur = db.execute("INSERT INTO batter_drop_backups(guild_id,created_at) VALUES(?,?)",
-                         (self.ctx.guild.id, datetime.now(timezone.utc).isoformat(timespec="seconds")))
-        backup_no = int(cur.lastrowid)
-        for uid in self.user_ids:
-            row = db.execute("SELECT matches_affected,drops,runs_affected,runs_without_drops FROM batter_drop_lb WHERE guild_id=? AND user_id=?",
-                             (self.ctx.guild.id, uid)).fetchone()
-            if row:
-                db.execute("INSERT INTO batter_drop_backup_rows(backup_no,user_id,matches_affected,drops,runs_affected,runs_without_drops) VALUES(?,?,?,?,?,?)",
-                           (backup_no, uid, *row))
-            for table in ("batter_drop_lb", "batter_drop_preview", "batter_drop_sessions", "batter_drop_pending", "batter_drop_finalized"):
-                db.execute(f"DELETE FROM {table} WHERE guild_id=? AND user_id=?", (self.ctx.guild.id, uid))
-        db.commit()
-        self.done = True
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            content=f"Removed Batter Impact/preview records for **{len(self.user_ids)} rep(s)**. Backup created: `+previewlb {backup_no}`. Imported `+as` stats and fantasy points were untouched.", view=self
-        )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.done = True
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(content="Cancelled; no rep stats were removed.", view=self)
-
-
 class BatterFieldingDropStats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -425,6 +373,20 @@ class BatterFieldingDropStats(commands.Cog):
                 matches_affected INTEGER NOT NULL, drops INTEGER NOT NULL,
                 runs_affected INTEGER NOT NULL, runs_without_drops INTEGER NOT NULL,
                 PRIMARY KEY (backup_no, user_id))
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_rep_removal_backups (
+                backup_no INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL, created_at TEXT NOT NULL,
+                source_message_id INTEGER NOT NULL, created_by INTEGER NOT NULL)
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_rep_removal_backup_rows (
+                backup_no INTEGER NOT NULL, table_name TEXT NOT NULL,
+                user_id INTEGER NOT NULL, matches_affected INTEGER NOT NULL,
+                drops INTEGER NOT NULL, runs_affected INTEGER NOT NULL,
+                runs_without_drops INTEGER NOT NULL,
+                PRIMARY KEY (backup_no, table_name, user_id))
         """)
         db.commit()
 
@@ -977,6 +939,135 @@ class BatterFieldingDropStats(commands.Cog):
             view=view,
         )
 
+    @commands.command(name="removerep")
+    @commands.guild_only()
+    async def remove_rep_stats(self, ctx: commands.Context):
+        """Remove rep runs from Batter Impact by replying to Hand Cricket raw stats."""
+        if not await owner_or_whitelisted(ctx, "removerep"):
+            return await ctx.reply(
+                "❌ Only the bot owner or a role whitelisted for `+removerep` can use this command.",
+                mention_author=False,
+            )
+
+        reference = ctx.message.reference
+        if reference is None or reference.message_id is None:
+            return await ctx.reply(
+                "Reply to the Hand Cricket raw statistics message, then run `+removerep`.",
+                mention_author=False,
+            )
+        try:
+            raw_message = reference.resolved
+            if raw_message is None:
+                raw_message = await ctx.channel.fetch_message(reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return await ctx.reply("I couldn't read the replied-to message.", mention_author=False)
+
+        if raw_message.author.id != HANDCRICKET_BOT_ID:
+            return await ctx.reply("The replied-to message is not from the Hand Cricket bot.", mention_author=False)
+        rep_records = parse_rep_raw_stats(raw_message)
+        if not rep_records:
+            return await ctx.reply(
+                "I couldn't find valid rep records in the final separate code block. "
+                "Make sure you replied to the complete raw statistics message.",
+                mention_author=False,
+            )
+
+        db = self.bot.db
+        guild_id = int(ctx.guild.id)
+        eligible = []
+        skipped = []
+        for user_id, rep_runs in rep_records:
+            preview = db.execute(
+                "SELECT runs_affected,runs_without_drops FROM batter_drop_preview WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            ).fetchone()
+            permanent = db.execute(
+                "SELECT runs_affected,runs_without_drops FROM batter_drop_lb WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            ).fetchone()
+            after_drops = (int(preview[0]) if preview else 0) + (int(permanent[0]) if permanent else 0)
+            before_drops = (int(preview[1]) if preview else 0) + (int(permanent[1]) if permanent else 0)
+
+            if after_drops > 0:
+                skipped.append((user_id, f"has {after_drops} runs after catch drops"))
+            elif not preview and not permanent:
+                skipped.append((user_id, "has no Batter Impact record"))
+            elif before_drops < rep_runs:
+                skipped.append((user_id, f"only {before_drops} before-drop runs are recorded; cannot subtract {rep_runs}"))
+            else:
+                eligible.append((user_id, rep_runs))
+
+        if not eligible:
+            lines = [f"<@{uid}> — {reason}" for uid, reason in skipped]
+            return await ctx.reply(
+                "No rep stats were removed.\n" + "\n".join(lines),
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            cur = db.execute(
+                "INSERT INTO batter_drop_rep_removal_backups(guild_id,created_at,source_message_id,created_by) "
+                "VALUES(?,?,?,?)",
+                (guild_id, created, int(raw_message.id), int(ctx.author.id)),
+            )
+            backup_no = int(cur.lastrowid)
+            for user_id, rep_runs in eligible:
+                rows = []
+                for table_name in ("batter_drop_preview", "batter_drop_lb"):
+                    row = db.execute(
+                        f"SELECT matches_affected,drops,runs_affected,runs_without_drops FROM {table_name} "
+                        "WHERE guild_id=? AND user_id=?",
+                        (guild_id, user_id),
+                    ).fetchone()
+                    if row is not None:
+                        rows.append((table_name, row))
+                        db.execute(
+                            "INSERT INTO batter_drop_rep_removal_backup_rows "
+                            "(backup_no,table_name,user_id,matches_affected,drops,runs_affected,runs_without_drops) "
+                            "VALUES(?,?,?,?,?,?,?)",
+                            (backup_no, table_name, user_id, *[int(v) for v in row]),
+                        )
+
+                remaining = int(rep_runs)
+                # Subtract from preview first, then permanent +lb if the preview total is insufficient.
+                for table_name, row in rows:
+                    available = int(row[3])
+                    take = min(available, remaining)
+                    if take:
+                        db.execute(
+                            f"UPDATE {table_name} SET runs_without_drops=runs_without_drops-? "
+                            "WHERE guild_id=? AND user_id=?",
+                            (take, guild_id, user_id),
+                        )
+                        remaining -= take
+                    if remaining == 0:
+                        break
+                if remaining:
+                    raise RuntimeError(f"Unexpected balance mismatch for rep {user_id}; transaction cancelled")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        removed_lines = [f"<@{uid}> — subtracted **{runs}** runs from before-catch-drop runs"
+                         for uid, runs in eligible]
+        skipped_lines = [f"<@{uid}> — {reason}; not changed" for uid, reason in skipped]
+        report = [
+            "✅ **Rep stats removal complete.**",
+            f"Automatic backup created: `Rep removal backup #{backup_no}`.",
+            *removed_lines,
+        ]
+        if skipped_lines:
+            report.extend(["\n⚠️ **Skipped reps:**", *skipped_lines])
+        await ctx.reply(
+            "\n".join(report),
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.command(name="setbatterimpact")
     @commands.guild_only()
     async def set_batter_impact(self, ctx: commands.Context, member: discord.Member,
@@ -998,78 +1089,34 @@ class BatterFieldingDropStats(commands.Cog):
             mention_author=False,
         )
 
-    @commands.command(name="removerepstats")
-    @commands.guild_only()
-    async def remove_rep_stats(self, ctx: commands.Context):
-        """Reply to Hand Cricket raw statistics with +removerepstats to remove those IDs from Batter Impact."""
-        if ctx.author.id != BOT_OWNER_ID:
-            return await ctx.reply("You are not allowed to use this command.", mention_author=False)
-        source = ctx.message.reference.resolved if ctx.message.reference else None
-        if source is None or not isinstance(source, discord.Message):
-            return await ctx.reply("Reply directly to the Hand Cricket raw-statistics message with `+removerepstats`.", mention_author=False)
-        content = source.content or ""
-        heading = re.search(r"Raw statistics of the match\s*:", content, re.IGNORECASE)
-        if heading:
-            content = content[heading.end():]
-        block = re.search(r"```python\s*\n(.*?)```", content, re.IGNORECASE | re.DOTALL)
-        if not block:
-            return await ctx.reply("I couldn't find the Python raw-statistics block in that message.", mention_author=False)
-        user_ids = []
-        for line in block.group(1).splitlines():
-            parts = [part.strip() for part in line.strip().strip("`").split(",")]
-            if len(parts) == 7 and all(re.fullmatch(r"\d+", part) for part in parts):
-                user_ids.append(int(parts[0]))
-        user_ids = sorted(set(user_ids))
-        if not user_ids:
-            return await ctx.reply("No valid player IDs were found in the raw statistics.", mention_author=False)
-        view = RemoveRepStatsConfirmView(self, ctx, user_ids)
-        await ctx.send(
-            f"Found **{len(user_ids)} player ID(s)** in the replied raw stats. This removes their Batter Impact and preview records only; it does not delete imported `+as` stats. Backup will be created first.",
-            view=view,
-        )
-
-    def _backup_before_reset(self, guild_id: int, user_id: int = None) -> int:
-        """Snapshot permanent Batter Impact totals before a destructive reset."""
-        db = self.bot.db
-        created = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        cur = db.execute("INSERT INTO batter_drop_backups(guild_id,created_at) VALUES(?,?)", (guild_id, created))
-        backup_no = int(cur.lastrowid)
-        query = "SELECT user_id,matches_affected,drops,runs_affected,runs_without_drops FROM batter_drop_lb WHERE guild_id=?"
-        params = (guild_id,)
-        if user_id is not None:
-            query += " AND user_id=?"
-            params = (guild_id, user_id)
-        rows = db.execute(query, params).fetchall()
-        for uid, matches, drops, affected, without in rows:
-            db.execute("INSERT INTO batter_drop_backup_rows(backup_no,user_id,matches_affected,drops,runs_affected,runs_without_drops) VALUES(?,?,?,?,?,?)",
-                       (backup_no, uid, matches, drops, affected, without))
-        db.commit()
-        return backup_no
-
-    def _perform_reset(self, guild_id: int, user_id: int = None):
-        db = self.bot.db
-        tables = ("batter_drop_lb", "batter_drop_preview", "batter_drop_sessions",
-                  "batter_drop_pending", "batter_drop_finalized")
-        for table in tables:
-            if user_id is None:
-                db.execute(f"DELETE FROM {table} WHERE guild_id=?", (guild_id,))
-            else:
-                db.execute(f"DELETE FROM {table} WHERE guild_id=? AND user_id=?", (guild_id, user_id))
-        if user_id is None:
-            db.execute("DELETE FROM batter_drop_matches WHERE guild_id=?", (guild_id,))
-        db.commit()
-
     @commands.command(name="resetbatterimpact")
     @commands.guild_only()
     async def reset_batter_impact(self, ctx: commands.Context, member: discord.Member = None):
         if ctx.author.id != BOT_OWNER_ID:
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
-        target = member.mention if member else "everyone in this server"
-        view = ResetBatterImpactConfirmView(self, ctx, member)
-        await ctx.send(
-            f"⚠️ Confirm reset of Batter Impact stats for **{target}**? An automatic backup will be created first.",
-            view=view,
-        )
+        if member is None:
+            self.bot.db.execute("DELETE FROM batter_drop_lb WHERE guild_id=?", (ctx.guild.id,))
+            self.bot.db.execute("DELETE FROM batter_drop_preview WHERE guild_id=?", (ctx.guild.id,))
+            self.bot.db.execute("DELETE FROM batter_drop_sessions WHERE guild_id=?", (ctx.guild.id,))
+            self.bot.db.execute("DELETE FROM batter_drop_matches WHERE guild_id=?", (ctx.guild.id,))
+            self.bot.db.execute("DELETE FROM batter_drop_pending WHERE guild_id=?", (ctx.guild.id,))
+            self.bot.db.execute("DELETE FROM batter_drop_finalized WHERE guild_id=?", (ctx.guild.id,))
+            await ctx.reply("Reset Batter Impact stats and preview tracking for everyone in this server.",
+                            mention_author=False)
+        else:
+            self.bot.db.execute("DELETE FROM batter_drop_lb WHERE guild_id=? AND user_id=?",
+                                (ctx.guild.id, member.id))
+            self.bot.db.execute("DELETE FROM batter_drop_preview WHERE guild_id=? AND user_id=?",
+                                (ctx.guild.id, member.id))
+            self.bot.db.execute("DELETE FROM batter_drop_sessions WHERE guild_id=? AND user_id=?",
+                                (ctx.guild.id, member.id))
+            self.bot.db.execute("DELETE FROM batter_drop_pending WHERE guild_id=? AND user_id=?",
+                                (ctx.guild.id, member.id))
+            self.bot.db.execute("DELETE FROM batter_drop_finalized WHERE guild_id=? AND user_id=?",
+                                (ctx.guild.id, member.id))
+            await ctx.reply(f"Reset Batter Impact stats for **{discord.utils.escape_markdown(member.display_name)}**.",
+                            mention_author=False)
+        self.bot.db.commit()
 
 
 async def setup(bot: commands.Bot):
