@@ -280,14 +280,19 @@ class TeamEmojis(commands.Cog):
                         f"Logo link returned {content_type} instead of image data. "
                         "Use a direct image URL or upload the image itself."
                     )
-                data = await resp.content.read(MAX_DOWNLOAD_BYTES + 1)
+                chunks = []
+                downloaded = 0
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > MAX_DOWNLOAD_BYTES:
+                        raise InvalidLogo("Logo file is larger than 10 MB")
+                    chunks.append(chunk)
+                data = b"".join(chunks)
                 content_type = resp.content_type
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise InvalidLogo("Could not download the logo from its link") from exc
         if not data:
             raise InvalidLogo("Downloaded logo is empty")
-        if len(data) > MAX_DOWNLOAD_BYTES:
-            raise InvalidLogo("Logo file is larger than 10 MB")
         return data, content_type
 
     @staticmethod
