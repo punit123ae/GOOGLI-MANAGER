@@ -385,10 +385,29 @@ class ResultsCog(commands.Cog):
             timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post("https://api.ocr.space/parse/image", data=form) as response:
+                    # OCR.space can return non-200 responses for invalid/expired keys,
+                    # quota limits, request-size limits, or service-side failures.
+                    # Surface a sanitized diagnostic instead of hiding the cause.
                     if response.status != 200:
-                        await ctx.send("❌ OCR service returned an error. Please try again.")
+                        try:
+                            error_body = (await response.text())[:1200]
+                        except (aiohttp.ClientError, UnicodeError):
+                            error_body = "<response body unavailable>"
+                        # Never echo the secret API key if the provider includes it.
+                        error_body = error_body.replace(api_key, "[REDACTED]") if api_key else error_body
+                        error_body = re.sub(r"(?i)(apikey\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", error_body)
+                        error_body = re.sub(r"[\r\n]+", " ", error_body).strip()
+                        await ctx.send(
+                            f"❌ OCR.space returned HTTP {response.status}. "
+                            f"Details: `{discord.utils.escape_markdown(error_body or 'No error details returned')[:900]}`. "
+                            "Check that `OCR_SPACE_API_KEY` is valid and that your OCR.space account quota is available."
+                        )
                         return
-                    ocr_data = await response.json(content_type=None)
+                    try:
+                        ocr_data = await response.json(content_type=None)
+                    except (aiohttp.ClientError, ValueError):
+                        await ctx.send("❌ OCR.space returned an invalid response (not valid JSON). Please try again later.")
+                        return
         except (aiohttp.ClientError, TimeoutError, ValueError):
             await ctx.send("❌ Couldn't connect to the OCR service. Please try again.")
             return
