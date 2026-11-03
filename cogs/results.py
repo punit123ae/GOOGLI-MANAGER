@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
+import unicodedata
 from pathlib import Path
 
 import aiohttp
@@ -41,44 +43,101 @@ def _save_config(config: dict[str, int]) -> None:
 
 
 def _scorecard_image_candidates(message: discord.Message) -> list[tuple[str, str]]:
-    """Return possible image URLs, prioritizing real image/thumbnail URLs in embeds."""
+    """Collect image URLs from attachments, embeds, and exposed forwarded snapshots."""
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
+    visited: set[int] = set()
 
     def add(url: str | None, filename: str) -> None:
-        if not url or url in seen:
+        if not url or url in seen or not url.startswith(("https://", "http://")):
             return
-        if url.startswith(("https://", "http://")):
-            seen.add(url)
-            candidates.append((url, filename))
+        seen.add(url)
+        candidates.append((url, filename))
 
-    # Attachments are the most reliable source when present.
-    for attachment in message.attachments:
-        is_image = (
-            bool(attachment.content_type and attachment.content_type.startswith("image/"))
-            or attachment.filename.lower().endswith(
+    def inspect(obj, depth: int = 0) -> None:
+        if obj is None or depth > 4 or id(obj) in visited:
+            return
+        visited.add(id(obj))
+        for attachment in getattr(obj, "attachments", ()) or ():
+            filename = getattr(attachment, "filename", "scorecard.png") or "scorecard.png"
+            content_type = getattr(attachment, "content_type", None)
+            if (content_type and content_type.startswith("image/")) or filename.lower().endswith(
                 (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
-            )
-        )
-        if is_image:
-            add(attachment.url, attachment.filename or "scorecard.png")
+            ):
+                add(getattr(attachment, "url", None), filename)
+        for embed in getattr(obj, "embeds", ()) or ():
+            image = getattr(embed, "image", None)
+            thumbnail = getattr(embed, "thumbnail", None)
+            if image:
+                add(getattr(image, "proxy_url", None), "scorecard_embed.png")
+                add(getattr(image, "url", None), "scorecard_embed.png")
+            if thumbnail:
+                add(getattr(thumbnail, "proxy_url", None), "scorecard_thumbnail.png")
+                add(getattr(thumbnail, "url", None), "scorecard_thumbnail.png")
+        content = getattr(obj, "content", "") or ""
+        for match in re.findall(r"https?://[^\s<>]+", content):
+            add(match.rstrip(".,)>]"), "scorecard_link.png")
+        # Discord.py versions expose forwarded payloads under differing attributes.
+        for attr in ("message_snapshots", "forwarded_messages", "snapshots"):
+            for snapshot in getattr(obj, attr, ()) or ():
+                inspect(getattr(snapshot, "message", snapshot), depth + 1)
+        reference = getattr(obj, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference else None
+        if resolved is not None and resolved is not obj:
+            inspect(resolved, depth + 1)
 
-    # Hand-cricket scorecards are often delivered as embed images, not attachments.
-    for embed in message.embeds:
-        if embed.image:
-            # Discord's media proxy is often more accessible than the original
-            # third-party embed host (which may block direct bot requests).
-            add(embed.image.proxy_url, "scorecard_embed.png")
-            add(embed.image.url, "scorecard_embed.png")
-        if embed.thumbnail:
-            add(embed.thumbnail.proxy_url, "scorecard_thumbnail.png")
-            add(embed.thumbnail.url, "scorecard_thumbnail.png")
-
-    # Some bots put the direct image URL in the message text instead of embed.image.
-    for match in re.findall(r"https?://[^\s<>]+", message.content or ""):
-        add(match.rstrip(".,)>]"), "scorecard_link.png")
-
+    inspect(message)
     return candidates
+
+
+def _normalize_team_key(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _team_database_path() -> Path:
+    """Find the existing registration DB in common project/cog locations."""
+    here = Path(__file__).resolve()
+    candidates = [here.with_name("team_registration.db"), here.parent.parent / "team_registration.db"]
+    for parent in here.parents[:4]:
+        candidates.extend((parent / "team_registration.db", parent / "database" / "team_registration.db", parent / "data" / "team_registration.db"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("team_registration.db was not found beside the cog or in its parent project folders")
+
+
+def _resolve_approved_team(guild_id: int, supplied: str) -> tuple[str | None, list[str]]:
+    """Resolve exact names, initials, short forms, or unique prefixes from approved rows."""
+    db_path = _team_database_path()
+    with sqlite3.connect(db_path, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, name_key FROM registered_teams WHERE guild_id = ? AND status = 'approved'",
+            (guild_id,),
+        ).fetchall()
+    query = _normalize_team_key(supplied)
+    if not query:
+        return None, []
+    matches: set[str] = set()
+    for row in rows:
+        name = str(row["name"])
+        normalized = _normalize_team_key(name)
+        name_key = _normalize_team_key(str(row["name_key"] or name))
+        words = normalized.split()
+        initials = "".join(word[0] for word in words if word)
+        aliases = {normalized, name_key, initials}
+        # Prefix of the full normalized name and each component word.
+        if normalized.startswith(query) or any(word.startswith(query) for word in words):
+            matches.add(name)
+        if query in aliases:
+            matches.add(name)
+        # Common short-form behavior: initials with optional separators.
+        if query.replace(" ", "") == initials:
+            matches.add(name)
+    if len(matches) == 1:
+        return next(iter(matches)), []
+    return None, sorted(matches, key=str.casefold)
 
 
 def _extract_winning_margin(ocr_text: str) -> str | None:
@@ -105,6 +164,7 @@ class ResultsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.result_channels = _load_config()
+        self._published_results: set[tuple[int, str]] = set()
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         # Resolve authorization per command, rather than granting cog-wide access.
@@ -166,9 +226,15 @@ class ResultsCog(commands.Cog):
         scorecard_message = reference.resolved
         if not isinstance(scorecard_message, discord.Message):
             try:
-                scorecard_message = await ctx.channel.fetch_message(reference.message_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                await ctx.reply("❌ I couldn't access the replied scorecard message.", mention_author=False)
+                ref_channel_id = getattr(reference, "channel_id", None) or ctx.channel.id
+                ref_channel = ctx.guild.get_channel(ref_channel_id)
+                if ref_channel is None:
+                    ref_channel = await self.bot.fetch_channel(ref_channel_id)
+                if not hasattr(ref_channel, "fetch_message"):
+                    raise discord.NotFound(response=None, message="Referenced channel unavailable")
+                scorecard_message = await ref_channel.fetch_message(reference.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                await ctx.reply("❌ I couldn't access the replied scorecard message. If it was forwarded, reply to the forwarded message itself.", mention_author=False)
                 return
 
         image_bytes = None
@@ -277,8 +343,23 @@ class ResultsCog(commands.Cog):
                 return
             answers.append(answer)
 
-        match_no, team_a, team_b = answers
+        match_no, team_a_input, team_b_input = answers
 
+        try:
+            team_a, ambiguous_a = _resolve_approved_team(ctx.guild.id, team_a_input)
+            team_b, ambiguous_b = _resolve_approved_team(ctx.guild.id, team_b_input)
+        except (sqlite3.Error, FileNotFoundError) as exc:
+            await ctx.send(f"❌ Couldn't read the approved teams database ({type(exc).__name__}). Please contact a bot administrator.")
+            return
+
+        if team_a is None:
+            choices = ", ".join(ambiguous_a) if ambiguous_a else "No approved team matched."
+            await ctx.send(f"❌ Team A `{team_a_input}` is ambiguous or not approved. Enter a more specific registered name. Matches: {choices}")
+            return
+        if team_b is None:
+            choices = ", ".join(ambiguous_b) if ambiguous_b else "No approved team matched."
+            await ctx.send(f"❌ Team B `{team_b_input}` is ambiguous or not approved. Enter a more specific registered name. Matches: {choices}")
+            return
         if team_a.casefold() == team_b.casefold():
             await ctx.send("❌ Team A and Team B must be different. Run `+result` again.")
             return
@@ -328,9 +409,8 @@ class ResultsCog(commands.Cog):
             )
             return
 
-        # Put the preview in the configured results channel. Only the person
-        # who started +result may confirm it, even though the prompt is public.
-        preview = await channel.send(
+        # Confirmation remains in the command channel; publication uses configured channel.
+        preview = await ctx.channel.send(
             f"**Match {match_no} — Result confirmation**\n"
             f"🏆 **Winner:** {team_a}\n"
             f"❌ **Loser:** {team_b}\n"
@@ -343,7 +423,7 @@ class ResultsCog(commands.Cog):
         def confirmation_check(message: discord.Message) -> bool:
             return (
                 message.author.id == ctx.author.id
-                and message.channel.id == channel.id
+                and message.channel.id == ctx.channel.id
                 and message.guild is not None
                 and message.guild.id == ctx.guild.id
                 and message.content.strip().casefold() in {"yes", "no", "cancel"}
@@ -369,6 +449,11 @@ class ResultsCog(commands.Cog):
                 pass
             return
 
+        result_key = (ctx.guild.id, str(match_no).strip())
+        if result_key in self._published_results:
+            await ctx.send(f"❌ Match {match_no} already has a result published by this bot session.")
+            return
+
         result_message = (
             f"# __Match {match_no}__\n"
             f"**{team_a} vs {team_b}**\n\n"
@@ -376,14 +461,17 @@ class ResultsCog(commands.Cog):
         )
 
         try:
+            self._published_results.add(result_key)
             await channel.send(
                 result_message,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.Forbidden:
+            self._published_results.discard(result_key)
             await ctx.send("❌ I can't post in the results channel. Check my channel permissions.")
             return
         except discord.HTTPException:
+            self._published_results.discard(result_key)
             await ctx.send("❌ Discord couldn't send the result. Please try again.")
             return
 
