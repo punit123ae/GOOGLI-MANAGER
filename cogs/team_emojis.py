@@ -92,8 +92,6 @@ SHORT_COLS = (
     "short",
 )
 LOGO_COLS = (
-    "logo_data",
-    "logo_blob",
     "logo_url",
     "logo",
     "team_logo",
@@ -101,6 +99,8 @@ LOGO_COLS = (
     "logo_file",
     "logo_link",
     "logo_image",
+    "logo_blob",
+    "logo_data",
     "image_url",
     "image",
     "icon_url",

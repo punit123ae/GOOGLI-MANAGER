@@ -294,8 +294,6 @@ class TeamCore:
         # Assign each team a permanent sequence number based on its creation time.
         # Existing teams are numbered oldest-first once; future teams receive the next number.
         team_columns = [r[1] for r in self.db.execute("PRAGMA table_info(registered_teams)").fetchall()]
-        if "logo_data" not in team_columns:
-            self.db.execute("ALTER TABLE registered_teams ADD COLUMN logo_data BLOB")
         if "team_number" not in team_columns:
             self.db.execute("ALTER TABLE registered_teams ADD COLUMN team_number INTEGER")
         guild_ids = [r[0] for r in self.db.execute("SELECT DISTINCT guild_id FROM registered_teams").fetchall()]
