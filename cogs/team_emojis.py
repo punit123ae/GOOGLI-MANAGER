@@ -149,6 +149,7 @@ class Schema:
     # logo stored in a different table: (column in team table, table, column in logo table)
     logo_link: Optional[tuple[str, str, str]] = None
     logo_link_cols: list[str] = field(default_factory=list)
+    guild_col: Optional[str] = None
 
 
 @dataclass
@@ -164,6 +165,8 @@ class TeamData:
     total_rows: int
     approved: list[Team]
     status_values: list[str]
+    other_guild: list[str] = field(default_factory=list)  # approved, but registered in another server
+    duplicates: list[str] = field(default_factory=list)  # approved, but same team name already counted
 
 
 @dataclass
@@ -421,6 +424,7 @@ def detect_schema(db_path: Path) -> Schema:
             approval_implied=implied,
             short_col=short_col,
             logo_cols=logo_cols,
+            guild_col=_pick(colmap, ("guild_id", "server_id", "guild")),
         )
 
         # Logo stored in a different table? Try to link it.
@@ -453,7 +457,7 @@ def detect_schema(db_path: Path) -> Schema:
         conn.close()
 
 
-def load_teams(schema: Schema) -> TeamData:
+def load_teams(schema: Schema, guild_id: Optional[int] = None) -> TeamData:
     conn = _connect(schema.db_path)
     try:
         rows = conn.execute(f"SELECT * FROM {q(schema.table)}").fetchall()
@@ -471,7 +475,10 @@ def load_teams(schema: Schema) -> TeamData:
 
         statuses: list[str] = []
         approved: list[Team] = []
+        other_guild: list[str] = []
+        duplicates: list[str] = []
         seen: set[str] = set()
+        seen_names: set[str] = set()
 
         for r in rows:
             raw_name = r[schema.name_col]
@@ -489,10 +496,17 @@ def load_teams(schema: Schema) -> TeamData:
             elif not schema.approval_implied:
                 continue  # unreachable: run_sync refuses this case earlier
 
+            if schema.guild_col and guild_id is not None and str(r[schema.guild_col]) != str(guild_id):
+                other_guild.append(f"{name} (guild {r[schema.guild_col]})")
+                continue
+
             key = str(r[schema.key_col]) if schema.key_col and r[schema.key_col] is not None else name.lower()
-            if key in seen:
+            norm = re.sub(r"\s+", " ", name).strip().lower()
+            if key in seen or norm in seen_names:
+                duplicates.append(f"{name} (id {key})")
                 continue
             seen.add(key)
+            seen_names.add(norm)
 
             short = None
             if schema.short_col:
@@ -507,7 +521,13 @@ def load_teams(schema: Schema) -> TeamData:
 
             approved.append(Team(key=key, name=name, short=short, logos=logos))
 
-        return TeamData(total_rows=len(rows), approved=approved, status_values=statuses)
+        return TeamData(
+            total_rows=len(rows),
+            approved=approved,
+            status_values=statuses,
+            other_guild=other_guild,
+            duplicates=duplicates,
+        )
     finally:
         conn.close()
 
@@ -888,7 +908,7 @@ class TeamEmojis(commands.Cog):
         """Show what the cog detected in the team database (bot owner only, read-only)."""
         try:
             _, schema = await self._locate()
-            data = await asyncio.to_thread(load_teams, schema)
+            data = await asyncio.to_thread(load_teams, schema, ctx.guild.id)
         except SchemaError as exc:
             await ctx.send(f"❌ {exc}")
             return
@@ -928,6 +948,28 @@ class TeamEmojis(commands.Cog):
             value=clip_lines([f"{k}: {v}" for k, v in kinds.items()]) if kinds else "—",
             inline=False,
         )
+        embed.add_field(
+            name="Server filter",
+            value=f"`{schema.guild_col}` = this server" if schema.guild_col else "none (no guild column)",
+            inline=True,
+        )
+        if data.other_guild:
+            embed.add_field(
+                name=f"Approved but in another server ({len(data.other_guild)})",
+                value=clip_lines(data.other_guild),
+                inline=False,
+            )
+        if data.duplicates:
+            embed.add_field(
+                name=f"Approved duplicates skipped ({len(data.duplicates)})",
+                value=clip_lines(data.duplicates),
+                inline=False,
+            )
+        embed.add_field(
+            name="Approved teams counted",
+            value=clip_lines([f"{i}. {t.name} → {t.short}" for i, t in enumerate(data.approved, 1)], 1000),
+            inline=False,
+        )
         embed.add_field(name="All columns", value=clip_lines([", ".join(schema.columns)]), inline=False)
         embed.set_footer(text=f"Pillow: {'yes' if PIL_AVAILABLE else 'no (images are not auto-resized)'}")
         await ctx.send(embed=embed)
@@ -954,7 +996,7 @@ class TeamEmojis(commands.Cog):
             )
 
         await asyncio.to_thread(init_records_table, db_path)
-        data = await asyncio.to_thread(load_teams, schema)
+        data = await asyncio.to_thread(load_teams, schema, guild.id)
         records = await asyncio.to_thread(load_records, db_path, guild.id)
 
         if not data.approved:
