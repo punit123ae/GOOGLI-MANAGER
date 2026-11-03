@@ -1,4 +1,5 @@
 import re
+import asyncio
 
 import discord
 from discord.ext import commands
@@ -22,9 +23,16 @@ class AutoLock(commands.Cog):
                 enabled INTEGER NOT NULL DEFAULT 1,
                 original_send_messages INTEGER,
                 locked_by_autolock INTEGER NOT NULL DEFAULT 0,
+                delay_seconds INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_id, channel_id)
             )
         """)
+        # Add the delay column to databases created by the older cog version.
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(autolock_channels)").fetchall()}
+        if "delay_seconds" not in columns:
+            self.db.execute(
+                "ALTER TABLE autolock_channels ADD COLUMN delay_seconds INTEGER NOT NULL DEFAULT 0"
+            )
         self.db.commit()
 
     async def _permitted(self, ctx):
@@ -58,6 +66,75 @@ class AutoLock(commands.Cog):
             reason=reason,
         )
 
+    @staticmethod
+    def _parse_duration(value):
+        """Parse durations such as 30s, 5m, 2h, or 1d into seconds."""
+        match = re.fullmatch(r"\s*(\d+)\s*([smhd])\s*", value.lower())
+        if not match:
+            return None
+        seconds = int(match.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+        return seconds if seconds <= 7 * 86400 else None
+
+    async def _lock_after_delay(self, guild_id, channel_id, delay_seconds):
+        """Lock after the configured delay; every raw-stats post can trigger this."""
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+
+        # Recheck the setting so a pending task cannot lock a channel after
+        # auto-lock has been disabled during the delay.
+        row = self.db.execute(
+            "SELECT * FROM autolock_channels WHERE guild_id=? AND channel_id=? AND enabled=1",
+            (guild_id, channel_id),
+        ).fetchone()
+        if row is None:
+            return
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+        if not isinstance(channel, discord.TextChannel):
+            return
+
+        already_managed = bool(row["locked_by_autolock"])
+        try:
+            overwrite = channel.overwrites_for(channel.guild.default_role)
+
+            # Save the original permission only once. Keep it even if a user
+            # manually unlocks the channel between two raw-stats messages.
+            if not already_managed:
+                original = overwrite.send_messages
+                self.db.execute(
+                    """UPDATE autolock_channels
+                       SET original_send_messages=?, locked_by_autolock=1
+                       WHERE guild_id=? AND channel_id=? AND enabled=1""",
+                    (None if original is None else int(original), guild_id, channel_id),
+                )
+                self.db.commit()
+
+            overwrite.send_messages = False
+            await channel.set_permissions(
+                channel.guild.default_role,
+                overwrite=overwrite,
+                reason=f"Auto-lock: raw match statistics posted by HandCricket ({HAND_CRICKET_BOT_ID})",
+            )
+            await channel.send(
+                "🔒 Channel locked automatically after HandCricket posted the raw match statistics.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            # Don't erase a previously saved original permission on a later retry.
+            if not already_managed:
+                self.db.execute(
+                    """UPDATE autolock_channels
+                       SET original_send_messages=NULL, locked_by_autolock=0
+                       WHERE guild_id=? AND channel_id=?""",
+                    (guild_id, channel_id),
+                )
+                self.db.commit()
+
     @commands.command(name="autolock")
     async def autolock(self, ctx, channel: discord.TextChannel = None):
         """Enable raw-statistics auto-locking in a channel (defaults to this channel)."""
@@ -76,6 +153,47 @@ class AutoLock(commands.Cog):
         self.db.commit()
         await ctx.reply(
             f"🔒 Auto-lock enabled for {channel.mention}. It will lock when HandCricket posts `{RAW_STATS_MARKER}`.",
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.command(name="autolockduration", aliases=["setautolockduration", "setautolockdelay"])
+    async def autolockduration(self, ctx, duration: str, channel: discord.TextChannel = None):
+        """Set the delay between raw stats being posted and the channel being locked."""
+        if not await self._permitted(ctx):
+            return
+        if ctx.guild is None:
+            return await ctx.reply("This command can only be used in a server.", mention_author=False)
+
+        seconds = self._parse_duration(duration)
+        if seconds is None:
+            return await ctx.reply(
+                "Invalid duration. Use `0s`, `30s`, `5m`, `2h`, or `1d` (maximum 7 days).",
+                mention_author=False,
+            )
+
+        channel = channel or ctx.channel
+        if not isinstance(channel, discord.TextChannel):
+            return await ctx.reply("Please select a text channel.", mention_author=False)
+
+        row = self.db.execute(
+            "SELECT 1 FROM autolock_channels WHERE guild_id=? AND channel_id=?",
+            (ctx.guild.id, channel.id),
+        ).fetchone()
+        if row is None:
+            return await ctx.reply(
+                f"Auto-lock is not configured for {channel.mention}. Run `+autolock` first.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        self.db.execute(
+            "UPDATE autolock_channels SET delay_seconds=? WHERE guild_id=? AND channel_id=?",
+            (seconds, ctx.guild.id, channel.id),
+        )
+        self.db.commit()
+        await ctx.reply(
+            f"⏱️ Auto-lock delay for {channel.mention} set to **{seconds} seconds**.",
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -127,7 +245,7 @@ class AutoLock(commands.Cog):
             return await ctx.reply("This command can only be used in a server.", mention_author=False)
         if target.strip().lower() == "server":
             rows = self.db.execute(
-                "SELECT channel_id, enabled, locked_by_autolock FROM autolock_channels WHERE guild_id=? ORDER BY channel_id",
+                "SELECT channel_id, enabled, locked_by_autolock, delay_seconds FROM autolock_channels WHERE guild_id=? ORDER BY channel_id",
                 (ctx.guild.id,),
             ).fetchall()
             active = [r for r in rows if r["enabled"]]
@@ -137,8 +255,12 @@ class AutoLock(commands.Cog):
             for row in active:
                 channel = ctx.guild.get_channel(row["channel_id"])
                 channel_label = channel.mention if channel else f"`{row['channel_id']}` (channel not found)"
-                lock_state = "locked by auto-lock" if row["locked_by_autolock"] else "waiting for raw stats"
-                lines.append(f"• {channel_label} — {lock_state}")
+                if row["locked_by_autolock"] and channel:
+                    is_locked = channel.overwrites_for(ctx.guild.default_role).send_messages is False
+                    lock_state = "currently locked" if is_locked else "unlocked; will re-lock on next raw stats"
+                else:
+                    lock_state = "waiting for raw stats"
+                lines.append(f"• {channel_label} — {lock_state} — delay: `{row['delay_seconds'] or 0}s`")
             return await ctx.reply("**Auto-lock status for this server:**\n" + "\n".join(lines),
                                    mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
@@ -146,12 +268,19 @@ class AutoLock(commands.Cog):
         if channel is None:
             return await ctx.reply("Use `+statusautolock channel`, `+statusautolock #channel`, or `+statusautolock server`.", mention_author=False)
         row = self.db.execute(
-            "SELECT enabled, locked_by_autolock FROM autolock_channels WHERE guild_id=? AND channel_id=?",
+            "SELECT enabled, locked_by_autolock, delay_seconds FROM autolock_channels WHERE guild_id=? AND channel_id=?",
             (ctx.guild.id, channel.id),
         ).fetchone()
         if row and row["enabled"]:
-            lock_state = "The channel is currently locked by auto-lock." if row["locked_by_autolock"] else "Enabled; waiting for raw statistics."
-            message = f"🔒 Auto-lock is **ON** for {channel.mention}. {lock_state}"
+            if row["locked_by_autolock"]:
+                is_locked = channel.overwrites_for(ctx.guild.default_role).send_messages is False
+                lock_state = (
+                    "The channel is currently locked by auto-lock."
+                    if is_locked else "The channel is unlocked; it will lock again after the next raw-stats post."
+                )
+            else:
+                lock_state = "Enabled; waiting for raw statistics."
+            message = f"🔒 Auto-lock is **ON** for {channel.mention}. {lock_state} Delay: **{row['delay_seconds'] or 0}s**."
         else:
             message = f"🔓 Auto-lock is **OFF** for {channel.mention}."
         await ctx.reply(message, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
@@ -165,36 +294,18 @@ class AutoLock(commands.Cog):
         if RAW_STATS_MARKER not in (message.content or ""):
             return
         row = self.db.execute(
-            "SELECT * FROM autolock_channels WHERE guild_id=? AND channel_id=? AND enabled=1",
+            "SELECT delay_seconds FROM autolock_channels WHERE guild_id=? AND channel_id=? AND enabled=1",
             (message.guild.id, message.channel.id),
         ).fetchone()
-        if row is None or row["locked_by_autolock"]:
+        if row is None:
             return
-        try:
-            overwrite = message.channel.overwrites_for(message.guild.default_role)
-            original = overwrite.send_messages
-            self.db.execute(
-                "UPDATE autolock_channels SET original_send_messages=?, locked_by_autolock=1 WHERE guild_id=? AND channel_id=?",
-                (None if original is None else int(original), message.guild.id, message.channel.id),
+        asyncio.create_task(
+            self._lock_after_delay(
+                message.guild.id,
+                message.channel.id,
+                max(0, int(row["delay_seconds"] or 0)),
             )
-            self.db.commit()
-            overwrite.send_messages = False
-            await message.channel.set_permissions(
-                message.guild.default_role,
-                overwrite=overwrite,
-                reason=f"Auto-lock: raw match statistics posted by HandCricket ({HAND_CRICKET_BOT_ID})",
-            )
-            await message.channel.send(
-                "🔒 Channel locked automatically after HandCricket posted the raw match statistics.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            # Roll back the lock-state flag so status remains truthful and a later trigger can retry.
-            self.db.execute(
-                "UPDATE autolock_channels SET original_send_messages=NULL, locked_by_autolock=0 WHERE guild_id=? AND channel_id=?",
-                (message.guild.id, message.channel.id),
-            )
-            self.db.commit()
+        )
 
 
 async def setup(bot):
