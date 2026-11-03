@@ -97,7 +97,7 @@ def _sniff_format(data: bytes) -> Optional[str]:
     return None
 
 
-def prepare_emoji_image(data: bytes) -> tuple[bytes, bool]:
+def prepare_emoji_image(data: bytes, content_type: Optional[str] = None) -> tuple[bytes, bool]:
     """
     Validate a logo and convert it into something Discord accepts as an emoji.
     Returns (image_bytes, is_animated). Raises InvalidLogo on any problem.
@@ -127,7 +127,10 @@ def prepare_emoji_image(data: bytes) -> tuple[bytes, bool]:
     except InvalidLogo:
         raise
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError, SyntaxError) as exc:
-        raise InvalidLogo("File is not a valid image") from exc
+        source_type = f"; server reported {content_type}" if content_type else ""
+        raise InvalidLogo(
+            f"Image data could not be decoded ({type(exc).__name__}{source_type})"
+        ) from exc
 
     frame.thumbnail((EMOJI_SIZE, EMOJI_SIZE), Image.Resampling.LANCZOS)
     canvas = Image.new("RGBA", (EMOJI_SIZE, EMOJI_SIZE), (0, 0, 0, 0))
@@ -258,7 +261,7 @@ class TeamEmojis(commands.Cog):
             log.warning("Could not refresh expired Discord attachment URL", exc_info=True)
             return None
 
-    async def _download(self, url: str, _retried: bool = False) -> bytes:
+    async def _download(self, url: str, _retried: bool = False) -> tuple[bytes, str]:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         try:
@@ -278,13 +281,14 @@ class TeamEmojis(commands.Cog):
                         "Use a direct image URL or upload the image itself."
                     )
                 data = await resp.content.read(MAX_DOWNLOAD_BYTES + 1)
+                content_type = resp.content_type
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise InvalidLogo("Could not download the logo from its link") from exc
         if not data:
             raise InvalidLogo("Downloaded logo is empty")
         if len(data) > MAX_DOWNLOAD_BYTES:
             raise InvalidLogo("Logo file is larger than 10 MB")
-        return data
+        return data, content_type
 
     @staticmethod
     def _logo_sources(team: sqlite3.Row) -> tuple[Optional[bytes], Optional[str]]:
@@ -311,8 +315,8 @@ class TeamEmojis(commands.Cog):
                 last_error = exc
         if url:
             try:
-                raw = await self._download(url)
-                image, animated = await asyncio.to_thread(prepare_emoji_image, raw)
+                raw, content_type = await self._download(url)
+                image, animated = await asyncio.to_thread(prepare_emoji_image, raw, content_type)
                 return image, hashlib.sha256(raw).hexdigest(), animated
             except InvalidLogo as exc:
                 last_error = exc
@@ -526,9 +530,12 @@ class TeamEmojis(commands.Cog):
                 emoji_by_id[emoji.id] = emoji
                 try:
                     self._save_record(guild.id, team_id, emoji, short_form, logo_hash)
-                except sqlite3.Error:
+                except sqlite3.Error as exc:
                     log.exception("Emoji %s created but its record could not be saved", emoji.id)
-                    failed.append(f"{team_name} — emoji created ({emoji}) but saving it to the database failed")
+                    failed.append(
+                        f"{team_name} — emoji created ({emoji}) but saving it failed: "
+                        f"{_truncate(exc, 100)}"
+                    )
                     continue
 
                 if replacing:
