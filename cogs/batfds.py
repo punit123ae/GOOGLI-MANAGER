@@ -7,19 +7,28 @@ Temporary totals live in SQLite until the owner commits them to the permanent +l
 """
 from __future__ import annotations
 
+import io
+import logging
 import re
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from .utility import owner_or_whitelisted
 
 HANDCRICKET_BOT_ID = 753191385296928808
 BOT_OWNER_ID = 1014568928682459198
 PENDING_TTL_SECONDS = 120
+# Ended matches that still hold unfinalised batter records are recovered automatically
+# once they have been quiet for this long (gives Hand Cricket time to post its raw stats).
+AUTO_RECOVER_GRACE_SECONDS = 600
+SWEEP_INTERVAL_SECONDS = 120
+
+log = logging.getLogger(__name__)
 
 BATTER_LINE = re.compile(
     r"^\s*([^:\n]{1,64})\s*:\s*(\d+)\s*\(\s*\d+\s*\)\s*runs\s*$",
@@ -310,7 +319,26 @@ class BatterFieldingDropStats(commands.Cog):
         self.bot = bot
         self.latest_status = {}  # channel -> (match_id, innings, score map, monotonic timestamp)
         self.pending = {}
+        self._warned_names = set()
         self._init_db()
+
+    async def cog_load(self):
+        if not self._sweep_task.is_running():
+            self._sweep_task.start()
+
+    async def cog_unload(self):
+        self._sweep_task.cancel()
+
+    @tasks.loop(seconds=SWEEP_INTERVAL_SECONDS)
+    async def _sweep_task(self):
+        try:
+            self._sweep_orphans()
+        except Exception:
+            log.exception("batfds: orphan sweep failed")
+
+    @_sweep_task.before_loop
+    async def _before_sweep_task(self):
+        await self.bot.wait_until_ready()
 
     def _init_db(self):
         db = self.bot.db
@@ -388,6 +416,24 @@ class BatterFieldingDropStats(commands.Cog):
                 runs_without_drops INTEGER NOT NULL,
                 PRIMARY KEY (backup_no, table_name, user_id))
         """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_recoveries (
+                guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+                match_id TEXT NOT NULL, recovered_by INTEGER NOT NULL,
+                recovered_at TEXT NOT NULL, sessions INTEGER NOT NULL,
+                players INTEGER NOT NULL,
+                UNIQUE (guild_id, channel_id))
+        """)
+        # Automatic recoveries are tracked per match (channels are reused for later matches).
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_recovered_matches (
+                guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+                match_id TEXT NOT NULL, recovered_by INTEGER NOT NULL,
+                recovered_at TEXT NOT NULL, sessions INTEGER NOT NULL,
+                players INTEGER NOT NULL, raw_source_id INTEGER,
+                corrected INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (guild_id, match_id))
+        """)
         db.commit()
 
     def _tracking_enabled(self, guild_id: int, channel_id: int) -> bool:
@@ -456,6 +502,9 @@ class BatterFieldingDropStats(commands.Cog):
         if not row:
             return
         first_drop, drops = row[0], int(row[1])
+        if first_drop is not None and int(final_score) < int(first_drop):
+            log.warning("batfds: batter %s finished on %s but their first drop was recorded at %s (channel %s)",
+                        user_id, final_score, first_drop, channel_id)
         affected = max(0, int(final_score) - int(first_drop)) if first_drop is not None else 0
         without = int(first_drop) if first_drop is not None else int(final_score)
         self._add_to_preview(guild_id, user_id, drops, affected, without)
@@ -489,11 +538,23 @@ class BatterFieldingDropStats(commands.Cog):
 
     def _update_live_scores(self, message: discord.Message, status):
         guild_id, channel_id = message.guild.id, message.channel.id
+        db = self.bot.db
+        # An edited / re-read status from a match that already ended must not start a phantom
+        # match or finalise the same scores twice.
+        known = db.execute(
+            "SELECT ended,last_status_id FROM batter_drop_matches WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id),
+        ).fetchone()
+        if known and int(known[0]) and known[1] is not None and message.id <= int(known[1]):
+            return
         match_id, innings = self._get_or_start_match(guild_id, channel_id, status["innings"])
         session_key = self._session_key(match_id, innings)
-        db = self.bot.db
         for name, score in status["scores"].items():
             uid = find_member_id(message.guild, name)
+            if not uid and (channel_id, name) not in self._warned_names:
+                self._warned_names.add((channel_id, name))
+                log.warning("batfds: could not match batter %r to a member in channel %s; their runs are not tracked",
+                            name, channel_id)
             if uid:
                 db.execute("""
                     INSERT INTO batter_drop_sessions
@@ -530,6 +591,28 @@ class BatterFieldingDropStats(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             pass
         return cached
+
+    async def _get_status_before(self, message: discord.Message):
+        """Scores from the Match Status closest before this message.
+
+        That is the batter's score at the moment of the catch chance. It is read from the
+        channel itself instead of a cached copy, so a missed, delayed or out-of-order status
+        event cannot give the drop a stale score.
+        """
+        try:
+            async for old in message.channel.history(limit=30, before=message):
+                status = parse_match_status(old)
+                if not status:
+                    continue
+                self._update_live_scores(old, status)
+                await self._add_tracking_reaction(old)
+                cached = self.latest_status.get(message.channel.id)
+                if cached and cached[2] == status["scores"]:
+                    return cached
+                return None  # that status belongs to a match that has already ended
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return await self._get_latest_status(message)
 
     async def _handle_batter_out(self, message: discord.Message):
         parsed = parse_batter_out(message)
@@ -585,7 +668,12 @@ class BatterFieldingDropStats(commands.Cog):
         channel_id = message.channel.id
 
         if "CHANCE OF WICKET!" in upper:
-            latest = await self._get_latest_status(message)
+            # An edited / re-delivered chance message must not overwrite the score taken when it was first seen.
+            if self.bot.db.execute(
+                "SELECT 1 FROM batter_drop_reaction_messages WHERE message_id=?", (message.id,)
+            ).fetchone():
+                return
+            latest = await self._get_status_before(message)
             opportunity = parse_opportunity(message)
             if not latest or not opportunity:
                 return
@@ -642,6 +730,7 @@ class BatterFieldingDropStats(commands.Cog):
                     drop_count=batter_drop_sessions.drop_count+1
             """, (guild_id, channel_id, session_key, user_id, score, score))
             self.bot.db.commit()
+            log.info("batfds: drop recorded for %s at %s runs in channel %s", user_id, score, channel_id)
         else:
             # A catch being taken is not a batter finalisation event. The
             # authoritative Batter out! embed supplies the batter's final score.
@@ -737,6 +826,16 @@ class BatterFieldingDropStats(commands.Cog):
             SELECT s.user_id,s.first_drop_score,s.drop_count,s.last_score
             FROM batter_drop_sessions s
             WHERE s.guild_id=?
+              AND NOT EXISTS (
+                  SELECT 1 FROM batter_drop_recoveries r
+                  WHERE r.guild_id=s.guild_id AND r.channel_id=s.channel_id
+                    AND s.session_key LIKE r.match_id || ':%'
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM batter_drop_recovered_matches a
+                  WHERE a.guild_id=s.guild_id AND a.channel_id=s.channel_id
+                    AND s.session_key LIKE a.match_id || ':%'
+              )
         """, (guild_id,)).fetchall()
         for uid, first_drop, drops, last_score in active:
             uid = int(uid)
@@ -748,8 +847,41 @@ class BatterFieldingDropStats(commands.Cog):
                 rec[0] += 1
         return data
 
+    def _orphaned_sessions(self, guild_id: int):
+        """Ended matches that still hold unfinalised session rows and were not recovered.
+
+        Returns [(channel_id, session_rows), ...]. Such rows are shown provisionally in
+        +previewlb but are never written to the preview table, so +commitlb would skip them.
+        """
+        return self.bot.db.execute("""
+            SELECT m.channel_id, COUNT(*) FROM batter_drop_matches m
+            JOIN batter_drop_sessions s
+              ON s.guild_id=m.guild_id AND s.channel_id=m.channel_id
+             AND s.session_key LIKE m.match_id || ':%'
+            WHERE m.guild_id=? AND m.ended=1
+              AND NOT EXISTS (
+                  SELECT 1 FROM batter_drop_recoveries r
+                  WHERE r.guild_id=m.guild_id AND r.channel_id=m.channel_id AND r.match_id=m.match_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM batter_drop_recovered_matches a
+                  WHERE a.guild_id=m.guild_id AND a.match_id=m.match_id)
+            GROUP BY m.channel_id ORDER BY m.channel_id
+        """, (int(guild_id),)).fetchall()
+
+    @staticmethod
+    def _orphan_message(orphans) -> str:
+        lines = "\n".join(f"<#{int(ch)}> (`{int(ch)}`) — {int(n)} unfinalised record(s)" for ch, n in orphans)
+        return ("Commit is blocked: these ended matches still have unfinalised batter records that would be "
+                "left out of the leaderboard:\n" + lines +
+                "\nThey are recovered automatically about "
+                f"{AUTO_RECOVER_GRACE_SECONDS // 60} minutes after the match ends. To do it now, run "
+                "`+recoverlb <channel_id>` for each, then `+previewlb`, then try `+commitlb` again.")
+
     def _commit_preview(self, guild_id: int) -> int:
         db = self.bot.db
+        orphans = self._orphaned_sessions(guild_id)
+        if orphans:
+            raise RuntimeError(self._orphan_message(orphans))
         active = db.execute(
             "SELECT COUNT(*) FROM batter_drop_matches WHERE guild_id=? AND ended=0",
             (guild_id,),
@@ -801,6 +933,7 @@ class BatterFieldingDropStats(commands.Cog):
         if backup_no is not None:
             await self._send_backup(ctx, backup_no)
             return
+        self._safe_sweep()
         data = self._preview_rows(ctx.guild.id)
         if not data:
             return await ctx.reply("Preview leaderboard is empty.", mention_author=False)
@@ -918,6 +1051,7 @@ class BatterFieldingDropStats(commands.Cog):
     async def commitlb(self, ctx: commands.Context):
         if ctx.author.id != BOT_OWNER_ID:
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        self._safe_sweep()
         active = self.bot.db.execute(
             "SELECT COUNT(*) FROM batter_drop_matches WHERE guild_id=? AND ended=0",
             (ctx.guild.id,),
@@ -927,6 +1061,9 @@ class BatterFieldingDropStats(commands.Cog):
                 f"`{active}` tracked match(es) are not marked as ended yet. Commit is blocked to protect unfinished innings.",
                 mention_author=False,
             )
+        orphans = self._orphaned_sessions(ctx.guild.id)
+        if orphans:
+            return await ctx.reply(self._orphan_message(orphans), mention_author=False)
         count = self.bot.db.execute(
             "SELECT COUNT(*) FROM batter_drop_preview WHERE guild_id=?", (ctx.guild.id,)
         ).fetchone()[0]
@@ -938,6 +1075,377 @@ class BatterFieldingDropStats(commands.Cog):
             "A backup will be created and the preview will then be reset.",
             view=view,
         )
+
+    # ------------------------------------------------------------------ recovery helpers
+    @staticmethod
+    def _snowflake_ts(snowflake: int) -> float:
+        return ((int(snowflake) >> 22) + 1420070400000) / 1000.0
+
+    def _load_raw_runs(self, guild_id: int, source_id: int) -> dict:
+        """Final runs per player from one Hand Cricket raw-stats import (empty if unavailable)."""
+        try:
+            rows = self.bot.db.execute(
+                "SELECT p.user_id,p.runs FROM player_match_stats p "
+                "JOIN stats_imports i ON i.source_message_id=p.source_message_id "
+                "WHERE i.guild_id=? AND p.source_message_id=?",
+                (int(guild_id), int(source_id)),
+            ).fetchall()
+        except sqlite3.Error:
+            return {}
+        return {int(u): int(r) for u, r in rows}
+
+    def _find_raw_import(self, guild_id: int, rows, last_status_id):
+        """Find the raw-stats import that belongs to a finished match.
+
+        Matches on player overlap, agreement with the saved scores and timing. Returns
+        (source_message_id, {user_id: runs}) or None when nothing fits confidently.
+        """
+        db = self.bot.db
+        try:
+            imports = [int(r[0]) for r in db.execute(
+                "SELECT source_message_id FROM stats_imports WHERE guild_id=?", (int(guild_id),))]
+            used = {int(r[0]) for r in db.execute(
+                "SELECT raw_source_id FROM batter_drop_recovered_matches "
+                "WHERE guild_id=? AND raw_source_id IS NOT NULL", (int(guild_id),))}
+        except sqlite3.Error:
+            return None
+        saved = {int(r[0]): int(r[3]) for r in rows}
+        if not saved:
+            return None
+        ref = self._snowflake_ts(last_status_id) if last_status_id else None
+        need = -(-len(saved) * 9 // 10)  # ceil(90%)
+        best = None
+        for sid in imports:
+            if sid in used:
+                continue
+            delta = 0.0
+            if ref is not None:
+                delta = self._snowflake_ts(sid) - ref
+                if delta < -180 or delta > 3600:
+                    continue
+            raw = self._load_raw_runs(guild_id, sid)
+            common = [u for u in saved if u in raw]
+            if len(common) < max(1, need):
+                continue
+            same = sum(1 for u in common if raw[u] == saved[u])
+            if same < 0.6 * len(common):
+                continue
+            closeness = delta if delta >= 0 else abs(delta) * 5
+            key = (same, len(common), -closeness)
+            if best is None or key > best[0]:
+                best = (key, sid, raw)
+        return (best[1], best[2]) if best else None
+
+    def _recover_channel(self, guild_id: int, channel_id: int, recovered_by: int,
+                         raw_source_id: int | None = None, auto: bool = False):
+        """Atomically add one ended match's saved sessions to the preview.
+
+        Same formulas and _add_to_preview as _finalize_batter/_mark_match_ended. Final scores
+        are taken from Hand Cricket's raw stats for the match when it can be identified
+        (or is given), otherwise from the saved last score. Session rows are never deleted or
+        edited and batter_drop_lb is never touched.
+        Returns (sessions, players, corrected, raw_source_id).
+        """
+        db = self.bot.db
+        guild_id, channel_id = int(guild_id), int(channel_id)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            match = db.execute(
+                "SELECT match_id,ended,last_status_id FROM batter_drop_matches WHERE guild_id=? AND channel_id=?",
+                (guild_id, channel_id),
+            ).fetchone()
+            if match is None:
+                raise ValueError("No tracked match was found for that channel in this server.")
+            if not int(match[1]):
+                raise ValueError("That tracked match is not marked as ended, so it cannot be recovered.")
+            match_id = str(match[0])
+            already = db.execute(
+                "SELECT 1 FROM batter_drop_recovered_matches WHERE guild_id=? AND match_id=?",
+                (guild_id, match_id),
+            ).fetchone()
+            if not already:
+                if auto:
+                    already = db.execute(
+                        "SELECT 1 FROM batter_drop_recoveries WHERE guild_id=? AND channel_id=? AND match_id=?",
+                        (guild_id, channel_id, match_id),
+                    ).fetchone()
+                else:
+                    already = db.execute(
+                        "SELECT 1 FROM batter_drop_recoveries WHERE guild_id=? AND channel_id=?",
+                        (guild_id, channel_id),
+                    ).fetchone()
+            if already:
+                raise ValueError("That channel has already been recovered.")
+            rows = db.execute(
+                "SELECT user_id,first_drop_score,drop_count,last_score FROM batter_drop_sessions "
+                "WHERE guild_id=? AND channel_id=? AND session_key LIKE ? ORDER BY user_id",
+                (guild_id, channel_id, match_id + ":%"),
+            ).fetchall()
+            if not rows:
+                raise ValueError("No saved session records exist for that channel's match; nothing to recover.")
+
+            raw, raw_id = {}, None
+            if raw_source_id is not None:
+                raw = self._load_raw_runs(guild_id, int(raw_source_id))
+                if not raw:
+                    raise ValueError("That raw stats message was not found in this server's imported stats.")
+                raw_id = int(raw_source_id)
+            else:
+                found = self._find_raw_import(guild_id, rows, match[2])
+                if found:
+                    raw_id, raw = found
+
+            players, corrected = set(), 0
+            for uid, first_drop, drops, last_score in rows:
+                uid = int(uid)
+                final = int(last_score)
+                if uid in raw and raw[uid] != final:
+                    final = raw[uid]
+                    corrected += 1
+                affected = max(0, final - int(first_drop)) if first_drop is not None else 0
+                without = int(first_drop) if first_drop is not None else final
+                self._add_to_preview(guild_id, uid, int(drops), affected, without)
+                players.add(uid)
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if auto:
+                db.execute(
+                    "INSERT INTO batter_drop_recovered_matches"
+                    "(guild_id,channel_id,match_id,recovered_by,recovered_at,sessions,players,raw_source_id,corrected) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (guild_id, channel_id, match_id, 0, now, len(rows), len(players), raw_id, corrected),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO batter_drop_recoveries"
+                    "(guild_id,channel_id,match_id,recovered_by,recovered_at,sessions,players) VALUES(?,?,?,?,?,?,?)",
+                    (guild_id, channel_id, match_id, int(recovered_by), now, len(rows), len(players)),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO batter_drop_recovered_matches"
+                    "(guild_id,channel_id,match_id,recovered_by,recovered_at,sessions,players,raw_source_id,corrected) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (guild_id, channel_id, match_id, int(recovered_by), now, len(rows), len(players), raw_id, corrected),
+                )
+            db.commit()
+            return len(rows), len(players), corrected, raw_id
+        except sqlite3.IntegrityError:
+            db.rollback()
+            raise ValueError("That channel has already been recovered.")
+        except Exception:
+            db.rollback()
+            raise
+
+    def _sweep_orphans(self):
+        """Automatically count ended matches whose batter records were never finalised."""
+        db = self.bot.db
+        if db.in_transaction:
+            return []
+        try:
+            candidates = db.execute("""
+                SELECT m.guild_id, m.channel_id, m.last_status_id FROM batter_drop_matches m
+                JOIN batter_drop_sessions s
+                  ON s.guild_id=m.guild_id AND s.channel_id=m.channel_id
+                 AND s.session_key LIKE m.match_id || ':%'
+                WHERE m.ended=1
+                  AND NOT EXISTS (SELECT 1 FROM batter_drop_recoveries r
+                                  WHERE r.guild_id=m.guild_id AND r.channel_id=m.channel_id AND r.match_id=m.match_id)
+                  AND NOT EXISTS (SELECT 1 FROM batter_drop_recovered_matches a
+                                  WHERE a.guild_id=m.guild_id AND a.match_id=m.match_id)
+                GROUP BY m.guild_id, m.channel_id
+            """).fetchall()
+        except sqlite3.Error:
+            log.exception("batfds: could not look for unfinalised matches")
+            return []
+        done = []
+        for guild_id, channel_id, last_status_id in candidates:
+            if last_status_id is not None and time.time() - self._snowflake_ts(last_status_id) < AUTO_RECOVER_GRACE_SECONDS:
+                continue
+            try:
+                result = self._recover_channel(guild_id, channel_id, 0, auto=True)
+            except ValueError as exc:
+                log.info("batfds: skipped auto-recovery of channel %s: %s", channel_id, exc)
+                continue
+            except sqlite3.Error:
+                log.exception("batfds: auto-recovery of channel %s failed and was rolled back", channel_id)
+                break
+            log.warning(
+                "batfds: match in channel %s had ended but was never finalised; auto-recovered "
+                "%s session(s) for %s player(s), %s score(s) corrected from raw stats %s",
+                channel_id, result[0], result[1], result[2], result[3],
+            )
+            done.append((int(guild_id), int(channel_id), result))
+        return done
+
+    def _safe_sweep(self):
+        try:
+            self._sweep_orphans()
+        except Exception:
+            log.exception("batfds: orphan sweep failed")
+
+    @commands.command(name="recoverlb")
+    @commands.guild_only()
+    async def recoverlb(self, ctx: commands.Context, channel_id: int, raw_message_id: int = None):
+        """Recover an ended match's unfinalised batter sessions into the preview.
+
+        Usage: +recoverlb <channel_id> [raw_stats_message_id]
+        Final scores are checked against Hand Cricket's raw stats for that match.
+        """
+        if ctx.author.id != BOT_OWNER_ID:
+            return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        try:
+            sessions, players, corrected, raw_id = self._recover_channel(
+                ctx.guild.id, channel_id, ctx.author.id, raw_source_id=raw_message_id)
+        except ValueError as exc:
+            return await ctx.reply(str(exc), mention_author=False)
+        except Exception as exc:
+            return await ctx.reply(f"Recovery failed and was rolled back: `{type(exc).__name__}: {exc}`",
+                                   mention_author=False)
+        if raw_id is None:
+            note = "No matching Hand Cricket raw stats were found, so the saved scores were used."
+        else:
+            note = (f"Final scores were checked against raw stats message `{raw_id}`; "
+                    f"**{corrected}** player score(s) corrected.")
+        await ctx.reply(
+            f"Recovered <#{int(channel_id)}>: **{sessions}** session record(s) for **{players}** player(s) "
+            f"added to the preview leaderboard. {note} Check it with `+previewlb`. "
+            "Nothing was committed to `+lb`.",
+            mention_author=False,
+        )
+
+    # ------------------------------------------------------------------ audit
+    def _audit(self, guild_id: int):
+        """Compare recorded Batter Impact runs with Hand Cricket's raw match stats.
+
+        Recorded = permanent +lb + preview (+ provisional live sessions).
+        Expected = total runs per player across the guild's imported raw stats.
+        """
+        db = self.bot.db
+        guild_id = int(guild_id)
+        expected = {int(u): (int(r), int(n)) for u, r, n in db.execute(
+            "SELECT p.user_id,SUM(p.runs),COUNT(*) FROM player_match_stats p "
+            "JOIN stats_imports i ON i.source_message_id=p.source_message_id "
+            "WHERE i.guild_id=? GROUP BY p.user_id", (guild_id,))}
+        lb = {int(u): (int(a), int(w), int(d)) for u, a, w, d in db.execute(
+            "SELECT user_id,runs_affected,runs_without_drops,drops FROM batter_drop_lb WHERE guild_id=?",
+            (guild_id,))}
+        prev = self._preview_rows(guild_id)  # uid -> [matches, drops, affected, without]
+        live = {int(u) for (u,) in db.execute(
+            "SELECT DISTINCT s.user_id FROM batter_drop_sessions s "
+            "JOIN batter_drop_matches m ON m.guild_id=s.guild_id AND m.channel_id=s.channel_id "
+            "AND s.session_key LIKE m.match_id || ':%' WHERE s.guild_id=? AND m.ended=0", (guild_id,))}
+        reps = {int(u) for (u,) in db.execute(
+            "SELECT DISTINCT r.user_id FROM batter_drop_rep_removal_backup_rows r "
+            "JOIN batter_drop_rep_removal_backups b ON b.backup_no=r.backup_no WHERE b.guild_id=?", (guild_id,))}
+        wrong, skipped_live, skipped_rep, no_raw = [], [], [], []
+        for uid in sorted(set(expected) | set(lb) | set(prev)):
+            la, lw, ld = lb.get(uid, (0, 0, 0))
+            pm, pd, pa, pw = prev.get(uid, [0, 0, 0, 0])
+            after, without, drops = la + pa, lw + pw, ld + pd
+            recorded = after + without
+            exp = expected.get(uid, (0, 0))[0]
+            if recorded == exp:
+                continue
+            delta = exp - recorded
+            if delta > 0:
+                if after > 0 or drops > 0:
+                    new_after, new_without = after + delta, without
+                else:
+                    new_after, new_without = after, without + delta
+            else:
+                cut = -delta
+                take = min(without, cut)
+                new_without, new_after = without - take, max(0, after - (cut - take))
+            item = {"user": uid, "recorded": recorded, "after": after, "without": without, "drops": drops,
+                    "expected": exp, "new_after": new_after, "new_without": new_without}
+            if uid in live:
+                skipped_live.append(item)
+            elif uid in reps:
+                skipped_rep.append(item)
+            elif uid not in expected:
+                no_raw.append(item)
+            else:
+                wrong.append(item)
+        try:
+            fielder_drops = int(db.execute(
+                "SELECT COALESCE(SUM(f.catches_dropped),0) FROM player_match_fielding f "
+                "JOIN stats_imports i ON i.source_message_id=f.source_message_id WHERE i.guild_id=?",
+                (guild_id,)).fetchone()[0])
+        except sqlite3.Error:
+            fielder_drops = None
+        batter_drops = sum(v[2] for v in lb.values()) + sum(v[1] for v in prev.values())
+        return {"wrong": wrong, "live": skipped_live, "rep": skipped_rep, "no_raw": no_raw,
+                "checked": len(expected), "fielder_drops": fielder_drops, "batter_drops": batter_drops}
+
+    @commands.command(name="auditbattingimpact", aliases=["auditbatterimpact", "audittbattingimpact"])
+    @commands.guild_only()
+    async def audit_batting_impact(self, ctx: commands.Context, member: discord.Member = None):
+        """Check every player's Batter Impact runs against Hand Cricket's raw match stats.
+
+        Usage: +auditbattingimpact [@player]
+        Read-only: nothing is changed. Wrong players are listed with what they should have.
+        """
+        if ctx.author.id != BOT_OWNER_ID:
+            return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        self._safe_sweep()
+        try:
+            result = self._audit(ctx.guild.id)
+        except sqlite3.Error as exc:
+            return await ctx.reply(f"Audit failed: `{type(exc).__name__}: {exc}`", mention_author=False)
+
+        def label(uid):
+            m = ctx.guild.get_member(uid)
+            return discord.utils.escape_markdown(m.display_name) if m else f"Unknown"
+
+        def line(it):
+            gap = it["expected"] - it["recorded"]
+            return (f"<@{it['user']}> ({label(it['user'])}) — recorded **{it['recorded']}** "
+                    f"(after {it['after']} / without {it['without']}), should be **{it['expected']}** "
+                    f"({'short by' if gap > 0 else 'over by'} {abs(gap)}) → "
+                    f"`+setbatterimpact <@{it['user']}> {it['new_after']} {it['new_without']}`")
+
+        items = result["wrong"]
+        if member is not None:
+            hit = [it for it in items + result["live"] + result["rep"] + result["no_raw"] if it["user"] == member.id]
+            if not hit:
+                return await ctx.reply(f"{discord.utils.escape_markdown(member.display_name)}'s Batter Impact "
+                                       "runs match Hand Cricket's match stats.", mention_author=False)
+            return await ctx.reply(line(hit[0]) + "\n_Run `+commitlb` first if there is preview data, then apply._",
+                                   mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        summary = [
+            f"**Batter Impact audit** — {result['checked']} player(s) with match stats checked.",
+            f"❌ Wrong: **{len(items)}**",
+        ]
+        if result["no_raw"]:
+            summary.append(f"ℹ️ Recorded runs but no match stats (manual edits?): {len(result['no_raw'])}")
+        if result["rep"]:
+            summary.append(f"ℹ️ Skipped (rep removal applied, cannot verify exactly): {len(result['rep'])}")
+        if result["live"]:
+            summary.append(f"ℹ️ Skipped (match still in progress): {len(result['live'])}")
+        if result["fielder_drops"] is not None:
+            summary.append(f"Drops: match reports show **{result['fielder_drops']}** dropped catches; "
+                           f"Batter Impact records **{result['batter_drops']}**.")
+        if not items:
+            summary.append("✅ Every checked player matches.")
+            return await ctx.reply("\n".join(summary), mention_author=False)
+        footer = ("\n\n_Totals are exact. The after/without split is a best guess: if a player had a drop the "
+                  "missing runs go to \"after\", otherwise to \"without\". Run `+commitlb` first if there is "
+                  "preview data, then apply. Full list attached._")
+        head = "\n".join(summary) + "\n\n"
+        budget = 1950 - len(head) - len(footer) - 40
+        shown = []
+        for it in items:
+            text_line = line(it)
+            if sum(len(x) + 1 for x in shown) + len(text_line) > budget:
+                break
+            shown.append(text_line)
+        text = head + "\n".join(shown)
+        if len(shown) < len(items):
+            text += f"\n…and {len(items) - len(shown)} more."
+        text += footer
+        full = "\n".join(line(it) for it in items + result["no_raw"] + result["rep"])
+        file = discord.File(io.BytesIO(full.encode("utf-8")), filename="batter_impact_audit.txt")
+        await ctx.reply(text, file=file, mention_author=False,
+                        allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="removerep")
     @commands.guild_only()
