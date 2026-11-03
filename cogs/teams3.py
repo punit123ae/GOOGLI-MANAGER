@@ -9,6 +9,21 @@ from discord.ext import commands
 
 from .teams1 import TeamCore, ConfirmDeleteAllView, TeamApprovalView, TeamListView, JoinRequestView, LeaveTeamConfirmView, CAPTAIN_EMOJI, VICE_CAPTAIN_EMOJI
 
+MAX_TEAM_LOGO_BYTES = 10 * 1024 * 1024
+
+
+async def _read_logo_attachment(attachment: discord.Attachment) -> bytes:
+    if attachment.size > MAX_TEAM_LOGO_BYTES:
+        raise ValueError("The image must be 10 MB or smaller.")
+    try:
+        data = await attachment.read()
+    except discord.HTTPException as exc:
+        raise ValueError("I couldn't download that image. Please upload it again.") from exc
+    if not data or len(data) > MAX_TEAM_LOGO_BYTES:
+        raise ValueError("The image is empty or larger than 10 MB.")
+    return data
+
+
 class TeamCommandsB:
     """Command mixin; methods are registered by TeamRegistration in teams1.py."""
 
@@ -197,9 +212,15 @@ class TeamCommandsB:
                 await logo_msg.channel.send("Team registration cancelled.")
                 return
             logo_url = None
+            logo_data = None
             if logo_msg.attachments:
                 attachment = next((a for a in logo_msg.attachments if (a.content_type or "").startswith("image/")), None)
                 if attachment:
+                    try:
+                        logo_data = await _read_logo_attachment(attachment)
+                    except ValueError as exc:
+                        await logo_msg.channel.send(str(exc))
+                        return
                     logo_url = attachment.url
             if not logo_url:
                 candidate = logo_msg.content.strip().strip("<>")
@@ -215,9 +236,9 @@ class TeamCommandsB:
                     (ctx.guild.id,),
                 ).fetchone()[0]
                 cur = self.db.execute(
-                    "INSERT INTO registered_teams(guild_id,name,name_key,captain_id,logo_url,status,applicant_id,approval_channel_id,created_at,team_number) "
-                    "VALUES(?,?,?,?,?,'pending',?,?,?,?)",
-                    (ctx.guild.id, name, self._key(name), ctx.author.id, logo_url, ctx.author.id, approval_channel.id, datetime.now(timezone.utc).isoformat(), next_team_number)
+                    "INSERT INTO registered_teams(guild_id,name,name_key,captain_id,logo_url,logo_data,status,applicant_id,approval_channel_id,created_at,team_number) "
+                    "VALUES(?,?,?,?,?,?,'pending',?,?,?,?)",
+                    (ctx.guild.id, name, self._key(name), ctx.author.id, logo_url, logo_data, ctx.author.id, approval_channel.id, datetime.now(timezone.utc).isoformat(), next_team_number)
                 )
                 team_id = cur.lastrowid
                 self.db.commit()
@@ -242,6 +263,37 @@ class TeamCommandsB:
             await logo_msg.channel.send(f"Your application for **{name}** has been submitted. Captain status becomes active after approval.")
         except asyncio.TimeoutError:
             await self._dm(ctx.author, "Team registration timed out. Run `+createteam` to start again.")
+
+    @commands.command(name="setteamlogo")
+    @commands.guild_only()
+    async def set_team_logo(self, ctx, *, team_name: str):
+        """Replace a team's logo using an attached image (captain or server manager)."""
+        team = self._team(ctx.guild.id, team_name)
+        if not team or team["status"] != "approved":
+            await ctx.reply("I couldn't find an approved team with that name.", mention_author=False)
+            return
+        is_owner = await self.bot.is_owner(ctx.author)
+        if ctx.author.id != team["captain_id"] and not ctx.author.guild_permissions.manage_guild and not is_owner:
+            await ctx.reply("Only the team captain or a server manager can change this logo.", mention_author=False)
+            return
+        attachment = next(
+            (a for a in ctx.message.attachments if (a.content_type or "").startswith("image/")),
+            None,
+        )
+        if attachment is None:
+            await ctx.reply("Attach an image to `+setteamlogo <team name>`.", mention_author=False)
+            return
+        try:
+            logo_data = await _read_logo_attachment(attachment)
+        except ValueError as exc:
+            await ctx.reply(str(exc), mention_author=False)
+            return
+        self.db.execute(
+            "UPDATE registered_teams SET logo_url=?, logo_data=? WHERE id=? AND guild_id=?",
+            (attachment.url, logo_data, team["id"], ctx.guild.id),
+        )
+        self.db.commit()
+        await ctx.reply(f"Updated the logo for **{team['name']}**. Run `+syncemojis` again to sync it.", mention_author=False)
 
     @commands.command(name="vc")
     @commands.guild_only()
@@ -629,4 +681,3 @@ class TeamCommandsB:
         await ctx.reply(f"Removed {member.name} from **{team['name']}**.", mention_author=False)
         await self._dm(member, f"An administrator has removed you from **{team['name']}**.")
         await self._dm_captain(ctx.guild, team, f"An administrator removed **{member.name}** from your team **{team['name']}**.")
-
