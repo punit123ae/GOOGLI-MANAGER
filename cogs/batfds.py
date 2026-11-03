@@ -27,6 +27,11 @@ PENDING_TTL_SECONDS = 120
 # once they have been quiet for this long (gives Hand Cricket time to post its raw stats).
 AUTO_RECOVER_GRACE_SECONDS = 600
 SWEEP_INTERVAL_SECONDS = 120
+# Set to True to let the bot count stuck ended matches by itself (checked every
+# SWEEP_INTERVAL_SECONDS, and before +previewlb / +commitlb). When False, nothing is counted
+# automatically: use "+previewlb markended" / "+recoverlb" yourself. +commitlb still refuses
+# to run while an ended match has uncounted records.
+AUTO_RECOVER_ENABLED = False
 
 log = logging.getLogger(__name__)
 
@@ -323,7 +328,7 @@ class BatterFieldingDropStats(commands.Cog):
         self._init_db()
 
     async def cog_load(self):
-        if not self._sweep_task.is_running():
+        if AUTO_RECOVER_ENABLED and not self._sweep_task.is_running():
             self._sweep_task.start()
 
     async def cog_unload(self):
@@ -424,6 +429,14 @@ class BatterFieldingDropStats(commands.Cog):
                 players INTEGER NOT NULL,
                 UNIQUE (guild_id, channel_id))
         """)
+        # Remembers which innings were already counted when a match ended, so records that
+        # reappear later under the same key are never counted a second time.
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_session_finalized (
+                guild_id INTEGER NOT NULL, session_key TEXT NOT NULL,
+                finalized_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, session_key))
+        """)
         # Automatic recoveries are tracked per match (channels are reused for later matches).
         db.execute("""
             CREATE TABLE IF NOT EXISTS batter_drop_recovered_matches (
@@ -521,6 +534,11 @@ class BatterFieldingDropStats(commands.Cog):
         """, (guild_id, channel_id, session_key)).fetchall()
         for uid, score in rows:
             self._finalize_batter(guild_id, channel_id, session_key, int(uid), int(score))
+        self.bot.db.execute(
+            "INSERT OR IGNORE INTO batter_drop_session_finalized(guild_id,session_key,finalized_at) VALUES(?,?,?)",
+            (guild_id, session_key, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+        self.bot.db.commit()
 
     async def _add_tracking_reaction(self, message: discord.Message):
         db = self.bot.db
@@ -806,6 +824,10 @@ class BatterFieldingDropStats(commands.Cog):
                 (int(guild_id), int(channel_id)),
             )
             db.execute(
+                "INSERT OR IGNORE INTO batter_drop_session_finalized(guild_id,session_key,finalized_at) VALUES(?,?,?)",
+                (int(guild_id), session_key, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            db.execute(
                 "UPDATE batter_drop_matches SET ended=1 WHERE guild_id=? AND channel_id=?",
                 (int(guild_id), int(channel_id)),
             )
@@ -873,9 +895,7 @@ class BatterFieldingDropStats(commands.Cog):
         lines = "\n".join(f"<#{int(ch)}> (`{int(ch)}`) — {int(n)} unfinalised record(s)" for ch, n in orphans)
         return ("Commit is blocked: these ended matches still have unfinalised batter records that would be "
                 "left out of the leaderboard:\n" + lines +
-                "\nThey are recovered automatically about "
-                f"{AUTO_RECOVER_GRACE_SECONDS // 60} minutes after the match ends. To do it now, run "
-                "`+recoverlb <channel_id>` for each, then `+previewlb`, then try `+commitlb` again.")
+                "\nRun `+recoverlb <channel_id>` for each, then `+previewlb`, then try `+commitlb` again.")
 
     def _commit_preview(self, guild_id: int) -> int:
         db = self.bot.db
@@ -1176,13 +1196,27 @@ class BatterFieldingDropStats(commands.Cog):
                     ).fetchone()
             if already:
                 raise ValueError("That channel has already been recovered.")
-            rows = db.execute(
-                "SELECT user_id,first_drop_score,drop_count,last_score FROM batter_drop_sessions "
+            all_rows = db.execute(
+                "SELECT user_id,first_drop_score,drop_count,last_score,session_key FROM batter_drop_sessions "
                 "WHERE guild_id=? AND channel_id=? AND session_key LIKE ? ORDER BY user_id",
                 (guild_id, channel_id, match_id + ":%"),
             ).fetchall()
-            if not rows:
+            if not all_rows:
                 raise ValueError("No saved session records exist for that channel's match; nothing to recover.")
+            counted_keys = {r[0] for r in db.execute(
+                "SELECT session_key FROM batter_drop_session_finalized WHERE guild_id=?", (guild_id,))}
+            rows = [r[:4] for r in all_rows if r[4] not in counted_keys]
+            if not rows:
+                # Everything left over was already counted when the match ended: these are duplicates.
+                db.execute(
+                    "INSERT OR IGNORE INTO batter_drop_recovered_matches"
+                    "(guild_id,channel_id,match_id,recovered_by,recovered_at,sessions,players,raw_source_id,corrected) "
+                    "VALUES(?,?,?,?,?,0,0,NULL,0)",
+                    (guild_id, channel_id, match_id, int(recovered_by),
+                     datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                )
+                db.commit()
+                return 0, 0, 0, None
 
             raw, raw_id = {}, None
             if raw_source_id is not None:
@@ -1268,6 +1302,11 @@ class BatterFieldingDropStats(commands.Cog):
             except sqlite3.Error:
                 log.exception("batfds: auto-recovery of channel %s failed and was rolled back", channel_id)
                 break
+            if result[0] == 0:
+                log.warning("batfds: channel %s had leftover records that were already counted; ignored them",
+                            channel_id)
+                done.append((int(guild_id), int(channel_id), result))
+                continue
             log.warning(
                 "batfds: match in channel %s had ended but was never finalised; auto-recovered "
                 "%s session(s) for %s player(s), %s score(s) corrected from raw stats %s",
@@ -1277,6 +1316,8 @@ class BatterFieldingDropStats(commands.Cog):
         return done
 
     def _safe_sweep(self):
+        if not AUTO_RECOVER_ENABLED:
+            return
         try:
             self._sweep_orphans()
         except Exception:
@@ -1300,6 +1341,10 @@ class BatterFieldingDropStats(commands.Cog):
         except Exception as exc:
             return await ctx.reply(f"Recovery failed and was rolled back: `{type(exc).__name__}: {exc}`",
                                    mention_author=False)
+        if sessions == 0:
+            return await ctx.reply(
+                f"<#{int(channel_id)}>: these records were already counted when the match ended, so nothing "
+                "was added. The leftover duplicates are now ignored.", mention_author=False)
         if raw_id is None:
             note = "No matching Hand Cricket raw stats were found, so the saved scores were used."
         else:
@@ -1429,7 +1474,8 @@ class BatterFieldingDropStats(commands.Cog):
             return await ctx.reply("\n".join(summary), mention_author=False)
         footer = ("\n\n_Totals are exact. The after/without split is a best guess: if a player had a drop the "
                   "missing runs go to \"after\", otherwise to \"without\". Run `+commitlb` first if there is "
-                  "preview data, then apply. Full list attached._")
+                  "preview data, then apply. Players you edited with +setbatterimpact, or everyone after a "
+                  "reset, will also show here. Full list attached._")
         head = "\n".join(summary) + "\n\n"
         budget = 1950 - len(head) - len(footer) - 40
         shown = []
