@@ -271,6 +271,12 @@ class TeamEmojis(commands.Cog):
                     raise InvalidLogo(f"Logo download failed (HTTP {resp.status}); the link may have expired")
                 if resp.content_length and resp.content_length > MAX_DOWNLOAD_BYTES:
                     raise InvalidLogo("Logo file is larger than 10 MB")
+                content_type = resp.content_type.casefold()
+                if content_type in ("text/html", "application/xhtml+xml", "application/json"):
+                    raise InvalidLogo(
+                        f"Logo link returned {content_type} instead of image data. "
+                        "Use a direct image URL or upload the image itself."
+                    )
                 data = await resp.content.read(MAX_DOWNLOAD_BYTES + 1)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise InvalidLogo("Could not download the logo from its link") from exc
