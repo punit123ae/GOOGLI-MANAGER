@@ -174,9 +174,9 @@ def fantasy_raw_points(rows, t=None):
 
             # Only the highest wicket milestone bonus applies per spell.
             if wickets >= 9:
-                bowling_raw += 20
+                bowling_raw += 30
             elif wickets >= 7:
-                bowling_raw += 12
+                bowling_raw += 20
             elif wickets >= 5:
                 bowling_raw += 15
             elif wickets >= 3:
