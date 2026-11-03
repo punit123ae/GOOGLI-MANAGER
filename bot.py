@@ -48,6 +48,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.points table",
             "cogs.batfds",
             "cogs.fielderlines",
+            "cogs.team_emojis",
         ):
             await self.load_extension(extension)
 
