@@ -40,6 +40,67 @@ def _save_config(config: dict[str, int]) -> None:
         json.dump(config, file, indent=2)
 
 
+def _scorecard_image_candidates(message: discord.Message) -> list[tuple[str, str]]:
+    """Return possible image URLs, prioritizing real image/thumbnail URLs in embeds."""
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(url: str | None, filename: str) -> None:
+        if not url or url in seen:
+            return
+        if url.startswith(("https://", "http://")):
+            seen.add(url)
+            candidates.append((url, filename))
+
+    # Attachments are the most reliable source when present.
+    for attachment in message.attachments:
+        is_image = (
+            bool(attachment.content_type and attachment.content_type.startswith("image/"))
+            or attachment.filename.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
+            )
+        )
+        if is_image:
+            add(attachment.url, attachment.filename or "scorecard.png")
+
+    # Hand-cricket scorecards are often delivered as embed images, not attachments.
+    for embed in message.embeds:
+        if embed.image:
+            # Discord's media proxy is often more accessible than the original
+            # third-party embed host (which may block direct bot requests).
+            add(embed.image.proxy_url, "scorecard_embed.png")
+            add(embed.image.url, "scorecard_embed.png")
+        if embed.thumbnail:
+            add(embed.thumbnail.proxy_url, "scorecard_thumbnail.png")
+            add(embed.thumbnail.url, "scorecard_thumbnail.png")
+
+    # Some bots put the direct image URL in the message text instead of embed.image.
+    for match in re.findall(r"https?://[^\s<>]+", message.content or ""):
+        add(match.rstrip(".,)>]"), "scorecard_link.png")
+
+    return candidates
+
+
+def _extract_winning_margin(ocr_text: str) -> str | None:
+    """Normalize scorecard wording to exactly 'won by N runs/wickets'."""
+    text = ocr_text.replace("\u00a0", " ").replace("\u200b", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # OCR sometimes confuses punctuation around the result sentence. Keep the
+    # match strict about the result verb, number, and result unit.
+    patterns = (
+        r"\bwon\s+(?:(?:the\s+)?(?:game|match)\s+)?by\s+(\d{1,3})\s+(runs?|wickets?)\b",
+        r"\bwon\s+(?:the\s+)?(?:game|match)\s+by\s+(\d{1,3})\s+(runs?|wickets?)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            number = match.group(1)
+            unit = "runs" if match.group(2).lower().startswith("run") else "wickets"
+            return f"won by {number} {unit}"
+    return None
+
+
 class ResultsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -83,7 +144,7 @@ class ResultsCog(commands.Cog):
     @commands.command(name="result")
     @commands.guild_only()
     async def post_result(self, ctx: commands.Context):
-        """Ask the owner for each field, then publish the result."""
+        """Read a replied scorecard embed and publish the result after confirmation."""
         channel_id = self.result_channels.get(str(ctx.guild.id))
         channel = ctx.guild.get_channel(channel_id) if channel_id else None
         if not isinstance(channel, discord.TextChannel):
@@ -113,41 +174,62 @@ class ResultsCog(commands.Cog):
         image_bytes = None
         image_filename = "scorecard.png"
         image_url = None
+        image_candidates = _scorecard_image_candidates(scorecard_message)
 
-        for attachment in scorecard_message.attachments:
-            if (attachment.content_type and attachment.content_type.startswith("image/")) or attachment.filename.lower().endswith(
-                (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
-            ):
-                try:
-                    image_bytes = await attachment.read()
-                    image_filename = attachment.filename or image_filename
-                    image_url = attachment.url
-                    break
-                except discord.HTTPException:
-                    pass
-
-        if image_bytes is None:
-            for embed in scorecard_message.embeds:
-                candidate = embed.image.url if embed.image else None
-                if not candidate and embed.thumbnail:
-                    candidate = embed.thumbnail.url
-                if candidate:
-                    image_url = candidate
-                    break
-
-        if image_bytes is None and image_url:
-            try:
-                timeout = aiohttp.ClientTimeout(total=30)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(image_url) as response:
-                        if response.status == 200:
-                            image_bytes = await response.read()
-            except (aiohttp.ClientError, TimeoutError):
-                image_bytes = None
-
-        if not image_bytes:
+        if not image_candidates:
             await ctx.reply(
-                "❌ The replied message doesn't contain an accessible scorecard image.",
+                "❌ I couldn't find an image in that message's attachments or embed. "
+                "Make sure you reply directly to the scorecard image message.",
+                mention_author=False,
+            )
+            return
+
+        # Try each available source URL. Embed image URLs and Discord proxy URLs
+        # are both checked because some embeds expose only one reliably.
+        download_errors: list[str] = []
+        try:
+            timeout = aiohttp.ClientTimeout(total=45, connect=15, sock_read=30)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; GOOGLI-MANAGER/1.0)",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": "https://discord.com/",
+            }
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                for candidate_url, candidate_filename in image_candidates:
+                    try:
+                        async with session.get(candidate_url, allow_redirects=True) as response:
+                            if response.status != 200:
+                                download_errors.append(f"HTTP {response.status}")
+                                continue
+                            body = await response.read()
+                            content_type = response.headers.get("Content-Type", "").lower()
+                            # Check actual image signatures as some image hosts return
+                            # generic or incorrect Content-Type headers.
+                            is_image = (
+                                content_type.startswith("image/")
+                                or body.startswith(b"\x89PNG\r\n\x1a\n")
+                                or body.startswith(b"\xff\xd8\xff")
+                                or body.startswith((b"GIF87a", b"GIF89a"))
+                                or (body.startswith(b"RIFF") and body[8:12] == b"WEBP")
+                                or (len(body) > 12 and body[4:8] == b"ftyp")
+                            )
+                            if body and len(body) <= 15 * 1024 * 1024 and is_image:
+                                image_bytes = body
+                                image_filename = candidate_filename
+                                image_url = candidate_url
+                                break
+                            download_errors.append("Response was not a supported image")
+                    except (aiohttp.ClientError, TimeoutError) as exc:
+                        download_errors.append(type(exc).__name__)
+                        continue
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            download_errors.append(type(exc).__name__)
+
+        if not image_bytes or not image_url:
+            await ctx.reply(
+                "❌ I found the scorecard embed, but couldn't download its image. "
+                "The image host may be blocking requests, or the embed image may have expired. "
+                "Please try replying to the original scorecard message again.",
                 mention_author=False,
             )
             return
@@ -162,9 +244,8 @@ class ResultsCog(commands.Cog):
 
         prompts = [
             ("match number", "Enter the match number (e.g. `81`)."),
-            ("Team A", "Enter Team A's name."),
-            ("Team B", "Enter Team B's name."),
-            ("winning team", "Enter the winning team's name."),
+            ("Team A (winner)", "Enter Team A's name. Team A will automatically be treated as the winner."),
+            ("Team B (loser)", "Enter Team B's name."),
         ]
         answers: list[str] = []
 
@@ -178,7 +259,7 @@ class ResultsCog(commands.Cog):
 
         for field, prompt in prompts:
             await ctx.send(
-                f"**Match result setup — {field}**\\n{prompt}\\n"
+                f"**Match result setup — {field}**\n{prompt}\n"
                 "Reply `cancel` at any time to stop. (2-minute timeout per answer)"
             )
             try:
@@ -196,14 +277,14 @@ class ResultsCog(commands.Cog):
                 return
             answers.append(answer)
 
-        match_no, team_a, team_b, winner = answers
+        match_no, team_a, team_b = answers
 
         if team_a.casefold() == team_b.casefold():
             await ctx.send("❌ Team A and Team B must be different. Run `+result` again.")
             return
-        if winner.casefold() not in {team_a.casefold(), team_b.casefold()}:
-            await ctx.send("❌ The winning team must match Team A or Team B. Run `+result` again.")
-            return
+
+        # Team A is always the winner; Team B is always the opponent/loser.
+        winner = team_a
 
         # Send only the scorecard image to OCR.space. Never send Discord credentials or messages.
         try:
@@ -211,6 +292,9 @@ class ResultsCog(commands.Cog):
             form.add_field("apikey", api_key)
             form.add_field("language", "eng")
             form.add_field("isOverlayRequired", "false")
+            form.add_field("OCREngine", "2")
+            form.add_field("scale", "true")
+            form.add_field("detectOrientation", "true")
             form.add_field(
                 "file",
                 image_bytes,
@@ -233,40 +317,56 @@ class ResultsCog(commands.Cog):
             return
 
         parsed_results = ocr_data.get("ParsedResults") or []
-        ocr_text = "\\n".join(item.get("ParsedText", "") for item in parsed_results)
-        margin_match = re.search(
-            r"\\bwon\\s+(?:(?:the\\s+)?(?:game|match)\\s+)?by\\s+(\\d+)\\s+(runs?|wickets?)\\b",
-            ocr_text,
-            flags=re.IGNORECASE,
-        )
-        if not margin_match:
+        ocr_text = " ".join(item.get("ParsedText", "") for item in parsed_results)
+        margin = _extract_winning_margin(ocr_text)
+        if not margin:
+            # Include the provider's error only as a diagnostic, without exposing
+            # API keys or dumping the entire OCR response into the Discord channel.
             await ctx.send(
-                "❌ I couldn't detect a margin in the format `won by __ runs/wickets` from the scorecard. "
-                "Please use a clearer scorecard image or try again."
+                "❌ I couldn't find a clear `won by __ runs/wickets` result on the scorecard. "
+                "Please check that the result line is visible in the embed image, then try again."
             )
             return
 
-        margin_number = margin_match.group(1)
-        margin_type = margin_match.group(2).lower()
-        margin_type = "runs" if margin_type.startswith("run") else "wickets"
-        margin = f"won by {margin_number} {margin_type}"
-
-        await ctx.send(
-            f"**OCR detected:** `{margin}`\\n"
-            "Reply `yes` to post this result or `no` to cancel. (2-minute timeout)"
+        # Put the preview in the configured results channel. Only the person
+        # who started +result may confirm it, even though the prompt is public.
+        preview = await channel.send(
+            f"**Match {match_no} — Result confirmation**\n"
+            f"🏆 **Winner:** {team_a}\n"
+            f"❌ **Loser:** {team_b}\n"
+            f"**Margin:** `{margin}`\n\n"
+            "Reply `yes` to publish this result or `no` to cancel. "
+            "(10-minute timeout)",
+            allowed_mentions=discord.AllowedMentions.none(),
         )
+
+        def confirmation_check(message: discord.Message) -> bool:
+            return (
+                message.author.id == ctx.author.id
+                and message.channel.id == channel.id
+                and message.guild is not None
+                and message.guild.id == ctx.guild.id
+                and message.content.strip().casefold() in {"yes", "no", "cancel"}
+            )
+
         try:
             confirmation = await self.bot.wait_for(
                 "message",
-                check=check,
-                timeout=120,
+                check=confirmation_check,
+                timeout=600,
             )
         except TimeoutError:
-            await ctx.send("⌛ Confirmation timed out. Run `+result` again.")
+            try:
+                await preview.edit(content=(preview.content + "\n\n⌛ Confirmation expired; result was not posted."))
+            except discord.HTTPException:
+                pass
             return
 
         if confirmation.content.strip().casefold() != "yes":
-            await ctx.send("❌ Result posting cancelled. Reply `yes` to confirm next time.")
+            try:
+                await preview.edit(content=(preview.content + "\n\n❌ Cancelled; result was not posted."))
+            except discord.HTTPException:
+                pass
             return
 
         result_message = (
