@@ -45,7 +45,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.autolock",
             "cogs.help_menu",
             "cogs.fielding",
-            "cogs.points_table",
+            "cogs.points table",
             "cogs.batfds",
             "cogs.fielderlines",
         ):
