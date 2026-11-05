@@ -187,24 +187,40 @@ def invalidate_name_index(guild_id=None):
 def _build_name_index(guild: discord.Guild) -> dict:
     exact: dict = {}
     compact: dict = {}
+    user_exact: dict = {}    # usernames only: unique per Discord account
+    user_compact: dict = {}
     for member in guild.members:
         for raw in (member.name, member.display_name):
             exact.setdefault(_clean_discord_name(raw), set()).add(member.id)
             short = _compact_name(raw)
             if short:
                 compact.setdefault(short, set()).add(member.id)
-    index = {"exact": exact, "compact": compact, "built": time.monotonic()}
+        user_exact.setdefault(_clean_discord_name(member.name), set()).add(member.id)
+        short = _compact_name(member.name)
+        if short:
+            user_compact.setdefault(short, set()).add(member.id)
+    index = {"exact": exact, "compact": compact, "user_exact": user_exact,
+             "user_compact": user_compact, "built": time.monotonic()}
     _name_index[guild.id] = index
     return index
 
 
 def _lookup_name(index: dict, key: str):
+    # Hand Cricket prints usernames, which are unique, so try those first. This stops another
+    # member's nickname that happens to equal the username from making the name look ambiguous.
+    ids = index.get("user_exact", {}).get(key, ())
+    if len(ids) == 1:
+        return next(iter(ids))
     ids = index["exact"].get(key, ())
     if len(ids) == 1:
         return next(iter(ids))
     # Hand Cricket sometimes prints usernames without spaces/punctuation.
     # Use this fallback only when it identifies exactly one server member.
     short = _compact_name(key)
+    if short:
+        ids = index.get("user_compact", {}).get(short, ())
+        if len(ids) == 1:
+            return next(iter(ids))
     ids = index["compact"].get(short, ()) if short else ()
     return next(iter(ids)) if len(ids) == 1 else None
 
@@ -642,7 +658,7 @@ class BatterFieldingDropStats(commands.Cog):
         try:
             index = _name_index.get(guild.id) or _build_name_index(guild)
             key = _clean_discord_name(name).lstrip("@")
-            shared = len(index["exact"].get(key, ()))
+            shared = len(index["user_exact"].get(key, ())) or len(index["exact"].get(key, ()))
             reason = f"shared by {shared} members" if shared > 1 else "no member has this name"
             self.bot.db.execute("""
                 INSERT INTO batter_drop_unmatched(guild_id,name,reason,last_seen) VALUES(?,?,?,?)
