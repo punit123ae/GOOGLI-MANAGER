@@ -143,26 +143,51 @@ class PlayerH2H(commands.Cog):
         return (int(row[0]), int(row[1])) if row else (0, 0)
 
     def _opposed_matches(self, guild_id, a_id, b_id):
-        """Matches both played in, on different teams (teams as saved at import), newest first."""
+        """Matches both played in, on different teams, newest first.
+
+        Teams are the ones saved when the match was imported. Matches imported before
+        that was added have none saved, so for those the players' CURRENT teams are
+        used instead (a player who changed teams since may be missed or mislabelled).
+        """
         try:
-            return self.bot.db.execute(
+            matches = self.bot.db.execute(
                 """
-                SELECT i.imported_at,
-                       a.runs, a.balls_faced, a.runs_conceded, a.balls_bowled, a.wickets, a.not_out, ta.team_name,
-                       b.runs, b.balls_faced, b.runs_conceded, b.balls_bowled, b.wickets, b.not_out, tb.team_name
+                SELECT i.imported_at, a.source_message_id,
+                       a.runs, a.balls_faced, a.runs_conceded, a.balls_bowled, a.wickets, a.not_out,
+                       b.runs, b.balls_faced, b.runs_conceded, b.balls_bowled, b.wickets, b.not_out,
+                       (SELECT team_name FROM match_teams
+                         WHERE source_message_id = a.source_message_id AND user_id = a.user_id),
+                       (SELECT team_name FROM match_teams
+                         WHERE source_message_id = b.source_message_id AND user_id = b.user_id)
                 FROM player_match_stats a
                 JOIN player_match_stats b ON b.source_message_id = a.source_message_id
                 JOIN stats_imports i ON i.source_message_id = a.source_message_id
-                JOIN match_teams ta ON ta.source_message_id = a.source_message_id AND ta.user_id = a.user_id
-                JOIN match_teams tb ON tb.source_message_id = b.source_message_id AND tb.user_id = b.user_id
                 WHERE i.guild_id = ? AND a.user_id = ? AND b.user_id = ?
-                  AND ta.team_name != tb.team_name
                 ORDER BY i.imported_at DESC, a.source_message_id DESC
                 """,
                 (int(guild_id), int(a_id), int(b_id)),
             ).fetchall()
         except Exception:
             return []
+
+        current = {}
+        if any(m[14] is None or m[15] is None for m in matches):
+            try:
+                from .lb import _team_rosters
+                for team in _team_rosters(int(guild_id)).values():
+                    for uid in team["members"]:
+                        current[int(uid)] = str(team["name"])
+            except Exception:
+                current = {}
+
+        result = []
+        for m in matches:
+            a_team = m[14] if m[14] is not None else current.get(int(a_id))
+            b_team = m[15] if m[15] is not None else current.get(int(b_id))
+            if a_team is None or b_team is None or a_team == b_team:
+                continue
+            result.append((m[0], *m[2:8], a_team, *m[8:14], b_team))
+        return result
 
     # ------------------------------------------------------------------ embeds
     @staticmethod
