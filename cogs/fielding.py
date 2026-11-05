@@ -47,6 +47,117 @@ def _efficiency(caught, dropped):
     return caught / total * 100 if total else 0.0
 
 
+def _rank_fielders(stats_by_user):
+    """Rank players who have fielded: most catches first, then efficiency, then chances.
+
+    stats_by_user: {user_id: (caught, dropped)}. Players with no recorded catch
+    chance (caught + dropped == 0) are not ranked at all.
+    Returns a list of (user_id, caught, dropped) best -> worst.
+    """
+    fielders = [
+        (uid, c, d) for uid, (c, d) in stats_by_user.items() if c + d > 0
+    ]
+    fielders.sort(key=lambda r: (-r[1], -_efficiency(r[1], r[2]), -(r[1] + r[2]), r[0]))
+    return fielders
+
+
+def _fielder_title(ranked, user_id):
+    """Return (label_kind, rank, total) for a ranked player, or None if unranked.
+
+    Ties share a rank. kind is one of: best, top, bottom, worst.
+    - best:   nobody on the team is strictly ahead of them
+    - worst:  nobody on the team is strictly behind them (team of 2+ fielders)
+    - top:    upper half of the team's fielders
+    - bottom: lower half of the team's fielders
+    """
+    entry = next((r for r in ranked if r[0] == user_id), None)
+    if entry is None:
+        return None
+    total = len(ranked)
+
+    def key(r):
+        return (r[1], _efficiency(r[1], r[2]), r[1] + r[2])
+
+    mine = key(entry)
+    ahead = sum(1 for r in ranked if key(r) > mine)
+    behind = sum(1 for r in ranked if key(r) < mine)
+    rank = ahead + 1
+    if ahead == 0:
+        kind = "best"
+    elif behind == 0:
+        kind = "worst"
+    elif ahead < behind:
+        kind = "top"
+    else:
+        kind = "bottom"
+    return kind, rank, total
+
+
+_TITLE_TEXT = {
+    "best": "BEST FIELDER OF",
+    "top": "ONE OF THE BEST FIELDERS OF",
+    "bottom": "ONE OF THE WORST FIELDERS OF",
+    "worst": "WORST FIELDER OF",
+}
+_TITLE_COLOR = {
+    "best": discord.Color.green(),
+    "top": discord.Color.from_rgb(55, 150, 255),
+    "bottom": discord.Color.orange(),
+    "worst": discord.Color.red(),
+}
+
+
+class PagedEmbedView(discord.ui.View):
+    """Previous / next buttons for a fixed list of embeds, usable only by the requester."""
+
+    def __init__(self, ctx, embeds):
+        super().__init__(timeout=120)
+        self.owner_id = ctx.author.id
+        self.embeds = embeds
+        self.index = 0
+        self.message = None
+        self._sync()
+
+    def _sync(self):
+        self.prev_button.disabled = self.index <= 0
+        self.next_button.disabled = self.index >= len(self.embeds) - 1
+        self.counter.label = f"{self.index + 1}/{len(self.embeds)}"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can turn the pages.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = max(0, self.index - 1)
+        self._sync()
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True)
+    async def counter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = min(len(self.embeds) - 1, self.index + 1)
+        self._sync()
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class ResetConfirmView(discord.ui.View):
     """Confirm / cancel buttons usable only by the person who ran the reset."""
 
@@ -240,7 +351,43 @@ class CatchTracker(commands.Cog):
         return None
 
     # ------------------------------------------------------------------ embeds
-    def _build_stats_embed(self, guild, user_id, result=None):
+    def _recent_matches(self, guild_id, user_id, limit=5):
+        """Last matches this player fielded in, newest first, from imported match stats."""
+        try:
+            rows = self.bot.db.execute(
+                """
+                SELECT i.imported_at, f.opportunities, f.catches_taken, f.catches_dropped
+                FROM player_match_fielding f
+                JOIN stats_imports i ON i.source_message_id = f.source_message_id
+                WHERE i.guild_id = ? AND f.user_id = ?
+                ORDER BY i.imported_at DESC, f.source_message_id DESC
+                LIMIT ?
+                """,
+                (int(guild_id), int(user_id), int(limit)),
+            ).fetchall()
+        except Exception:
+            return []
+        return [(float(r[0]), int(r[1]), int(r[2]), int(r[3])) for r in rows]
+
+    def _recent_field_value(self, guild_id, user_id):
+        rows = self._recent_matches(guild_id, user_id)
+        if not rows:
+            return "No match records yet."
+        lines = []
+        for i, (ts, opps, taken, dropped) in enumerate(rows, start=1):
+            chances = max(opps, taken + dropped)
+            lines.append(
+                f"`{i}.` <t:{int(ts)}:d> → `{taken}` caught • `{dropped}` dropped • `{chances}` chances"
+            )
+        total_taken = sum(r[2] for r in rows)
+        total_dropped = sum(r[3] for r in rows)
+        lines.append(
+            f"**Last {len(rows)}:** `{total_taken}` caught, `{total_dropped}` dropped "
+            f"(`{_efficiency(total_taken, total_dropped):.2f}%`)"
+        )
+        return "\n".join(lines)
+
+    def _build_stats_embed(self, guild, user_id, result=None, recent=False):
         caught, dropped = self._get_stats(guild.id, user_id)
         member = guild.get_member(user_id)
         display_name = discord.utils.escape_markdown(
@@ -267,7 +414,125 @@ class CatchTracker(commands.Cog):
             value=f"`{_efficiency(caught, dropped):.2f}%`",
             inline=False,
         )
+        if recent:
+            embed.add_field(
+                name="RECENT 5 MATCHES",
+                value=self._recent_field_value(guild.id, user_id),
+                inline=False,
+            )
         embed.set_footer(text="Fielding tracker")
+        return embed
+
+    def _build_team_embed(self, guild, member_id):
+        """Comparison of one player with their team's fielders."""
+        # Reuse the roster logic from lb.py (same membership rules as +lb and +stats).
+        try:
+            from .lb import _team_rosters
+            rosters = _team_rosters(guild.id)
+        except Exception:
+            rosters = {}
+
+        member = guild.get_member(member_id)
+        name = discord.utils.escape_markdown(
+            member.display_name if member else f"<@{member_id}>"
+        )
+        team = next(
+            (t for t in rosters.values() if member_id in t["members"]), None
+        )
+        embed = discord.Embed(
+            title=f"🧤 TEAM FIELDING COMPARISON FOR {name}",
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        if member:
+            embed.set_thumbnail(url=member.display_avatar.url)
+
+        if team is None:
+            embed.description = "This player is not on an approved team, so there is nothing to compare with."
+            embed.set_footer(text="Fielding tracker")
+            return embed
+
+        team_name = discord.utils.escape_markdown(team["name"])
+        stats = {uid: self._get_stats(guild.id, uid) for uid in team["members"]}
+        ranked = _rank_fielders(stats)
+        caught, dropped = stats.get(member_id, (0, 0))
+        team_caught = sum(c for c, _ in stats.values())
+        team_dropped = sum(d for _, d in stats.values())
+
+        title = _fielder_title(ranked, member_id)
+        if title is None:
+            embed.description = (
+                f"**{name}** has no recorded fielding yet, so they are not ranked in **{team_name}**."
+            )
+        else:
+            kind, rank, total = title
+            embed.title = f"🧤 {_TITLE_TEXT[kind]} {team_name}".upper()
+            embed.color = _TITLE_COLOR[kind]
+            embed.description = f"**{name}** ranks `#{rank}` of `{total}` fielder(s) in **{team_name}**."
+            embed.add_field(name="CATCHES CAUGHT", value=f"`{caught}`", inline=True)
+            embed.add_field(name="CATCHES DROPPED", value=f"`{dropped}`", inline=True)
+            embed.add_field(
+                name="CATCH EFFICIENCY",
+                value=f"`{_efficiency(caught, dropped):.2f}%`",
+                inline=True,
+            )
+            share = caught / team_caught * 100 if team_caught else 0.0
+            embed.add_field(
+                name="SHARE OF TEAM CATCHES", value=f"`{share:.2f}%`", inline=True
+            )
+            avg_caught = team_caught / total if total else 0.0
+            embed.add_field(
+                name="TEAM AVERAGE (PER FIELDER)",
+                value=f"`{avg_caught:.2f}` caught",
+                inline=True,
+            )
+            embed.add_field(
+                name="TEAM EFFICIENCY",
+                value=f"`{_efficiency(team_caught, team_dropped):.2f}%`",
+                inline=True,
+            )
+            lines = []
+            for i, (uid, c, d) in enumerate(ranked[:5], start=1):
+                m = guild.get_member(uid)
+                nm = discord.utils.escape_markdown(
+                    m.display_name if m else f"Unknown ({str(uid)[-4:]})"
+                )
+                marker = " ⬅️" if uid == member_id else ""
+                lines.append(
+                    f"`{i}.` **{nm}** → `{c}` caught • `{_efficiency(c, d):.1f}%`{marker}"
+                )
+            embed.add_field(name=f"TOP FIELDERS OF {team_name}".upper(), value="\n".join(lines), inline=False)
+        embed.set_footer(text="Ranked by catches caught, then catch efficiency • only players with fielding records")
+        return embed
+
+    def _build_overview_embed(self, guild):
+        rows = self.bot.db.execute(
+            "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=?",
+            (guild.id,),
+        ).fetchall()
+        total_caught = sum(int(r[1]) for r in rows)
+        total_dropped = sum(int(r[2]) for r in rows)
+        embed = discord.Embed(
+            title="🧤 SERVER FIELDING OVERVIEW",
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        embed.add_field(name="PLAYERS TRACKED", value=f"`{len(rows)}`", inline=False)
+        embed.add_field(name="TOTAL CATCHES CAUGHT", value=f"`{total_caught}`", inline=False)
+        embed.add_field(name="TOTAL CATCHES DROPPED", value=f"`{total_dropped}`", inline=False)
+        embed.add_field(
+            name="OVERALL CATCH EFFICIENCY",
+            value=f"`{_efficiency(total_caught, total_dropped):.2f}%`",
+            inline=False,
+        )
+        top = sorted(rows, key=lambda r: (-int(r[1]), int(r[0])))[:3]
+        top = [r for r in top if int(r[1]) > 0]
+        if top:
+            lines = []
+            for i, r in enumerate(top, start=1):
+                m = guild.get_member(int(r[0]))
+                nm = discord.utils.escape_markdown(m.display_name if m else f"Unknown ({str(r[0])[-4:]})")
+                lines.append(f"`{i}.` **{nm}** → `{int(r[1])}` caught")
+            embed.add_field(name="TOP FIELDERS", value="\n".join(lines), inline=False)
+        embed.set_footer(text="Use +fieldingstats @user for one player • +lb for the leaderboard")
         return embed
 
     async def _send_stats_embed(self, channel, fielder_id, result=None):
@@ -423,49 +688,30 @@ class CatchTracker(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @commands.command(name="fieldingstats")
+    @commands.command(name="fieldingstats", aliases=["fdstats"])
     @commands.guild_only()
     async def fielding_stats(self, ctx, member: discord.Member = None):
-        """Show a player's fielding stats, or a server-wide overview."""
-        if member is not None:
-            embed = self._build_stats_embed(ctx.guild, member.id)
-            await ctx.reply(
-                embed=embed,
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
+        """Paged fielding stats.
 
-        rows = self.bot.db.execute(
-            "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=?",
-            (ctx.guild.id,),
-        ).fetchall()
-        total_caught = sum(int(r[1]) for r in rows)
-        total_dropped = sum(int(r[2]) for r in rows)
-        embed = discord.Embed(
-            title="🧤 SERVER FIELDING OVERVIEW",
-            color=discord.Color.from_rgb(55, 150, 255),
-        )
-        embed.add_field(name="PLAYERS TRACKED", value=f"`{len(rows)}`", inline=False)
-        embed.add_field(name="TOTAL CATCHES CAUGHT", value=f"`{total_caught}`", inline=False)
-        embed.add_field(name="TOTAL CATCHES DROPPED", value=f"`{total_dropped}`", inline=False)
-        embed.add_field(
-            name="OVERALL CATCH EFFICIENCY",
-            value=f"`{_efficiency(total_caught, total_dropped):.2f}%`",
-            inline=False,
-        )
-        top = sorted(rows, key=lambda r: (-int(r[1]), int(r[0])))[:3]
-        top = [r for r in top if int(r[1]) > 0]
-        if top:
-            lines = []
-            for i, r in enumerate(top, start=1):
-                m = ctx.guild.get_member(int(r[0]))
-                nm = discord.utils.escape_markdown(m.display_name if m else f"Unknown ({str(r[0])[-4:]})")
-                lines.append(f"`{i}.` **{nm}** → `{int(r[1])}` caught")
-            embed.add_field(name="TOP FIELDERS", value="\n".join(lines), inline=False)
-        embed.set_footer(text="Use +fieldingstats @user for one player • +lb for the leaderboard")
-        await ctx.reply(
-            embed=embed,
+        +fieldingstats          -> server overview, your stats, your team comparison
+        +fieldingstats <user>   -> their stats, their team comparison
+        """
+        if member is not None:
+            pages = [
+                self._build_stats_embed(ctx.guild, member.id, recent=True),
+                self._build_team_embed(ctx.guild, member.id),
+            ]
+        else:
+            pages = [
+                self._build_overview_embed(ctx.guild),
+                self._build_stats_embed(ctx.guild, ctx.author.id, recent=True),
+                self._build_team_embed(ctx.guild, ctx.author.id),
+            ]
+
+        view = PagedEmbedView(ctx, pages)
+        view.message = await ctx.reply(
+            embed=pages[0],
+            view=view,
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
