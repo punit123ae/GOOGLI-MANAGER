@@ -16,6 +16,10 @@ from discord.ext import commands
 from .stats import fantasy_raw_points
 
 BLUE = discord.Colour.from_rgb(20, 117, 255)
+
+# Batter-impact metrics live in the Batting category but come from batfds' table.
+# Value = index into (runs_after_drops, runs_without_drops, catches_dropped).
+BATTER_IMPACT_KEYS = {"bi_after": 0, "bi_without": 1, "bi_drops": 2}
 PAGE_SIZE = 10
 
 METRICS = {
@@ -28,6 +32,9 @@ METRICS = {
         ("highest", "Highest Runs"),
         ("lowest_strike_rate", "Lowest Strike Rate (minimum 50 runs)"),
         ("strike_rate", "Highest Strike Rate (minimum 50 runs)"),
+        ("bi_after", "Most Runs After Catch Drops"),
+        ("bi_without", "Most Runs Without Catch Drops"),
+        ("bi_drops", "Most Catches Dropped (as Batter)"),
     ],
     "Bowling": [
         ("wickets", "Wickets"),
@@ -41,10 +48,6 @@ METRICS = {
         ("fld_caught", "Most Catches Caught"),
         ("fld_dropped", "Most Catches Dropped"),
         ("fld_eff", "Highest Catch Efficiency"),
-    ],
-    "Batter Impact": [
-        ("runs_after_drops", "Most Runs After Dropped Catches"),
-        ("runs_without_drops", "Most Runs Without Catch Drops"),
     ],
     "Fantasy Points": [("fantasy", "Total Fantasy Points")],
     "Team Fielding": [
@@ -294,7 +297,6 @@ class CategorySelect(discord.ui.Select):
             "Bowling": "<:cricketball:1561294577392951338>",
             "Fantasy Points": "<:Crown:1561296003104243803>",
             "Fielding": "🧤",
-            "Batter Impact": "💥",
             "Team Fielding": "🛡️",
         }
         options = [discord.SelectOption(label=name, emoji=category_emojis[name], default=name == view.category)
@@ -327,14 +329,22 @@ class MetricSelect(discord.ui.Select):
 
 
 class PageButton(discord.ui.Button):
-    def __init__(self, direction: int):
-        self.direction = direction
-        super().__init__(label="◀ Previous" if direction < 0 else "Next ▶",
-                         style=discord.ButtonStyle.secondary, row=2)
+    LABELS = {"first": "⏮ First", "prev": "◀ Previous", "next": "Next ▶", "last": "Last ⏭"}
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(label=self.LABELS[kind], style=discord.ButtonStyle.secondary, row=2)
 
     async def callback(self, interaction: discord.Interaction):
         view: LeaderboardView = self.view  # type: ignore[assignment]
-        view.page += self.direction
+        if self.kind == "first":
+            view.page = 0
+        elif self.kind == "prev":
+            view.page -= 1
+        elif self.kind == "next":
+            view.page += 1
+        else:
+            view.page = 10 ** 9  # clamped to the last page when the embed is built
         await view.refresh(interaction)
 
 
@@ -354,8 +364,8 @@ class LeaderboardView(discord.ui.View):
         self.clear_items()
         self.add_item(CategorySelect(self))
         self.add_item(MetricSelect(self))
-        self.add_item(PageButton(-1))
-        self.add_item(PageButton(1))
+        for kind in ("first", "prev", "next", "last"):
+            self.add_item(PageButton(kind))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -383,12 +393,13 @@ class LeaderboardView(discord.ui.View):
                 value = _team_value(self.metric_key, t, guild)
                 if value is not None:
                     computed.append((team_id, value))
-        elif self.category == "Batter Impact":
+        elif self.metric_key in BATTER_IMPACT_KEYS:
             # Re-read the database on every render so owner edits/resets appear
             # when the leaderboard is refreshed, not only after a bot restart.
             self.cog.batter_impact_by_user = self.cog._batter_impact_rows(guild.id)
+            index = BATTER_IMPACT_KEYS[self.metric_key]
             for uid, rec in self.cog.batter_impact_by_user.items():
-                value = int(rec[0] if self.metric_key == "runs_after_drops" else rec[1])
+                value = int(rec[index])
                 if value > 0:
                     computed.append((uid, value))
         else:
@@ -426,8 +437,9 @@ class LeaderboardView(discord.ui.View):
             lines.append(f"`{index}.` **{discord.utils.escape_markdown(username)}** → `{_display(self.metric_key, value)}`")
         embed.description += "\n".join(lines) if lines else "No players qualify for this statistic yet."
         embed.set_footer(text=f"Kashmir Titans S1 • Page {self.page + 1}/{pages} • {PAGE_SIZE} {noun} per page")
-        self.children[-2].disabled = self.page == 0
-        self.children[-1].disabled = self.page >= pages - 1
+        for child in self.children:
+            if isinstance(child, PageButton):
+                child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
         return embed
 
     async def refresh(self, interaction: discord.Interaction):
@@ -442,16 +454,16 @@ class LeaderboardCog(commands.Cog):
         self.bot = bot
         self.rows_by_user: dict[int, list[dict]] = {}
         self.fielding_by_user: dict[int, tuple[int, int]] = {}
-        self.batter_impact_by_user: dict[int, tuple[int, int]] = {}
+        self.batter_impact_by_user: dict[int, tuple[int, int, int]] = {}
 
-    def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
-        """Return {user_id: (runs_affected, runs_without_drops)} for this server."""
+    def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int, int]]:
+        """Return {user_id: (runs_affected, runs_without_drops, drops)} for this server."""
         db = getattr(self.bot, "db", None)
         if db is None:
             return {}
         try:
             rows = db.execute(
-                "SELECT user_id, runs_affected, runs_without_drops "
+                "SELECT user_id, runs_affected, runs_without_drops, drops "
                 "FROM batter_drop_lb WHERE guild_id = ?",
                 (guild_id,),
             ).fetchall()
@@ -459,7 +471,7 @@ class LeaderboardCog(commands.Cog):
             # batfds may not have been loaded yet; keep the rest of +lb usable.
             return {}
         return {
-            int(row["user_id"]): (int(row["runs_affected"]), int(row["runs_without_drops"]))
+            int(row["user_id"]): (int(row["runs_affected"]), int(row["runs_without_drops"]), int(row["drops"]))
             for row in rows
         }
 

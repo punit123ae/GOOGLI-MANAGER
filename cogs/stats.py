@@ -1224,6 +1224,17 @@ class Stats(commands.Cog):
         caught, dropped = (int(row[0]), int(row[1])) if row else (0, 0)
         return caught, dropped, caught * 5 - dropped * 10
 
+    def get_batter_drops(self, guild_id, user_id):
+        """How many of this batter's catches were dropped (batter_drop_lb.drops)."""
+        try:
+            row = self.db.execute(
+                "SELECT drops FROM batter_drop_lb WHERE guild_id=? AND user_id=?",
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+        except Exception:
+            return 0
+        return int(row[0]) if row else 0
+
     def get_batter_impact(self, guild_id, user_id):
         """Return (runs_after_catch_drops, runs_without_catch_drops) for this server/player.
 
@@ -1825,6 +1836,7 @@ class Stats(commands.Cog):
             ctx.guild.id, member.id
         )
         runs_after_drops, runs_without_drops = self.get_batter_impact(ctx.guild.id, member.id)
+        batter_drops = self.get_batter_drops(ctx.guild.id, member.id)
 
         try:
             if design == 2:
@@ -1876,6 +1888,12 @@ class Stats(commands.Cog):
         overs_whole = t["balls_bowled"] // 6
         overs_remainder = t["balls_bowled"] % 6
         overs_text = f"{overs_whole}.{overs_remainder}"
+        _best_bowl = max(
+            (r for r in rows if r["balls_bowled"] > 0),
+            key=lambda r: (r["wickets"], -r["runs_conceded"]),
+            default=None,
+        )
+        overview_best_bowling = f"{_best_bowl['wickets']}/{_best_bowl['runs_conceded']}" if _best_bowl else "0/0"
         embed = discord.Embed(
             title=f"{member.display_name} stats for `KASHMIR TITANS S1`",
             description=f"**MATCHES RECORDED:** `{t['matches']}`",
@@ -1907,7 +1925,7 @@ class Stats(commands.Cog):
                 f"**3W hauls:** `{sum(3 <= r['wickets'] < 5 for r in rows)}`\n"
                 f"**5W hauls:** `{sum(5 <= r['wickets'] < 7 for r in rows)}`\n"
                 f"**Economy:** `{t['economy']:.2f}`\n"
-                f"**BFB:** `{t['balls_bowled']}`\n"
+                f"**BBF:** `{overview_best_bowling}`\n"
                 f"**Fantasy points:** `{bowling_points:.2f}`"
             ),
             inline=True,
@@ -1982,6 +2000,7 @@ class Stats(commands.Cog):
                 f"**Runs:** `{t['runs']}`\n"
                 f"**Runs without catch drops:** `{runs_without_drops}`\n"
                 f"**Runs after catch drops:** `{runs_after_drops}`\n"
+                f"**Catches dropped (as batter):** `{batter_drops}`\n"
                 f"**Balls played:** `{t['balls_faced']}`\n"
                 f"**Strike rate:** `{t['strike_rate']:.2f}`\n"
                 f"**Average:** `{t['bat_avg']:.2f}`\n"
