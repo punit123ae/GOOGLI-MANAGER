@@ -477,6 +477,13 @@ class BatterFieldingDropStats(commands.Cog):
                 PRIMARY KEY (guild_id, user_id))
         """)
         db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_unmatched (
+                guild_id INTEGER NOT NULL, name TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                last_seen TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, name))
+        """)
+        db.execute("""
             CREATE TABLE IF NOT EXISTS batter_drop_sessions (
                 guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
                 session_key TEXT NOT NULL, user_id INTEGER NOT NULL,
@@ -630,6 +637,21 @@ class BatterFieldingDropStats(commands.Cog):
             )
         return match_id, current_innings
 
+    def _note_unmatched(self, guild, name):
+        """Remember a batter name that matched no server member, so +previewlb can list it."""
+        try:
+            index = _name_index.get(guild.id) or _build_name_index(guild)
+            key = _clean_discord_name(name).lstrip("@")
+            shared = len(index["exact"].get(key, ()))
+            reason = f"shared by {shared} members" if shared > 1 else "no member has this name"
+            self.bot.db.execute("""
+                INSERT INTO batter_drop_unmatched(guild_id,name,reason,last_seen) VALUES(?,?,?,?)
+                ON CONFLICT(guild_id,name) DO UPDATE SET reason=excluded.reason, last_seen=excluded.last_seen
+            """, (guild.id, name, reason, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            self.bot.db.commit()
+        except Exception:
+            log.exception("batfds: could not record an unmatched batter name")
+
     def _add_to_preview(self, guild_id, user_id, drops, affected, without):
         self.bot.db.execute("""
             INSERT INTO batter_drop_preview
@@ -744,6 +766,7 @@ class BatterFieldingDropStats(commands.Cog):
             uid = find_member_id(message.guild, name)
             if not uid and (channel_id, name) not in self._warned_names:
                 self._warned_names.add((channel_id, name))
+                self._note_unmatched(message.guild, name)
                 log.warning("batfds: could not match batter %r to a member in channel %s; their runs are not tracked",
                             name, channel_id)
             if uid and not self._batter_done(guild_id, channel_id, session_key, uid):
@@ -1157,6 +1180,7 @@ class BatterFieldingDropStats(commands.Cog):
                         runs_without_drops=runs_without_drops+excluded.runs_without_drops
                 """, (guild_id, uid, matches, drops, affected, without))
             db.execute("DELETE FROM batter_drop_preview WHERE guild_id=?", (guild_id,))
+            db.execute("DELETE FROM batter_drop_unmatched WHERE guild_id=?", (guild_id,))
             # Finished drops now count towards each fielder's "runs cost by drops".
             db.execute(
                 "UPDATE fielder_drop_log SET committed=1 "
@@ -1191,6 +1215,20 @@ class BatterFieldingDropStats(commands.Cog):
         embed = discord.Embed(title="Preview Batter Impact Leaderboard", description="\n".join(lines)[:4000],
                               colour=discord.Colour.blurple())
         embed.set_footer(text="Live provisional figures are included. Commit only after every tracked match has ended.")
+        unmatched = self.bot.db.execute(
+            "SELECT name,reason FROM batter_drop_unmatched WHERE guild_id=? ORDER BY name",
+            (ctx.guild.id,),
+        ).fetchall()
+        if unmatched:
+            shown = [f"`{n}` ({r})" for n, r in unmatched[:20]]
+            more = f"\n…and {len(unmatched) - 20} more." if len(unmatched) > 20 else ""
+            embed.add_field(
+                name=f"⚠️ {len(unmatched)} batter name(s) could not be matched",
+                value=(", ".join(shown) + more +
+                       "\nThese players are missing above. After committing, run `+auditbatterimpact` "
+                       "then `+fixbatterimpact` to restore their runs.")[:1024],
+                inline=False,
+            )
         await ctx.send(embed=embed)
 
     @previewlb.command(name="markended")
@@ -1349,9 +1387,15 @@ class BatterFieldingDropStats(commands.Cog):
         if not count:
             return await ctx.reply("Preview leaderboard is empty; nothing to commit.", mention_author=False)
         view = CommitConfirmView(self, ctx)
+        unmatched = self.bot.db.execute(
+            "SELECT COUNT(*) FROM batter_drop_unmatched WHERE guild_id=?", (ctx.guild.id,)
+        ).fetchone()[0]
+        warning = (f"\n⚠️ **{unmatched}** batter name(s) could not be matched to a member, so those players are "
+                   "not in this preview. See `+previewlb`; fix them afterwards with `+auditbatterimpact` and "
+                   "`+fixbatterimpact`.") if unmatched else ""
         await ctx.send(
             f"Commit the current preview stats for **{count} players** to the permanent `+lb`? "
-            "A backup will be created and the preview will then be reset.",
+            "A backup will be created and the preview will then be reset." + warning,
             view=view,
         )
 
