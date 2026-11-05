@@ -440,6 +440,31 @@ class CatchTracker(commands.Cog):
         opponent = max(counts, key=lambda t: (counts[t], -t))
         return rosters[opponent]["name"]
 
+    def _drop_cost(self, guild_id, user_id):
+        """(drops, runs cost) for this fielder from committed drops, or (0, 0).
+
+        The cost of a drop is the batter's final score minus their score at the drop.
+        If one fielder drops the same batter more than once in an innings, only the
+        runs since the first of those drops are counted, so no run is charged twice.
+        """
+        try:
+            row = self.bot.db.execute(
+                """
+                SELECT COALESCE(SUM(drops), 0), COALESCE(SUM(cost), 0) FROM (
+                    SELECT COUNT(*) AS drops,
+                           MAX(0, MAX(final_score) - MIN(score_at_drop)) AS cost
+                    FROM fielder_drop_log
+                    WHERE guild_id = ? AND fielder_id = ?
+                      AND committed = 1 AND final_score IS NOT NULL
+                    GROUP BY channel_id, session_key, batter_id
+                )
+                """,
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+        except Exception:
+            return 0, 0
+        return (int(row[0]), int(row[1])) if row else (0, 0)
+
     def _recent_field_value(self, guild_id, user_id):
         rows = self._recent_matches(guild_id, user_id)
         if not rows:
@@ -500,6 +525,13 @@ class CatchTracker(commands.Cog):
             inline=False,
         )
         if recent:
+            drops, cost = self._drop_cost(guild.id, user_id)
+            if drops:
+                embed.add_field(
+                    name="RUNS COST BY DROPS",
+                    value=f"`{cost}` runs from `{drops}` tracked drop(s)",
+                    inline=False,
+                )
             embed.add_field(
                 name="RECENT 5 MATCHES",
                 value=self._recent_field_value(guild.id, user_id),

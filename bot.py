@@ -49,6 +49,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.batfds",
             "cogs.fielderlines",
             "cogs.team_emojis",
+            "cogs.h2h",
         ):
             await self.load_extension(extension)
 

@@ -1127,6 +1127,28 @@ class Stats(commands.Cog):
         )
         self.db.commit()
 
+    def _saved_opponent(self, match_id, user_id):
+        """Opponent team of this player in one match, from the teams saved at import.
+
+        Returns None for matches imported before team names were saved, or when
+        the player or the other side has no saved team.
+        """
+        try:
+            rows = self.db.execute(
+                "SELECT user_id, team_name FROM match_teams WHERE source_message_id = ?",
+                (int(match_id),),
+            ).fetchall()
+        except Exception:
+            return None
+        mine = next((r[1] for r in rows if int(r[0]) == int(user_id)), None)
+        if mine is None:
+            return None
+        counts = {}
+        for _, team in rows:
+            if team != mine:
+                counts[team] = counts.get(team, 0) + 1
+        return max(counts, key=lambda t: (counts[t], t)) if counts else None
+
     def _match_team_snapshot(self, guild_id, user_ids):
         """{user_id: team name} from the current approved rosters, for players on a team.
 
@@ -2017,11 +2039,29 @@ class Stats(commands.Cog):
                 f"{row['wickets']}/{row['runs_conceded']}"
                 if int(row["balls_bowled"]) > 0 else "DNB"
             )
+            opponent = self._saved_opponent(row["source_message_id"], member.id)
+            versus = f"vs **{discord.utils.escape_markdown(opponent)}**\n　" if opponent else ""
             recent_lines.append(
-                f"**{index}.** <:cricketbat:1561294474951393360> `{batting_text}`  ·  "
+                f"**{index}.** {versus}<:cricketbat:1561294474951393360> `{batting_text}`  ·  "
                 f"<:cricketball:1561294577392951338> `{bowling_text}`  ·  {fielding_text}"
             )
         recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
+        if recent_rows:
+            # Recent form: the same last-5 matches rolled up into one line each for batting and bowling.
+            form = totals(recent_rows)
+            form_bat = (
+                f"`{form['runs']}` runs • avg `{form['bat_avg']:.2f}` • SR `{form['strike_rate']:.1f}`"
+                if form["balls_faced"] > 0 else "`Did not bat`"
+            )
+            form_bowl = (
+                f"`{form['wickets']}` wkts • econ `{form['economy']:.2f}`"
+                if form["balls_bowled"] > 0 else "`Did not bowl`"
+            )
+            recent_text += (
+                f"\n\n**Form (last {len(recent_rows)}):**\n"
+                f"<:cricketbat:1561294474951393360> {form_bat}\n"
+                f"<:cricketball:1561294577392951338> {form_bowl}"
+            )
         best_batting_text = (
             f"{best_batting['runs']} ({best_batting['balls_faced']})"
             f"{'*' if best_batting['not_out'] else ''}"
