@@ -988,6 +988,13 @@ class ResetServerStatsView(discord.ui.View):
 
         with self.cog.db:
             self.cog.db.execute(
+                """DELETE FROM match_teams
+                   WHERE source_message_id IN (
+                       SELECT source_message_id FROM stats_imports WHERE guild_id = ?
+                   )""",
+                (self.guild_id,),
+            )
+            self.cog.db.execute(
                 """DELETE FROM player_match_stats
                    WHERE source_message_id IN (
                        SELECT source_message_id FROM stats_imports WHERE guild_id = ?
@@ -1096,6 +1103,18 @@ class Stats(commands.Cog):
             )
             """
         )
+        # Each player's team as it was when the match was imported, so a later
+        # transfer does not change who a past match was played against.
+        self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_teams (
+                source_message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                team_name TEXT NOT NULL,
+                PRIMARY KEY (source_message_id, user_id)
+            )
+            """
+        )
         self.db.execute(
             """
             CREATE TABLE IF NOT EXISTS raw_stats_report_channels (
@@ -1107,6 +1126,24 @@ class Stats(commands.Cog):
             """
         )
         self.db.commit()
+
+    def _match_team_snapshot(self, guild_id, user_ids):
+        """{user_id: team name} from the current approved rosters, for players on a team.
+
+        Never raises: if the team data is unavailable the match is simply imported
+        without a snapshot and the opponent falls back to the current rosters.
+        """
+        try:
+            from .lb import _team_rosters  # lazy: lb imports this module
+            wanted = {int(u) for u in user_ids}
+            snapshot = {}
+            for team in _team_rosters(int(guild_id)).values():
+                for uid in team["members"]:
+                    if uid in wanted:
+                        snapshot[uid] = str(team["name"])
+            return snapshot
+        except Exception:
+            return {}
 
     def get_raw_stats_report_channel_id(self, guild_id):
         row = self.db.execute(
@@ -1497,6 +1534,8 @@ class Stats(commands.Cog):
                 )
                 return
 
+        team_snapshot = self._match_team_snapshot(ctx.guild.id, [row[0] for row in rows])
+
         try:
             with self.db:
                 self.db.execute(
@@ -1530,6 +1569,11 @@ class Stats(commands.Cog):
                       int(catch_counts.get(uid, {}).get("dropped", 0)))
                      for uid in set(catch_opportunities) | set(catch_counts)]
                 )
+                if team_snapshot:
+                    self.db.executemany(
+                        "INSERT OR REPLACE INTO match_teams (source_message_id, user_id, team_name) VALUES (?, ?, ?)",
+                        [(source.id, int(uid), name) for uid, name in team_snapshot.items()],
+                    )
         except Exception as exc:
             if (
                 "UNIQUE constraint failed" in str(exc)
@@ -1632,6 +1676,10 @@ class Stats(commands.Cog):
             )
             self.db.execute(
                 "DELETE FROM player_match_fielding WHERE source_message_id = ?",
+                (source.id,),
+            )
+            self.db.execute(
+                "DELETE FROM match_teams WHERE source_message_id = ?",
                 (source.id,),
             )
             self.db.execute(
