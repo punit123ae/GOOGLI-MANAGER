@@ -356,7 +356,8 @@ class CatchTracker(commands.Cog):
         try:
             rows = self.bot.db.execute(
                 """
-                SELECT i.imported_at, f.opportunities, f.catches_taken, f.catches_dropped
+                SELECT i.imported_at, f.opportunities, f.catches_taken, f.catches_dropped,
+                       f.source_message_id
                 FROM player_match_fielding f
                 JOIN stats_imports i ON i.source_message_id = f.source_message_id
                 WHERE i.guild_id = ? AND f.user_id = ?
@@ -367,17 +368,59 @@ class CatchTracker(commands.Cog):
             ).fetchall()
         except Exception:
             return []
-        return [(float(r[0]), int(r[1]), int(r[2]), int(r[3])) for r in rows]
+        return [
+            (float(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4])) for r in rows
+        ]
+
+    def _opponent_name(self, match_id, user_id, rosters, team_of):
+        """Name of the team the player faced in this match, or None if unknown.
+
+        Match records only store players, not teams, so the opponent is the other
+        team with the most players in that match (using current team rosters).
+        """
+        my_team = team_of.get(user_id)
+        if my_team is None:
+            return None
+        try:
+            rows = self.bot.db.execute(
+                "SELECT user_id FROM player_match_stats WHERE source_message_id = ?",
+                (int(match_id),),
+            ).fetchall()
+        except Exception:
+            return None
+        counts = {}
+        for (uid,) in rows:
+            team_id = team_of.get(int(uid))
+            if team_id is not None and team_id != my_team:
+                counts[team_id] = counts.get(team_id, 0) + 1
+        if not counts:
+            return None
+        opponent = max(counts, key=lambda t: (counts[t], -t))
+        return rosters[opponent]["name"]
 
     def _recent_field_value(self, guild_id, user_id):
         rows = self._recent_matches(guild_id, user_id)
         if not rows:
             return "No match records yet."
+        # Reuse the roster logic from lb.py to map players to their teams.
+        try:
+            from .lb import _team_rosters
+            rosters = _team_rosters(guild_id)
+        except Exception:
+            rosters = {}
+        team_of = {
+            uid: team_id for team_id, t in rosters.items() for uid in t["members"]
+        }
         lines = []
-        for i, (ts, opps, taken, dropped) in enumerate(rows, start=1):
+        for i, (ts, opps, taken, dropped, match_id) in enumerate(rows, start=1):
             chances = max(opps, taken + dropped)
+            opponent = self._opponent_name(match_id, user_id, rosters, team_of)
+            if opponent:
+                label = f"vs **{discord.utils.escape_markdown(opponent)}**"
+            else:
+                label = f"<t:{int(ts)}:d>"  # opponent unknown: fall back to the date
             lines.append(
-                f"`{i}.` <t:{int(ts)}:d> → `{taken}` caught • `{dropped}` dropped • `{chances}` chances"
+                f"`{i}.` {label} → `{taken}` caught • `{dropped}` dropped • `{chances}` chances"
             )
         total_taken = sum(r[2] for r in rows)
         total_dropped = sum(r[3] for r in rows)
