@@ -1,6 +1,8 @@
 """Manual group points tables rendered on the KT league-table template."""
 
+import asyncio
 import io
+import re
 import sqlite3
 from pathlib import Path
 
@@ -13,24 +15,37 @@ from .utility import owner_or_whitelisted
 
 
 POINTS_DB = Path("points_table.db")
-TEMPLATE = Path(__file__).with_name("points_table_background.jpeg")
+TEMPLATE = Path(__file__).with_name("points_table_landscape_bg.png")
+
+# Rendered group images are saved here and only re-drawn when results change
+# (+addresult / +setpt). +points just sends the saved files.
+CACHE_DIR = Path("points_cache")
 
 MAX_ROWS = 11
 POINTS_PER_WIN = 2
 
-# Exact row centres for the supplied 1080x1350 template.
-ROW_CENTRES = [328, 430, 515, 600, 685, 770, 854, 938, 1022, 1105, 1182]
+# Layout for the 1376x768 landscape template.
+ROW0_Y = 296        # centre of row 1
+ROW_H = 39.9        # distance between row centres
 
-# Table column positions.
-RANK_X = 145
-TEAM_X = 169
-PL_X = 447
-W_X = 560
-L_X = 678
-PTS_X = 765
+
+def row_y(index):
+    return round(ROW0_Y + ROW_H * index)
+
+
+TEAM_X = 215        # team names are left aligned here
+PL_X = 636          # centre of the P column
+W_X = 740           # centre of the W column
+L_X = 844           # centre of the L column
+PTS_X = 967         # centre of the POINTS column
+FORM_LEFT = 1038    # FORM column spans FORM_LEFT..FORM_RIGHT (5 slots)
+FORM_RIGHT = 1276
+GROUP_LABEL_POS = (688, 744)
 
 WHITE = (255, 255, 255)
-LIME = (190, 239, 28)
+GREEN = (46, 230, 90)
+RED = (255, 64, 64)
+CYAN = (0, 229, 255)
 
 
 def connect_points_db():
@@ -59,6 +74,17 @@ def connect_points_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_team_match_history_lookup
         ON team_match_history (guild_id, team_name_key, id DESC)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS imported_match_results (
+            guild_id INTEGER NOT NULL,
+            match_no TEXT NOT NULL,
+            winner_team_key TEXT NOT NULL,
+            loser_team_key TEXT NOT NULL,
+            imported_by INTEGER NOT NULL,
+            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (guild_id, match_no)
+        )
     """)
     conn.commit()
     return conn
@@ -151,30 +177,28 @@ def fit_font(draw, text, max_width, start_size, min_size=14):
 
 
 
-def draw_form_badge(draw, x, y, result):
-    """Draw one of the last-five W/L form circles."""
-    if result == "W":
-        fill = (38, 169, 47)
-    else:
-        fill = (255, 58, 63)
-
-    radius = 13
-    draw.ellipse(
-        (x - radius, y - radius, x + radius, y + radius),
-        fill=fill,
-    )
-    font = load_font(15, bold=True)
-    draw.text((x, y + 1), result, font=font, fill=WHITE, anchor="mm")
-
-
 def draw_form(draw, y, history):
-    # Corrected vertically to sit centred on the row, not above it.
-    # Oldest -> newest left to right.
-    positions = [852, 882, 912, 942, 972]
-    recent = list(history)[-5:]
+    """Last five results as coloured letters, oldest on the left.
 
-    for x, result in zip(positions[-len(recent):], recent):
-        draw_form_badge(draw, x, y, result)
+    With fewer than five matches the letters fill slots from the left; once a
+    6th match is played the oldest result drops off and the newest is added on
+    the right (history is already trimmed to the last 5 by the caller).
+    """
+    recent = list(history)[-5:]
+    slot_width = (FORM_RIGHT - FORM_LEFT) / 5
+    form_font = load_font(26, ang=True)
+
+    for slot, result in enumerate(recent):
+        x = FORM_LEFT + slot_width * (slot + 0.5)
+        colour = GREEN if result == "W" else RED
+        draw_centered(draw, round(x), y, result, form_font, fill=colour)
+
+
+def group_label(group_name):
+    name = str(group_name).strip()
+    if name.casefold().startswith("group"):
+        return name.upper()
+    return f"GROUP {name.upper()}"
 
 
 def make_table_image(group_name, rows):
@@ -186,24 +210,18 @@ def make_table_image(group_name, rows):
     image = Image.open(TEMPLATE).convert("RGB")
     draw = ImageDraw.Draw(image)
 
-    # The supplied background already contains "Group A".
-    # For B/C, cover only the A character and draw the requested letter.
-    group_letter = str(group_name).strip().upper()
-    if group_letter != "A":
-        # Sample the nearby background colour so only the letter changes.
-        cover = image.crop((215, 188, 252, 222)).resize((1, 1)).getpixel((0, 0))
-        draw.rectangle((214, 186, 254, 224), fill=cover)
-        group_font = load_font(31, ang=True)
-        draw.text((217, 208), group_letter, font=group_font, fill=LIME, anchor="lm")
+    # Group name under the table.
+    draw_centered(
+        draw, GROUP_LABEL_POS[0], GROUP_LABEL_POS[1],
+        group_label(group_name), load_font(34, ang=True), fill=CYAN,
+    )
 
-    rank_font = load_font(25, ang=True)
-    team_start_size = 23
-    stat_font = load_font(25, ang=True)
+    team_start_size = 27
+    stat_font = load_font(26, ang=True)
 
     for index, row in enumerate(rows[:MAX_ROWS]):
-        y = ROW_CENTRES[index]
+        y = row_y(index)
 
-        rank = index + 1
         name = str(row["team_name"])
         wins = int(row["matches_won"])
         losses = int(row["matches_lost"])
@@ -212,18 +230,15 @@ def make_table_image(group_name, rows):
 
         # Rank numbers are already printed on the template - don't redraw them.
 
-        # Team name
-        team_font = fit_font(draw, name, max_width=235, start_size=team_start_size)
+        # Team name (white)
+        team_font = fit_font(draw, name, max_width=350, start_size=team_start_size)
         draw.text((TEAM_X, y), name.upper(), font=team_font, fill=WHITE, anchor="lm")
 
-        # Statistics
-        draw_centered(draw, PL_X, y, played, stat_font)
-        draw_centered(draw, W_X, y, wins, stat_font)
-        draw_centered(draw, L_X, y, losses, stat_font)
-
-        # PTS is slightly heavier in the reference.
-        pts_font = load_font(27, ang=True, bold=True)
-        draw_centered(draw, PTS_X, y, points, pts_font)
+        # P (white), W (green), L (red), POINTS (white)
+        draw_centered(draw, PL_X, y, played, stat_font, fill=WHITE)
+        draw_centered(draw, W_X, y, wins, stat_font, fill=GREEN)
+        draw_centered(draw, L_X, y, losses, stat_font, fill=RED)
+        draw_centered(draw, PTS_X, y, points, stat_font, fill=WHITE)
 
         # Latest five match results, oldest -> newest.
         draw_form(draw, y, row.get("history", []))
@@ -232,6 +247,61 @@ def make_table_image(group_name, rows):
     image.save(output, format="PNG", optimize=True)
     output.seek(0)
     return output
+
+
+def cache_file(guild_id, group_key):
+    safe_key = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(group_key))
+    return CACHE_DIR / f"points_{guild_id}_{safe_key}.png"
+
+
+class PointsPagesView(discord.ui.View):
+    """Prev / Next buttons that flip between the saved group images."""
+
+    def __init__(self, owner_id, pages):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.pages = pages          # list of (group_name, png_bytes)
+        self.index = 0
+        self.message = None
+
+    def _file(self):
+        group_name, data = self.pages[self.index]
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in group_name)
+        return discord.File(io.BytesIO(data), filename=f"points_{safe}.png")
+
+    def content(self):
+        return f"Page {self.index + 1}/{len(self.pages)}"
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "Run `+points` yourself to flip through the pages.", ephemeral=True
+        )
+        return False
+
+    async def _turn(self, interaction, step):
+        self.index = (self.index + step) % len(self.pages)
+        await interaction.response.edit_message(
+            content=self.content(), attachments=[self._file()], view=self
+        )
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_page(self, interaction, button):
+        await self._turn(interaction, -1)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary)
+    async def next_page(self, interaction, button):
+        await self._turn(interaction, 1)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 class PointsTable(commands.Cog):
@@ -339,6 +409,36 @@ class PointsTable(commands.Cog):
         )
 
         return group["group_name"], rows
+
+    def _configured_groups(self, guild_id):
+        group_conn = sqlite3.connect(GROUP_DB)
+        group_conn.row_factory = sqlite3.Row
+        try:
+            return group_conn.execute(
+                """
+                SELECT group_key, group_name
+                FROM group_styles
+                WHERE guild_id=?
+                ORDER BY position
+                """,
+                (guild_id,),
+            ).fetchall()
+        finally:
+            group_conn.close()
+
+    def _render_and_save_guild(self, guild_id):
+        """Draw every group's table and save the PNGs. Runs in a worker thread."""
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        for group in self._configured_groups(guild_id):
+            group_name, rows = self._group_data(guild_id, group["group_key"])
+            if not rows:
+                continue
+            image = make_table_image(group_name, rows[:MAX_ROWS])
+            cache_file(guild_id, group["group_key"]).write_bytes(image.getvalue())
+
+    async def _sync_points_images(self, guild_id):
+        """Re-draw and save the points-table images (only called when results change)."""
+        await asyncio.to_thread(self._render_and_save_guild, guild_id)
 
     @commands.command(name="setpt")
     @commands.guild_only()
@@ -463,10 +563,148 @@ class PointsTable(commands.Cog):
 
         group_name = group_row[0] if group_row else team["group_key"]
 
+        await self._sync_points_images(ctx.guild.id)
+
         await ctx.reply(
             f"✅ Updated **{team['team_name']}** in Group **{group_name}**.\n"
             f"Wins: **{wins}** | Losses: **{losses}** | "
             f"Points: **{wins * POINTS_PER_WIN}** (2 per win).",
+            mention_author=False,
+        )
+
+    async def _addresult_from_reply(self, ctx):
+        """Import both teams' W/L from a reply to a published match result."""
+        reference = ctx.message.reference
+        if reference is None or reference.message_id is None:
+            await ctx.reply(
+                "Reply to a match result message in the results channel, then run `+addresult`.",
+                mention_author=False,
+            )
+            return
+
+        replied = reference.resolved
+        if not isinstance(replied, discord.Message):
+            try:
+                channel_id = getattr(reference, "channel_id", None) or ctx.channel.id
+                channel = ctx.guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+                replied = await channel.fetch_message(reference.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                await ctx.reply("I couldn't fetch the message you replied to.", mention_author=False)
+                return
+
+        if replied.guild is None or replied.guild.id != ctx.guild.id:
+            await ctx.reply("The replied result must be from this server.", mention_author=False)
+            return
+        if replied.author.id != self.bot.user.id:
+            await ctx.reply("Reply directly to a match-result message posted by this bot.", mention_author=False)
+            return
+
+        body = replied.content.strip()
+        match_header = re.search(r"^# __Match (.+?)__\s*\n\*\*(.+?) vs (.+?)\*\*", body, re.IGNORECASE)
+        winner_line = re.search(r">\s*\*{3}\[(.+?)\]\((https?://[^)]+)\)\s+won by\s+\d+\s+(?:runs?|wickets?)\*{3}", body, re.IGNORECASE)
+        if not match_header or not winner_line:
+            await ctx.reply(
+                "That message doesn't match the published match-result format. "
+                "Reply to the actual result post; its format remains unchanged.",
+                mention_author=False,
+            )
+            return
+
+        match_no = match_header.group(1).strip()
+        team_a_name = match_header.group(2).strip()
+        team_b_name = match_header.group(3).strip()
+        winner_name = winner_line.group(1).strip()
+
+        if norm(team_a_name) == norm(team_b_name):
+            await ctx.reply("The result message contains the same team twice.", mention_author=False)
+            return
+
+        if norm(winner_name) == norm(team_a_name):
+            winner_input, loser_input = team_a_name, team_b_name
+        elif norm(winner_name) == norm(team_b_name):
+            winner_input, loser_input = team_b_name, team_a_name
+        else:
+            await ctx.reply("The winner listed in the result doesn't match either team.", mention_author=False)
+            return
+
+        group_conn = sqlite3.connect(GROUP_DB)
+        group_conn.row_factory = sqlite3.Row
+        try:
+            assigned = group_conn.execute(
+                "SELECT team_name, team_name_key FROM team_groups WHERE guild_id=?",
+                (ctx.guild.id,),
+            ).fetchall()
+            def resolve_team(supplied):
+                key = norm(supplied)
+                return next((row for row in assigned
+                             if norm(row["team_name"]) == key or norm(row["team_name_key"]) == key), None)
+            winner = resolve_team(winner_input)
+            loser = resolve_team(loser_input)
+        finally:
+            group_conn.close()
+
+        if winner is None or loser is None:
+            missing = winner_input if winner is None else loser_input
+            await ctx.reply(
+                f"Couldn't match **{missing}** to a team assigned with `+setteamgroups`. "
+                "Make sure both teams are assigned to the points table.",
+                mention_author=False,
+            )
+            return
+        if winner["team_name_key"] == loser["team_name_key"]:
+            await ctx.reply("Both result teams resolved to the same points-table team.", mention_author=False)
+            return
+
+        conn = connect_points_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            duplicate = conn.execute(
+                "SELECT 1 FROM imported_match_results WHERE guild_id=? AND match_no=?",
+                (ctx.guild.id, match_no),
+            ).fetchone()
+            if duplicate:
+                conn.rollback()
+                await ctx.reply(f"Match **{match_no}** has already been imported into the points table.", mention_author=False)
+                return
+
+            conn.execute(
+                "INSERT INTO imported_match_results (guild_id, match_no, winner_team_key, loser_team_key, imported_by) VALUES (?, ?, ?, ?, ?)",
+                (ctx.guild.id, match_no, winner["team_name_key"], loser["team_name_key"], ctx.author.id),
+            )
+
+            for team, result in ((winner, "W"), (loser, "L")):
+                conn.execute(
+                    """
+                    INSERT INTO team_points
+                        (guild_id, team_name_key, matches_won, matches_lost, updated_by, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id, team_name_key) DO UPDATE SET
+                        matches_won=team_points.matches_won + excluded.matches_won,
+                        matches_lost=team_points.matches_lost + excluded.matches_lost,
+                        updated_by=excluded.updated_by,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (ctx.guild.id, team["team_name_key"], 1 if result == "W" else 0,
+                     1 if result == "L" else 0, ctx.author.id),
+                )
+                conn.execute(
+                    "INSERT INTO team_match_history (guild_id, team_name_key, result) VALUES (?, ?, ?)",
+                    (ctx.guild.id, team["team_name_key"], result),
+                )
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        await self._sync_points_images(ctx.guild.id)
+
+        await ctx.reply(
+            f"✅ Imported **Match {match_no}** into the points table.\n"
+            f"🏆 **{winner['team_name']}**: +1 Win, +{POINTS_PER_WIN} Points\n"
+            f"**{loser['team_name']}**: +1 Loss, +0 Points\n"
+            "Both teams' PL/W/L/PTS and recent form have been updated.",
             mention_author=False,
         )
 
@@ -475,6 +713,10 @@ class PointsTable(commands.Cog):
     async def add_result(self, ctx, *, arguments: str = ""):
         """Record one match result and automatically update W/L/PTS."""
         if not await self._allowed(ctx):
+            return
+
+        if not arguments.strip():
+            await self._addresult_from_reply(ctx)
             return
 
         parts = arguments.rsplit(maxsplit=1)
@@ -588,6 +830,8 @@ class PointsTable(commands.Cog):
         finally:
             conn.close()
 
+        await self._sync_points_images(ctx.guild.id)
+
         await ctx.reply(
             f"✅ Recorded **{result}** for **{team['team_name']}**.\n"
             f"PL: **{wins + losses}** | W: **{wins}** | "
@@ -597,22 +841,9 @@ class PointsTable(commands.Cog):
 
     @commands.command(name="points")
     @commands.guild_only()
-    async def points(self, ctx, group: str = "all"):
-        """Generate one group or all group points-table images."""
-        group_conn = sqlite3.connect(GROUP_DB)
-        group_conn.row_factory = sqlite3.Row
-        try:
-            configured = group_conn.execute(
-                """
-                SELECT group_key, group_name
-                FROM group_styles
-                WHERE guild_id=?
-                ORDER BY position
-                """,
-                (ctx.guild.id,),
-            ).fetchall()
-        finally:
-            group_conn.close()
+    async def points(self, ctx):
+        """Show the points table: one page per group (A, B, C), flip with the buttons."""
+        configured = self._configured_groups(ctx.guild.id)
 
         if not configured:
             await ctx.reply(
@@ -622,75 +853,38 @@ class PointsTable(commands.Cog):
             )
             return
 
-        requested = group.strip().casefold()
-
-        if requested == "all":
-            targets = configured
-        else:
-            target = next(
-                (
-                    item for item in configured
-                    if item["group_key"].casefold() == requested
-                    or item["group_name"].casefold() == requested
-                ),
-                None,
-            )
-
-            if target is None:
-                await ctx.reply(
-                    "That group isn't configured. Use `+points A` or "
-                    "`+points all`.",
-                    mention_author=False,
-                )
-                return
-
-            targets = [target]
-
-        files = []
-
+        pages = []
         try:
-            for target in targets:
-                group_name, rows = self._group_data(
-                    ctx.guild.id,
-                    target["group_key"],
-                )
-
-                if not rows:
-                    await ctx.send(
-                        f"Group **{group_name}** has no assigned teams. "
-                        "Run `+setteamgroups` first."
-                    )
-                    continue
-
-                if len(rows) > MAX_ROWS:
-                    await ctx.send(
-                        f"⚠️ Group **{group_name}** has {len(rows)} teams; "
-                        f"this template displays the first {MAX_ROWS} only."
-                    )
-
-                image = make_table_image(group_name, rows[:MAX_ROWS])
-
-                safe_name = "".join(
-                    ch if ch.isalnum() or ch in "-_" else "_"
-                    for ch in group_name
-                )
-
-                files.append(
-                    discord.File(
-                        image,
-                        filename=f"points_{safe_name}.png",
-                    )
-                )
-
+            for group in configured:
+                path = cache_file(ctx.guild.id, group["group_key"])
+                if not path.exists():
+                    # First use only: nothing saved yet, so draw everything once.
+                    await self._sync_points_images(ctx.guild.id)
+                if path.exists():
+                    pages.append((group["group_name"], path.read_bytes()))
         except (OSError, sqlite3.Error) as exc:
             await ctx.reply(
-                f"Couldn't generate the points table: {exc}",
+                f"Couldn't load the points table: {exc}",
                 mention_author=False,
             )
             return
 
-        if files:
-            await ctx.send(files=files)
+        if not pages:
+            await ctx.reply(
+                "No group has assigned teams yet. Run `+setteamgroups` first.",
+                mention_author=False,
+            )
+            return
+
+        if len(pages) == 1:
+            name, data = pages[0]
+            await ctx.send(file=discord.File(io.BytesIO(data), filename="points_table.png"))
+            return
+
+        view = PointsPagesView(ctx.author.id, pages)
+        view.message = await ctx.send(
+            content=view.content(), file=view._file(), view=view
+        )
 
 
 async def setup(bot):
