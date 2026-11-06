@@ -30,6 +30,7 @@ class GoogIManagerBot(commands.Bot):
         for extension in (
             "cogs.utility",
             "cogs.scheduling",
+            "cogs.matchday",
             "cogs.stats",
             "cogs.lb",
             "cogs.teams1",
