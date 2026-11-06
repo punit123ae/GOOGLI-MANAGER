@@ -174,6 +174,11 @@ CURATED = {
     "reserveaudit": ("Reserves", "Check reservations for problems (limits exceeded, duplicates, and so on).",
                      "+reserveaudit", WHITELIST),
     # ---------------------------------------------------------------- Groups & Schedules
+    "openmatch": ("Groups & Schedules", "Reply to the daily fixtures: unlocks each stadium, pings only the two "
+                  "captains, then tracks their messages and confirms the match time once both agree.",
+                  "+openmatch [match number]  (reply to the fixtures message)", WHITELIST),
+    "setconfirmrole": ("Groups & Schedules", "Set the role that is pinged when both captains agree on a match time.",
+                       "+setconfirmrole @role", WHITELIST),
     "groupstyle": ("Groups & Schedules", "Set the allowed group names, for example A, B, C, D.",
                    "+groupstyle", WHITELIST),
     "setteamgroups": ("Groups & Schedules", "Assign each approved team to a group (interactive).",
