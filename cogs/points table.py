@@ -1,6 +1,7 @@
 """Manual group points tables rendered on the KT league-table template."""
 
 import io
+import re
 import sqlite3
 from pathlib import Path
 
