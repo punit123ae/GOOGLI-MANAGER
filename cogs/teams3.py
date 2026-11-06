@@ -9,6 +9,48 @@ from discord.ext import commands
 
 from .teams1 import TeamCore, ConfirmDeleteAllView, TeamApprovalView, TeamListView, JoinRequestView, LeaveTeamConfirmView, CAPTAIN_EMOJI, VICE_CAPTAIN_EMOJI
 
+# Marks the player who ran +teaminfo in the comparison pages (their name is bold too).
+YOU_EMOJI = "⭐"
+
+
+def _bat_entry(rows):
+    """(sort key, text) for a player's batting line, or None if they have not batted."""
+    from .lb import _totals
+    t = _totals(rows)
+    if t["runs"] <= 0 and t["balls_faced"] <= 0:
+        return None
+    return (
+        (-t["runs"], -t["strike_rate"]),
+        f"`{t['runs']}` runs • avg `{t['bat_avg']:.2f}` • SR `{t['strike_rate']:.1f}` • `{len(rows)}` inn",
+    )
+
+
+def _bowl_entry(rows):
+    """(sort key, text) for a player's bowling line, or None if they have not bowled."""
+    from .lb import _totals
+    t = _totals(rows)
+    if t["balls_bowled"] <= 0 and t["wickets"] <= 0:
+        return None
+    balls = t["balls_bowled"]
+    economy = t["economy"] if balls else 0.0
+    average = f"{t['bowl_avg']:.2f}" if t["wickets"] else "-"
+    return (
+        (-t["wickets"], economy if balls else 99999),
+        f"`{t['wickets']}` wkts • econ `{economy:.2f}` • avg `{average}` • `{balls // 6}.{balls % 6}` ov",
+    )
+
+
+def _field_entry(rec):
+    """(sort key, text) for a player's fielding line, or None if they have not fielded."""
+    caught, dropped = rec
+    if caught + dropped <= 0:
+        return None
+    eff = caught / (caught + dropped) * 100
+    return (
+        (-caught, -eff),
+        f"`{caught}` caught • `{dropped}` dropped • eff `{eff:.1f}%`",
+    )
+
 class TeamCommandsB:
     """Command mixin; methods are registered by TeamRegistration in teams1.py."""
 
@@ -598,7 +640,134 @@ class TeamCommandsB:
         embed.add_field(name=f"Players ({len(ordered_ids)}/{self._max_players(ctx.guild.id)})", value="\n".join(roster) if roster else "No players yet.", inline=False)
         if team["logo_url"]:
             embed.set_thumbnail(url=team["logo_url"])
-        await ctx.send(embed=embed)
+
+        # Pages 2-4: batting, bowling and fielding comparison of the team's players.
+        # If anything is unavailable, fall back to the plain roster page.
+        try:
+            from .fielding import PagedEmbedView
+            pages = [embed] + self._team_comparison_pages(ctx, team, ordered_ids)
+            view = PagedEmbedView(ctx, pages)
+            view.message = await ctx.send(embed=embed, view=view)
+        except Exception as exc:
+            print(f"[teaminfo] comparison pages failed: {type(exc).__name__}: {exc}")
+            await ctx.send(embed=embed)
+
+    # ------------------------------------------------------------------ team comparison
+    def _team_stat_rows(self, guild_id):
+        """Per-match batting/bowling rows for this server: {user_id: [row dict, ...]}."""
+        db = getattr(self.bot, "db", None)
+        if db is None:
+            return {}
+        try:
+            rows = db.execute(
+                """SELECT p.user_id, p.runs, p.balls_faced, p.runs_conceded,
+                          p.balls_bowled, p.wickets, p.not_out
+                   FROM player_match_stats p
+                   JOIN stats_imports i ON i.source_message_id = p.source_message_id
+                   WHERE i.guild_id = ?""",
+                (int(guild_id),),
+            ).fetchall()
+        except Exception:
+            return {}
+        result = {}
+        for r in rows:
+            result.setdefault(int(r[0]), []).append({
+                "runs": int(r[1]), "balls_faced": int(r[2]), "runs_conceded": int(r[3]),
+                "balls_bowled": int(r[4]), "wickets": int(r[5]), "not_out": int(r[6]),
+            })
+        return result
+
+    def _team_fielding_totals(self, guild_id):
+        """Saved fielding totals for this server: {user_id: (caught, dropped)}."""
+        db = getattr(self.bot, "db", None)
+        if db is None:
+            return {}
+        try:
+            rows = db.execute(
+                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id = ?",
+                (int(guild_id),),
+            ).fetchall()
+        except Exception:
+            return {}
+        return {int(r[0]): (int(r[1]), int(r[2])) for r in rows}
+
+    def _comparison_page(self, ctx, team, title, entry_fn, data_by_user, member_ids, summary, empty_text):
+        """One ranked comparison page. The person who ran the command gets ⭐ and a bold name."""
+        guild = ctx.guild
+        you = ctx.author.id
+
+        def line(rank, uid, detail):
+            name = discord.utils.escape_markdown(self._username(guild, uid))
+            if uid == you:
+                return f"`{rank}.` {YOU_EMOJI} **{name}** → {detail}"
+            return f"`{rank}.` {name} → {detail}"
+
+        ranked = []
+        for uid in member_ids:
+            data = data_by_user.get(uid)
+            entry = entry_fn(data) if data else None
+            if entry:
+                ranked.append((entry[0], uid, entry[1]))
+        ranked.sort(key=lambda r: (r[0], r[1]))
+
+        lines = [line(i, uid, detail) for i, (_, uid, detail) in enumerate(ranked, start=1)]
+        body = "\n".join(lines) if lines else empty_text
+        embed = discord.Embed(
+            title=f"{title} • {team['name']}",
+            description=f"{summary}\n\n{body}",
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        if team["logo_url"]:
+            embed.set_thumbnail(url=team["logo_url"])
+
+        if you not in member_ids:
+            data = data_by_user.get(you)
+            entry = entry_fn(data) if data else None
+            your_name = discord.utils.escape_markdown(ctx.author.name)
+            mine = f"{YOU_EMOJI} **{your_name}** → {entry[1] if entry else 'no records yet'}"
+            embed.add_field(name="YOU (not on this team)", value=mine, inline=False)
+
+        silent = len(member_ids) - len(ranked)
+        note = f" • {silent} player(s) have no records" if silent > 0 else ""
+        embed.set_footer(text=f"{YOU_EMOJI} = you{note}")
+        return embed
+
+    def _team_comparison_pages(self, ctx, team, ordered_ids):
+        from .lb import _totals
+
+        # Same membership as +lb/+stats: captain, vice-captain, then the other players.
+        member_ids = list(dict.fromkeys(
+            [int(team["captain_id"])]
+            + ([int(team["vice_captain_id"])] if team["vice_captain_id"] else [])
+            + [int(uid) for uid in ordered_ids]
+        ))
+        stat_rows = self._team_stat_rows(ctx.guild.id)
+        fielding = self._team_fielding_totals(ctx.guild.id)
+
+        team_rows = [r for uid in member_ids for r in stat_rows.get(uid, [])]
+        t = _totals(team_rows)
+        bat_summary = (
+            f"**Team total:** `{t['runs']}` runs • avg `{t['bat_avg']:.2f}` • SR `{t['strike_rate']:.1f}`"
+        )
+        bowl_summary = (
+            f"**Team total:** `{t['wickets']}` wkts • econ `{t['economy']:.2f}` • "
+            f"`{t['balls_bowled'] // 6}.{t['balls_bowled'] % 6}` ov"
+        )
+        caught = sum(fielding.get(uid, (0, 0))[0] for uid in member_ids)
+        dropped = sum(fielding.get(uid, (0, 0))[1] for uid in member_ids)
+        eff = caught / (caught + dropped) * 100 if caught + dropped else 0.0
+        field_summary = (
+            f"**Team total:** `{caught}` caught • `{dropped}` dropped • eff `{eff:.1f}%`"
+        )
+
+        return [
+            self._comparison_page(ctx, team, "🏏 Batting comparison", _bat_entry, stat_rows,
+                                  member_ids, bat_summary, "No batting records for this team yet."),
+            self._comparison_page(ctx, team, "🎯 Bowling comparison", _bowl_entry, stat_rows,
+                                  member_ids, bowl_summary, "No bowling records for this team yet."),
+            self._comparison_page(ctx, team, "🧤 Fielding comparison", _field_entry, fielding,
+                                  member_ids, field_summary, "No fielding records for this team yet."),
+        ]
 
     @commands.command(name="kickplayer")
     @commands.guild_only()

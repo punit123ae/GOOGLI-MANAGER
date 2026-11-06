@@ -30,6 +30,7 @@ class GoogIManagerBot(commands.Bot):
         for extension in (
             "cogs.utility",
             "cogs.scheduling",
+            "cogs.matchday",
             "cogs.stats",
             "cogs.lb",
             "cogs.teams1",
@@ -49,6 +50,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.batfds",
             "cogs.fielderlines",
             "cogs.team_emojis",
+            "cogs.h2h",
         ):
             await self.load_extension(extension)
 

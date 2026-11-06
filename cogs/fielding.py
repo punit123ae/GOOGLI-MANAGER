@@ -19,6 +19,9 @@ PENDING_TTL_SECONDS = 120
 # Sanity cap for manually entered totals.
 MAX_MANUAL_TOTAL = 1_000_000
 PROMPT_TIMEOUT_SECONDS = 60
+# A player needs at least this many catch chances (caught + dropped) to be ranked and
+# get a "best / worst fielder" title, so one lucky catch can't make someone the best.
+MIN_LABEL_CHANCES = 3
 
 
 def _normalise_command_name(name):
@@ -47,15 +50,16 @@ def _efficiency(caught, dropped):
     return caught / total * 100 if total else 0.0
 
 
-def _rank_fielders(stats_by_user):
+def _rank_fielders(stats_by_user, min_chances=MIN_LABEL_CHANCES):
     """Rank players who have fielded: most catches first, then efficiency, then chances.
 
-    stats_by_user: {user_id: (caught, dropped)}. Players with no recorded catch
-    chance (caught + dropped == 0) are not ranked at all.
+    stats_by_user: {user_id: (caught, dropped)}. Players with fewer than
+    min_chances catch chances (caught + dropped) are not ranked at all.
     Returns a list of (user_id, caught, dropped) best -> worst.
     """
     fielders = [
-        (uid, c, d) for uid, (c, d) in stats_by_user.items() if c + d > 0
+        (uid, c, d) for uid, (c, d) in stats_by_user.items()
+        if c + d > 0 and c + d >= min_chances
     ]
     fielders.sort(key=lambda r: (-r[1], -_efficiency(r[1], r[2]), -(r[1] + r[2]), r[0]))
     return fielders
@@ -245,6 +249,16 @@ class CatchTracker(commands.Cog):
             )
             """
         )
+        # When fielding stats were last reset. Matches imported before this moment are
+        # hidden from the "recent 5 matches" list; the match data itself is untouched.
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fielding_reset_marks (
+                guild_id INTEGER PRIMARY KEY,
+                reset_at REAL NOT NULL
+            )
+            """
+        )
         db.execute(
             """
             CREATE TABLE IF NOT EXISTS fielding_tracking_channels (
@@ -304,6 +318,13 @@ class CatchTracker(commands.Cog):
         cur = self.bot.db.execute(
             "DELETE FROM fielding_stats WHERE guild_id=?", (int(guild_id),)
         )
+        # Remember the reset so old matches stop appearing in "recent 5 matches".
+        # player_match_fielding itself is left alone (Deep Stats still uses it).
+        self.bot.db.execute(
+            "INSERT INTO fielding_reset_marks (guild_id, reset_at) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET reset_at=excluded.reset_at",
+            (int(guild_id), time.time()),
+        )
         self.bot.db.commit()
         return cur.rowcount
 
@@ -356,28 +377,117 @@ class CatchTracker(commands.Cog):
         try:
             rows = self.bot.db.execute(
                 """
-                SELECT i.imported_at, f.opportunities, f.catches_taken, f.catches_dropped
+                SELECT i.imported_at, f.opportunities, f.catches_taken, f.catches_dropped,
+                       f.source_message_id
                 FROM player_match_fielding f
                 JOIN stats_imports i ON i.source_message_id = f.source_message_id
                 WHERE i.guild_id = ? AND f.user_id = ?
+                  AND i.imported_at > COALESCE(
+                      (SELECT reset_at FROM fielding_reset_marks WHERE guild_id = ?), 0)
                 ORDER BY i.imported_at DESC, f.source_message_id DESC
                 LIMIT ?
                 """,
-                (int(guild_id), int(user_id), int(limit)),
+                (int(guild_id), int(user_id), int(guild_id), int(limit)),
             ).fetchall()
         except Exception:
             return []
-        return [(float(r[0]), int(r[1]), int(r[2]), int(r[3])) for r in rows]
+        return [
+            (float(r[0]), int(r[1]), int(r[2]), int(r[3]), int(r[4])) for r in rows
+        ]
+
+    def _opponent_name(self, match_id, user_id, rosters, team_of):
+        """Name of the team the player faced in this match, or None if unknown.
+
+        The opponent is the other team with the most players in that match. Teams saved
+        when the match was imported (match_teams) are used first; matches imported
+        before that existed fall back to the current team rosters.
+        """
+        try:
+            saved = self.bot.db.execute(
+                "SELECT user_id, team_name FROM match_teams WHERE source_message_id = ?",
+                (int(match_id),),
+            ).fetchall()
+        except Exception:
+            saved = []
+        if saved:
+            names = {int(r[0]): str(r[1]) for r in saved}
+            mine = names.get(int(user_id))
+            if mine is not None:
+                tally = {}
+                for name in names.values():
+                    if name != mine:
+                        tally[name] = tally.get(name, 0) + 1
+                if tally:
+                    return max(tally, key=lambda n: (tally[n], n))
+
+        my_team = team_of.get(user_id)
+        if my_team is None:
+            return None
+        try:
+            rows = self.bot.db.execute(
+                "SELECT user_id FROM player_match_stats WHERE source_message_id = ?",
+                (int(match_id),),
+            ).fetchall()
+        except Exception:
+            return None
+        counts = {}
+        for (uid,) in rows:
+            team_id = team_of.get(int(uid))
+            if team_id is not None and team_id != my_team:
+                counts[team_id] = counts.get(team_id, 0) + 1
+        if not counts:
+            return None
+        opponent = max(counts, key=lambda t: (counts[t], -t))
+        return rosters[opponent]["name"]
+
+    def _drop_cost(self, guild_id, user_id):
+        """(drops, runs cost) for this fielder from committed drops, or (0, 0).
+
+        The cost of a drop is the batter's final score minus their score at the drop.
+        If one fielder drops the same batter more than once in an innings, only the
+        runs since the first of those drops are counted, so no run is charged twice.
+        """
+        try:
+            row = self.bot.db.execute(
+                """
+                SELECT COALESCE(SUM(drops), 0), COALESCE(SUM(cost), 0) FROM (
+                    SELECT COUNT(*) AS drops,
+                           MAX(0, MAX(final_score) - MIN(score_at_drop)) AS cost
+                    FROM fielder_drop_log
+                    WHERE guild_id = ? AND fielder_id = ?
+                      AND committed = 1 AND final_score IS NOT NULL
+                    GROUP BY channel_id, session_key, batter_id
+                )
+                """,
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+        except Exception:
+            return 0, 0
+        return (int(row[0]), int(row[1])) if row else (0, 0)
 
     def _recent_field_value(self, guild_id, user_id):
         rows = self._recent_matches(guild_id, user_id)
         if not rows:
             return "No match records yet."
+        # Reuse the roster logic from lb.py to map players to their teams.
+        try:
+            from .lb import _team_rosters
+            rosters = _team_rosters(guild_id)
+        except Exception:
+            rosters = {}
+        team_of = {
+            uid: team_id for team_id, t in rosters.items() for uid in t["members"]
+        }
         lines = []
-        for i, (ts, opps, taken, dropped) in enumerate(rows, start=1):
+        for i, (ts, opps, taken, dropped, match_id) in enumerate(rows, start=1):
             chances = max(opps, taken + dropped)
+            opponent = self._opponent_name(match_id, user_id, rosters, team_of)
+            if opponent:
+                label = f"vs **{discord.utils.escape_markdown(opponent)}**"
+            else:
+                label = f"<t:{int(ts)}:d>"  # opponent unknown: fall back to the date
             lines.append(
-                f"`{i}.` <t:{int(ts)}:d> → `{taken}` caught • `{dropped}` dropped • `{chances}` chances"
+                f"`{i}.` {label} → `{taken}` caught • `{dropped}` dropped • `{chances}` chances"
             )
         total_taken = sum(r[2] for r in rows)
         total_dropped = sum(r[3] for r in rows)
@@ -415,6 +525,13 @@ class CatchTracker(commands.Cog):
             inline=False,
         )
         if recent:
+            drops, cost = self._drop_cost(guild.id, user_id)
+            if drops:
+                embed.add_field(
+                    name="RUNS COST BY DROPS",
+                    value=f"`{cost}` runs from `{drops}` tracked drop(s)",
+                    inline=False,
+                )
             embed.add_field(
                 name="RECENT 5 MATCHES",
                 value=self._recent_field_value(guild.id, user_id),
@@ -460,9 +577,16 @@ class CatchTracker(commands.Cog):
 
         title = _fielder_title(ranked, member_id)
         if title is None:
-            embed.description = (
-                f"**{name}** has no recorded fielding yet, so they are not ranked in **{team_name}**."
-            )
+            chances = caught + dropped
+            if chances == 0:
+                embed.description = (
+                    f"**{name}** has no recorded fielding yet, so they are not ranked in **{team_name}**."
+                )
+            else:
+                embed.description = (
+                    f"**{name}** has `{chances}` catch chance(s) so far. At least "
+                    f"`{MIN_LABEL_CHANCES}` are needed to be ranked in **{team_name}**."
+                )
         else:
             kind, rank, total = title
             embed.title = f"🧤 {_TITLE_TEXT[kind]} {team_name}".upper()
@@ -479,7 +603,8 @@ class CatchTracker(commands.Cog):
             embed.add_field(
                 name="SHARE OF TEAM CATCHES", value=f"`{share:.2f}%`", inline=True
             )
-            avg_caught = team_caught / total if total else 0.0
+            active = sum(1 for c, d in stats.values() if c + d > 0)
+            avg_caught = team_caught / active if active else 0.0
             embed.add_field(
                 name="TEAM AVERAGE (PER FIELDER)",
                 value=f"`{avg_caught:.2f}` caught",
@@ -501,7 +626,9 @@ class CatchTracker(commands.Cog):
                     f"`{i}.` **{nm}** → `{c}` caught • `{_efficiency(c, d):.1f}%`{marker}"
                 )
             embed.add_field(name=f"TOP FIELDERS OF {team_name}".upper(), value="\n".join(lines), inline=False)
-        embed.set_footer(text="Ranked by catches caught, then catch efficiency • only players with fielding records")
+        embed.set_footer(
+            text=f"Ranked by catches, then efficiency • needs {MIN_LABEL_CHANCES}+ catch chances to be ranked"
+        )
         return embed
 
     def _build_overview_embed(self, guild):

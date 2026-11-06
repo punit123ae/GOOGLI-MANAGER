@@ -187,24 +187,40 @@ def invalidate_name_index(guild_id=None):
 def _build_name_index(guild: discord.Guild) -> dict:
     exact: dict = {}
     compact: dict = {}
+    user_exact: dict = {}    # usernames only: unique per Discord account
+    user_compact: dict = {}
     for member in guild.members:
         for raw in (member.name, member.display_name):
             exact.setdefault(_clean_discord_name(raw), set()).add(member.id)
             short = _compact_name(raw)
             if short:
                 compact.setdefault(short, set()).add(member.id)
-    index = {"exact": exact, "compact": compact, "built": time.monotonic()}
+        user_exact.setdefault(_clean_discord_name(member.name), set()).add(member.id)
+        short = _compact_name(member.name)
+        if short:
+            user_compact.setdefault(short, set()).add(member.id)
+    index = {"exact": exact, "compact": compact, "user_exact": user_exact,
+             "user_compact": user_compact, "built": time.monotonic()}
     _name_index[guild.id] = index
     return index
 
 
 def _lookup_name(index: dict, key: str):
+    # Hand Cricket prints usernames, which are unique, so try those first. This stops another
+    # member's nickname that happens to equal the username from making the name look ambiguous.
+    ids = index.get("user_exact", {}).get(key, ())
+    if len(ids) == 1:
+        return next(iter(ids))
     ids = index["exact"].get(key, ())
     if len(ids) == 1:
         return next(iter(ids))
     # Hand Cricket sometimes prints usernames without spaces/punctuation.
     # Use this fallback only when it identifies exactly one server member.
     short = _compact_name(key)
+    if short:
+        ids = index.get("user_compact", {}).get(short, ())
+        if len(ids) == 1:
+            return next(iter(ids))
     ids = index["compact"].get(short, ()) if short else ()
     return next(iter(ids)) if len(ids) == 1 else None
 
@@ -244,6 +260,18 @@ def parse_opportunity(message: discord.Message):
         re.IGNORECASE,
     )
     return (None, match.group(1).casefold()) if match else None
+
+
+def parse_fielder(message: discord.Message):
+    """Return the fielder's user id from a chance message ("... coming toward @Fielder"), or None."""
+    text = message_text(message)
+    match = re.search(r"coming\s+toward\s+<@!?(\d+)>", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"coming\s+toward\s+@?([A-Za-z0-9_.-]{2,32})", text, re.IGNORECASE)
+    if match and message.guild:
+        return find_member_id(message.guild, match.group(1))
+    return None
 
 
 class CommitConfirmView(discord.ui.View):
@@ -423,6 +451,7 @@ class BatterFieldingDropStats(commands.Cog):
         self.latest_status = {}  # channel -> (match_id, innings, score map, monotonic timestamp)
         self.pending = {}
         self._warned_names = set()
+        self._pending_fielder = {}  # channel_id -> (fielder_id, created time.time())
         self._init_db()
 
     async def cog_load(self):
@@ -462,6 +491,13 @@ class BatterFieldingDropStats(commands.Cog):
                 runs_affected INTEGER NOT NULL DEFAULT 0,
                 runs_without_drops INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_id, user_id))
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_drop_unmatched (
+                guild_id INTEGER NOT NULL, name TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                last_seen TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (guild_id, name))
         """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS batter_drop_sessions (
@@ -553,6 +589,23 @@ class BatterFieldingDropStats(commands.Cog):
                 session_key TEXT NOT NULL, user_id INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, channel_id, session_key, user_id))
         """)
+        # One row per dropped catch: who dropped it, whose catch it was, and the batter's
+        # score at that moment. final_score is filled in when the batter's innings ends;
+        # the runs a drop cost is final_score - score_at_drop. Like the batter-impact
+        # leaderboard, rows only count once committed with +commitlb.
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS fielder_drop_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+                session_key TEXT NOT NULL, batter_id INTEGER NOT NULL,
+                fielder_id INTEGER NOT NULL, score_at_drop INTEGER NOT NULL,
+                final_score INTEGER, committed INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS fielder_drop_log_session
+            ON fielder_drop_log (guild_id, channel_id, session_key, batter_id)
+        """)
         db.commit()
 
     def _tracking_enabled(self, guild_id: int, channel_id: int) -> bool:
@@ -600,6 +653,21 @@ class BatterFieldingDropStats(commands.Cog):
             )
         return match_id, current_innings
 
+    def _note_unmatched(self, guild, name):
+        """Remember a batter name that matched no server member, so +previewlb can list it."""
+        try:
+            index = _name_index.get(guild.id) or _build_name_index(guild)
+            key = _clean_discord_name(name).lstrip("@")
+            shared = len(index["user_exact"].get(key, ())) or len(index["exact"].get(key, ()))
+            reason = f"shared by {shared} members" if shared > 1 else "no member has this name"
+            self.bot.db.execute("""
+                INSERT INTO batter_drop_unmatched(guild_id,name,reason,last_seen) VALUES(?,?,?,?)
+                ON CONFLICT(guild_id,name) DO UPDATE SET reason=excluded.reason, last_seen=excluded.last_seen
+            """, (guild.id, name, reason, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            self.bot.db.commit()
+        except Exception:
+            log.exception("batfds: could not record an unmatched batter name")
+
     def _add_to_preview(self, guild_id, user_id, drops, affected, without):
         self.bot.db.execute("""
             INSERT INTO batter_drop_preview
@@ -621,6 +689,15 @@ class BatterFieldingDropStats(commands.Cog):
 
     def _finalize_batter(self, guild_id, channel_id, session_key, user_id, final_score):
         db = self.bot.db
+        try:
+            # Complete the per-fielder drop log with this batter's final score.
+            db.execute("""
+                UPDATE fielder_drop_log SET final_score=?
+                WHERE guild_id=? AND channel_id=? AND session_key=? AND batter_id=?
+                  AND final_score IS NULL
+            """, (int(final_score), guild_id, channel_id, session_key, user_id))
+        except sqlite3.Error:
+            log.exception("batfds: could not update the fielder drop log")
         row = db.execute("""
             SELECT first_drop_score, drop_count FROM batter_drop_sessions
             WHERE guild_id=? AND channel_id=? AND session_key=? AND user_id=?
@@ -705,6 +782,7 @@ class BatterFieldingDropStats(commands.Cog):
             uid = find_member_id(message.guild, name)
             if not uid and (channel_id, name) not in self._warned_names:
                 self._warned_names.add((channel_id, name))
+                self._note_unmatched(message.guild, name)
                 log.warning("batfds: could not match batter %r to a member in channel %s; their runs are not tracked",
                             name, channel_id)
             if uid and not self._batter_done(guild_id, channel_id, session_key, uid):
@@ -878,6 +956,15 @@ class BatterFieldingDropStats(commands.Cog):
                     user_id=excluded.user_id,score=excluded.score,created_at=excluded.created_at
             """, (channel_id, message.guild.id, session_key, user_id, int(batter_score), time.time()))
             self.bot.db.commit()
+            # Remember who the catch was coming to, so a drop can be charged to them.
+            try:
+                fielder_id = parse_fielder(message)
+                if fielder_id:
+                    self._pending_fielder[channel_id] = (int(fielder_id), time.time())
+                else:
+                    self._pending_fielder.pop(channel_id, None)
+            except Exception:
+                self._pending_fielder.pop(channel_id, None)
             await self._add_tracking_reaction(message)
             return
 
@@ -891,6 +978,7 @@ class BatterFieldingDropStats(commands.Cog):
         ).fetchone()
         self.bot.db.execute("DELETE FROM batter_drop_pending WHERE channel_id=?", (channel_id,))
         self.bot.db.commit()
+        fielder_info = self._pending_fielder.pop(channel_id, None)
         if not pending or time.time() - float(pending[4]) > PENDING_TTL_SECONDS:
             return
         guild_id, session_key, user_id, score = int(pending[0]), pending[1], int(pending[2]), int(pending[3])
@@ -906,6 +994,17 @@ class BatterFieldingDropStats(commands.Cog):
                     drop_count=batter_drop_sessions.drop_count+1
             """, (guild_id, channel_id, session_key, user_id, score, score))
             self.bot.db.commit()
+            # Charge the drop to the fielder. Must never affect batter-impact tracking.
+            try:
+                if fielder_info and time.time() - float(fielder_info[1]) <= PENDING_TTL_SECONDS:
+                    self.bot.db.execute("""
+                        INSERT INTO fielder_drop_log
+                            (guild_id,channel_id,session_key,batter_id,fielder_id,score_at_drop,created_at)
+                        VALUES (?,?,?,?,?,?,?)
+                    """, (guild_id, channel_id, session_key, user_id, int(fielder_info[0]), score, time.time()))
+                    self.bot.db.commit()
+            except Exception:
+                log.exception("batfds: could not log the fielder for a drop in channel %s", channel_id)
             log.info("batfds: drop recorded for %s at %s runs in channel %s", user_id, score, channel_id)
         else:
             # A catch being taken is not a batter finalisation event. The
@@ -1097,6 +1196,13 @@ class BatterFieldingDropStats(commands.Cog):
                         runs_without_drops=runs_without_drops+excluded.runs_without_drops
                 """, (guild_id, uid, matches, drops, affected, without))
             db.execute("DELETE FROM batter_drop_preview WHERE guild_id=?", (guild_id,))
+            db.execute("DELETE FROM batter_drop_unmatched WHERE guild_id=?", (guild_id,))
+            # Finished drops now count towards each fielder's "runs cost by drops".
+            db.execute(
+                "UPDATE fielder_drop_log SET committed=1 "
+                "WHERE guild_id=? AND committed=0 AND final_score IS NOT NULL",
+                (guild_id,),
+            )
             db.commit()
             return backup_no
         except Exception:
@@ -1125,6 +1231,20 @@ class BatterFieldingDropStats(commands.Cog):
         embed = discord.Embed(title="Preview Batter Impact Leaderboard", description="\n".join(lines)[:4000],
                               colour=discord.Colour.blurple())
         embed.set_footer(text="Live provisional figures are included. Commit only after every tracked match has ended.")
+        unmatched = self.bot.db.execute(
+            "SELECT name,reason FROM batter_drop_unmatched WHERE guild_id=? ORDER BY name",
+            (ctx.guild.id,),
+        ).fetchall()
+        if unmatched:
+            shown = [f"`{n}` ({r})" for n, r in unmatched[:20]]
+            more = f"\n…and {len(unmatched) - 20} more." if len(unmatched) > 20 else ""
+            embed.add_field(
+                name=f"⚠️ {len(unmatched)} batter name(s) could not be matched",
+                value=(", ".join(shown) + more +
+                       "\nThese players are missing above. After committing, run `+auditbatterimpact` "
+                       "then `+fixbatterimpact` to restore their runs.")[:1024],
+                inline=False,
+            )
         await ctx.send(embed=embed)
 
     @previewlb.command(name="markended")
@@ -1283,9 +1403,15 @@ class BatterFieldingDropStats(commands.Cog):
         if not count:
             return await ctx.reply("Preview leaderboard is empty; nothing to commit.", mention_author=False)
         view = CommitConfirmView(self, ctx)
+        unmatched = self.bot.db.execute(
+            "SELECT COUNT(*) FROM batter_drop_unmatched WHERE guild_id=?", (ctx.guild.id,)
+        ).fetchone()[0]
+        warning = (f"\n⚠️ **{unmatched}** batter name(s) could not be matched to a member, so those players are "
+                   "not in this preview. See `+previewlb`; fix them afterwards with `+auditbatterimpact` and "
+                   "`+fixbatterimpact`.") if unmatched else ""
         await ctx.send(
             f"Commit the current preview stats for **{count} players** to the permanent `+lb`? "
-            "A backup will be created and the preview will then be reset.",
+            "A backup will be created and the preview will then be reset." + warning,
             view=view,
         )
 
@@ -2013,6 +2139,7 @@ class BatterFieldingDropStats(commands.Cog):
             self.bot.db.execute("DELETE FROM batter_drop_pending WHERE guild_id=?", (ctx.guild.id,))
             self.bot.db.execute("DELETE FROM batter_drop_finalized WHERE guild_id=?", (ctx.guild.id,))
             self.bot.db.execute("DELETE FROM batter_drop_out_batters WHERE guild_id=?", (ctx.guild.id,))
+            self.bot.db.execute("DELETE FROM fielder_drop_log WHERE guild_id=?", (ctx.guild.id,))
             await ctx.reply("Reset Batter Impact stats and preview tracking for everyone in this server.",
                             mention_author=False)
         else:
@@ -2027,6 +2154,8 @@ class BatterFieldingDropStats(commands.Cog):
             self.bot.db.execute("DELETE FROM batter_drop_finalized WHERE guild_id=? AND user_id=?",
                                 (ctx.guild.id, member.id))
             self.bot.db.execute("DELETE FROM batter_drop_out_batters WHERE guild_id=? AND user_id=?",
+                                (ctx.guild.id, member.id))
+            self.bot.db.execute("DELETE FROM fielder_drop_log WHERE guild_id=? AND batter_id=?",
                                 (ctx.guild.id, member.id))
             await ctx.reply(f"Reset Batter Impact stats for **{discord.utils.escape_markdown(member.display_name)}**.",
                             mention_author=False)
