@@ -239,7 +239,6 @@ def _clear_schedule_state():
             WHERE id = 1
         """)
 
-
 def _schedule_days(max_days: int):
     """
     Backtracking edge-colouring scheduler. Each reservation is an edge between
@@ -477,8 +476,7 @@ class Reserves(commands.Cog):
                 )
                 GROUP BY team_name COLLATE NOCASE
             """).fetchall()
-            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]
-            if over:
+            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]            if over:
                 await ctx.reply(
                     f"Cannot set the limit to {total}: these teams already exceed it: "
                     + ", ".join(over[:20]),
@@ -657,7 +655,7 @@ class Reserves(commands.Cog):
     async def reservestatus(self, ctx, *, team_name: str):
         # Reject mentions before looking up or echoing user input. This prevents
         # @everyone, @here and role mentions from being pinged by this command.
-        if "@" in team_name or re.search(r"<@!?&?\\d+>", team_name):
+        if "@" in team_name:
             await ctx.reply(
                 "❌ Invalid argument. Enter a registered team name, not a user, role, or everyone mention.",
                 mention_author=False,
@@ -675,8 +673,8 @@ class Reserves(commands.Cog):
                 safe_names = [discord.utils.escape_markdown(name) for name in suggestions]
                 message = (
                     f"❌ **`{discord.utils.escape_markdown(team_name)}` matches multiple teams:**\\n"
-                    + "\\n".join(f"• {name}" for name in safe_names)
-                    + "\\nPlease enter a more specific part of the team name."
+                    + "\n".join(f"• {name}" for name in safe_names)
+                    + "\nPlease enter a more specific part of the team name."
                 )
             else:
                 message = _approved_team_error(team_name, status, suggestions)
@@ -715,10 +713,9 @@ class Reserves(commands.Cog):
                 lines.append(f"…and **{len(rows) - 20}** more reservation(s).")
             embed.add_field(
                 name=f"Reservations ({len(rows)})",
-                value="\\n".join(lines),
+                value="\n".join(lines),
                 inline=False,
-            )
-        else:
+            )        else:
             embed.add_field(
                 name="Reservations",
                 value="No reservations found for this team yet.",
