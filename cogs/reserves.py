@@ -103,7 +103,7 @@ def _resolve_approved_team(guild_id: int, query: str):
     if len(exact) > 1:
         return None, "multiple", exact
 
-    # Allow a unique prefix for convenience, but never guess if ambiguous.
+    # Allow a unique prefix first, then a unique substring; never guess if ambiguous.
     matches = [
         row["name"] for row in rows
         if _normalize_team_name(row["name"]).startswith(key)
@@ -112,6 +112,15 @@ def _resolve_approved_team(guild_id: int, query: str):
         return matches[0], "ok", []
     if len(matches) > 1:
         return None, "multiple", matches[:10]
+
+    partial_matches = [
+        row["name"] for row in rows
+        if key in _normalize_team_name(row["name"])
+    ]
+    if len(partial_matches) == 1:
+        return partial_matches[0], "ok", []
+    if len(partial_matches) > 1:
+        return None, "multiple", partial_matches[:10]
     return None, "missing", []
 
 
@@ -237,8 +246,7 @@ def _schedule_days(max_days: int):
     two teams; edges assigned to the same day cannot share a team. It searches
     from the theoretical minimum number of days (maximum team degree) upwards,
     stopping at max_days. This avoids wasting days when matches can be grouped.
-    """
-    rows = _all_reservations()
+    """    rows = _all_reservations()
     if not rows:
         return []
 
@@ -477,8 +485,7 @@ class Reserves(commands.Cog):
                     mention_author=False,
                 )
                 return
-            conn.execute(
-                "UPDATE reserve_settings SET total_limit = ? WHERE id = 1", (total,)
+            conn.execute(                "UPDATE reserve_settings SET total_limit = ? WHERE id = 1", (total,)
             )
 
         await ctx.send(
@@ -648,30 +655,82 @@ class Reserves(commands.Cog):
 
     @commands.command(name="reservestatus")
     async def reservestatus(self, ctx, *, team_name: str):
-        limit = _limit()
-        total, initiated = _team_counts(team_name)
-        rows = [
-            r for r in _all_reservations()
-            if team_name.casefold() in (
-                r["reserving_team"].casefold(), r["opposing_team"].casefold()
+        # Reject mentions before looking up or echoing user input. This prevents
+        # @everyone, @here and role mentions from being pinged by this command.
+        if "@" in team_name or re.search(r"<@!?&?\\d+>", team_name):
+            await ctx.reply(
+                "❌ Invalid argument. Enter a registered team name, not a user, role, or everyone mention.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
-        ]
-        if not rows:
-            await ctx.send(f"No reservations found for **{team_name}**.")
             return
 
-        lines = [
-            f"**{team_name} — Reserve Status**",
-            f"Total matches: **{total}/{limit}**",
-            f"Initiated: **{initiated}/{limit // 2}**",
-            f"Remaining: **{max(0, limit - total)}**",
-            "**Reservations:**",
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used inside a server.", mention_author=False)
+            return
+
+        canonical, status, suggestions = _resolve_approved_team(ctx.guild.id, team_name)
+        if status != "ok":
+            if status == "multiple":
+                safe_names = [discord.utils.escape_markdown(name) for name in suggestions]
+                message = (
+                    f"❌ **`{discord.utils.escape_markdown(team_name)}` matches multiple teams:**\\n"
+                    + "\\n".join(f"• {name}" for name in safe_names)
+                    + "\\nPlease enter a more specific part of the team name."
+                )
+            else:
+                message = _approved_team_error(team_name, status, suggestions)
+            await ctx.reply(
+                message,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        limit = _limit()
+        total, initiated = _team_counts(canonical)
+        rows = [
+            row for row in _all_reservations()
+            if canonical.casefold() in (
+                row["reserving_team"].casefold(), row["opposing_team"].casefold()
+            )
         ]
-        lines.extend(
-            f"`{r['id']}` {r['reserving_team']} vs {r['opposing_team']}"
-            for r in rows[:25]
+
+        embed = discord.Embed(
+            title="✦ RESERVE STATUS",
+            description=f"**{discord.utils.escape_markdown(canonical)}**",
+            color=discord.Color.from_rgb(35, 63, 110),
         )
-        await ctx.send("\n".join(lines))
+        embed.add_field(name="Total Matches", value=f"**{total}/{limit}**", inline=True)
+        embed.add_field(name="Initiated", value=f"**{initiated}/{limit // 2}**", inline=True)
+        embed.add_field(name="Remaining", value=f"**{max(0, limit - total)}**", inline=True)
+
+        if rows:
+            lines = [
+                f"`{row['id']}` **{discord.utils.escape_markdown(row['reserving_team'])}** vs "
+                f"**{discord.utils.escape_markdown(row['opposing_team'])}**"
+                for row in rows[:20]
+            ]
+            if len(rows) > 20:
+                lines.append(f"…and **{len(rows) - 20}** more reservation(s).")
+            embed.add_field(
+                name=f"Reservations ({len(rows)})",
+                value="\\n".join(lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Reservations",
+                value="No reservations found for this team yet.",
+                inline=False,
+            )
+
+        embed.set_footer(text="GOOGLI MANAGER • RESERVE SYSTEM")
+        await ctx.reply(
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @commands.command(name="creatematchups")
     async def creatematchups(self, ctx):
@@ -717,8 +776,7 @@ class Reserves(commands.Cog):
         intro = discord.Embed(
             title="✦ OFFICIAL RESERVE MATCH SCHEDULE",
             color=discord.Color.from_rgb(35, 63, 110),
-            description=(
-                f"**Total reserved matches:** {len(rows)}\n"
+            description=(                f"**Total reserved matches:** {len(rows)}\n"
                 f"**Days required:** {len(days)}\n"
                 "**Rule:** Each team plays at most once per day."
             ),
