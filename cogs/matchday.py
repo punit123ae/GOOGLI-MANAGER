@@ -384,7 +384,7 @@ class MatchDay(commands.Cog):
         text = self._fixture_message_text(message)
 
         # The normal matchday embed uses: `Team A` VS `Team B`.
-        pair = re.search(r"`([^`]+)`\s*(?:<[^>]+>\s*)?vs\s*(?:<[^>]+>\s*)?`([^`]+)`", text, re.I)
+        pair = re.search(r"`([^`]+)`\s*(?:(?:<a?:[A-Za-z0-9_]+:\d+>)|vs\.?)\s*`([^`]+)`", text, re.I)
         if not pair:
             # Fallback for embeds where Discord/markdown formatting is different.
             pair = re.search(r"([A-Za-z0-9][A-Za-z0-9 ._&'()\-]{1,80}?)\s+(?:VS|vs)\s+([A-Za-z0-9][A-Za-z0-9 ._&'()\-]{1,80}?)(?:\n|$)", text, re.I)
