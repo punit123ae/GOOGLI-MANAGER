@@ -715,7 +715,8 @@ class Reserves(commands.Cog):
                 name=f"Reservations ({len(rows)})",
                 value="\n".join(lines),
                 inline=False,
-            )        else:
+            )
+        else:
             embed.add_field(
                 name="Reservations",
                 value="No reservations found for this team yet.",
