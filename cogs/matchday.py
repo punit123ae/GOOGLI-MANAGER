@@ -477,7 +477,8 @@ class MatchDay(commands.Cog):
         start_time = int(times[0].timestamp())
         if start_time <= int(time.time()):
             await ctx.reply(
-                "That time has already passed. Use a future time.",                mention_author=False,
+                "That time has already passed. Use a future time.",
+                mention_author=False,
                 allowed_mentions=none,
             )
             return
