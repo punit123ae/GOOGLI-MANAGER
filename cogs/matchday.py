@@ -237,8 +237,7 @@ class ApprovalView(discord.ui.View):
         no = discord.ui.Button(label="No", style=discord.ButtonStyle.danger,
                                custom_id=f"mdapprove:no:{negotiation_id}")
         yes.callback, no.callback = self.on_yes, self.on_no
-        self.add_item(yes)
-        self.add_item(no)
+        self.add_item(yes)        self.add_item(no)
 
     async def on_yes(self, interaction):
         await self.cog.handle_approval(interaction, self.negotiation_id, True)
@@ -437,12 +436,12 @@ class MatchDay(commands.Cog):
     @commands.command(name="forceannounce")
     @commands.guild_only()
     async def forceannounce(self, ctx, *, when_text: str = ""):
-        """Bot owner only: reply to a fixtures embed/message with +forceannounce <time>."""
+        """Bot owner or a role whitelisted for forceannounce: reply to a match with +forceannounce <time>."""
         none = discord.AllowedMentions.none()
 
-        if not await self.bot.is_owner(ctx.author):
+        if not await owner_or_whitelisted(ctx, app_owner=True):
             await ctx.reply(
-                "Only the bot owner can use this command.",
+                "Only the bot owner or a role whitelisted for `forceannounce` can use this command.",
                 mention_author=False,
                 allowed_mentions=none,
             )
@@ -477,8 +476,7 @@ class MatchDay(commands.Cog):
         start_time = int(times[0].timestamp())
         if start_time <= int(time.time()):
             await ctx.reply(
-                "That time has already passed. Use a future time.",
-                mention_author=False,
+                "That time has already passed. Use a future time.",                mention_author=False,
                 allowed_mentions=none,
             )
             return
@@ -582,6 +580,30 @@ class MatchDay(commands.Cog):
                     f"**Forced by:** <@{ctx.author.id}>\n"
                     f"**Match ID:** `{match_id}`",
                 )
+
+
+                # Give both registered team captains the same opt-in DM choice
+                # used by regular scheduled matches.
+                try:
+                    prompt_count, prompt_errors = await scheduling.send_captain_prompts(
+                        ctx.guild,
+                        channel,
+                        {
+                            "id": match_id,
+                            "team_a_id": team_a.id,
+                            "team_b_id": team_b.id,
+                            "channel_id": channel.id,
+                            "start_time": start_time,
+                        },
+                    )
+                    results.append(
+                        f"✉️ **Captain DM options:** {prompt_count}/2 prompt(s) sent."
+                    )
+                    results.extend(f"⚠️ {error}" for error in prompt_errors)
+                except Exception as prompt_exc:
+                    results.append(
+                        f"⚠️ Match announced, but captain DM prompts could not be created: {prompt_exc}"
+                    )
 
             except discord.HTTPException as exc:
                 self.db.execute(
@@ -717,8 +739,7 @@ class MatchDay(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or message.guild is None:
             return
-        negotiation_id = self.active.get(message.channel.id)
-        if negotiation_id is None:
+        negotiation_id = self.active.get(message.channel.id)        if negotiation_id is None:
             return
         row = self.db.execute("SELECT * FROM matchday_negotiations WHERE id = ? AND status = 'open'",
                               (negotiation_id,)).fetchone()
