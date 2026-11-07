@@ -237,8 +237,7 @@ class ApprovalView(discord.ui.View):
         no = discord.ui.Button(label="No", style=discord.ButtonStyle.danger,
                                custom_id=f"mdapprove:no:{negotiation_id}")
         yes.callback, no.callback = self.on_yes, self.on_no
-        self.add_item(yes)
-        self.add_item(no)
+        self.add_item(yes)        self.add_item(no)
 
     async def on_yes(self, interaction):
         await self.cog.handle_approval(interaction, self.negotiation_id, True)
@@ -567,9 +566,7 @@ class MatchDay(commands.Cog):
                 )
                 self.db.commit()
 
-                # Lock the stadium for everyone after the announcement.
-                # The saved original permission is restored by the scheduler
-                # when the match starts, just like normal scheduled matches.
+                # Lock the stadium channel after the force announcement.
                 lock_overwrite = channel.overwrites_for(ctx.guild.default_role)
                 lock_overwrite.send_messages = False
                 try:
@@ -580,7 +577,7 @@ class MatchDay(commands.Cog):
                     )
                 except discord.HTTPException as lock_exc:
                     results.append(
-                        f"⚠️ **{label}** — match announced, but the channel could not be locked: {lock_exc}"
+                        f"⚠️ **{label}** — match announced, but channel lock failed: {lock_exc}"
                     )
 
                 announced += 1
@@ -756,8 +753,7 @@ class MatchDay(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or message.guild is None:
             return
-        negotiation_id = self.active.get(message.channel.id)
-        if negotiation_id is None:
+        negotiation_id = self.active.get(message.channel.id)        if negotiation_id is None:
             return
         row = self.db.execute("SELECT * FROM matchday_negotiations WHERE id = ? AND status = 'open'",
                               (negotiation_id,)).fetchone()
@@ -976,3 +972,24 @@ class MatchDay(commands.Cog):
             pass
         self.db.execute(
             "UPDATE matchday_negotiations SET status = 'open', proposal_a = NULL, proposal_b = NULL, "
+            "last_proposer = NULL, agreed_ts = NULL, approval_message_id = NULL, opened_at = ? WHERE id = ?",
+            (time.time(), row["id"]))
+        self.db.commit()
+        self.active[channel.id] = row["id"]
+        captains = [discord.Object(id=row["captain_a_id"]), discord.Object(id=row["captain_b_id"])]
+        try:
+            await channel.send(
+                f"<@{row['captain_a_id']}> <@{row['captain_b_id']}>\n"
+                f"❌ That time was not confirmed.{' ' + note if note else ''}\n"
+                f"🏟️ This stadium is **unlocked** again. {TIME_EMOJI} Please agree on a new match time.",
+                allowed_mentions=discord.AllowedMentions(users=captains, roles=False,
+                                                         everyone=False, replied_user=False))
+        except discord.HTTPException:
+            pass
+        await self._log(guild, f"❌ **MATCH TIME NOT CONFIRMED** — Match {row['match_no']}\n"
+                               f"**Teams:** {row['team_a_name']} vs {row['team_b_name']}\n"
+                               f"**Channel:** {channel.mention}\n**Answered by:** <@{user.id}>")
+
+
+async def setup(bot):
+    await bot.add_cog(MatchDay(bot))
