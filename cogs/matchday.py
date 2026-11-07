@@ -567,6 +567,22 @@ class MatchDay(commands.Cog):
                 )
                 self.db.commit()
 
+                # Lock the stadium for everyone after the announcement.
+                # The saved original permission is restored by the scheduler
+                # when the match starts, just like normal scheduled matches.
+                lock_overwrite = channel.overwrites_for(ctx.guild.default_role)
+                lock_overwrite.send_messages = False
+                try:
+                    await channel.set_permissions(
+                        ctx.guild.default_role,
+                        overwrite=lock_overwrite,
+                        reason=f"Locking channel for force-announced match {match_id}",
+                    )
+                except discord.HTTPException as lock_exc:
+                    results.append(
+                        f"⚠️ **{label}** — match announced, but the channel could not be locked: {lock_exc}"
+                    )
+
                 announced += 1
                 results.append(
                     f"✅ **{label}** — {team_a.name} vs {team_b.name} announced in {channel.mention}."
