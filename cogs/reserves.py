@@ -245,7 +245,7 @@ def _schedule_days(max_days: int):
     two teams; edges assigned to the same day cannot share a team. It searches
     from the theoretical minimum number of days (maximum team degree) upwards,
     stopping at max_days. This avoids wasting days when matches can be grouped.
-    """    rows = _all_reservations()
+    """\n    rows = _all_reservations()
     if not rows:
         return []
 
@@ -476,7 +476,7 @@ class Reserves(commands.Cog):
                 )
                 GROUP BY team_name COLLATE NOCASE
             """).fetchall()
-            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]            if over:
+            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]\n            if over:
                 await ctx.reply(
                     f"Cannot set the limit to {total}: these teams already exceed it: "
                     + ", ".join(over[:20]),
@@ -655,7 +655,12 @@ class Reserves(commands.Cog):
     async def reservestatus(self, ctx, *, team_name: str):
         # Reject mentions before looking up or echoing user input. This prevents
         # @everyone, @here and role mentions from being pinged by this command.
-        if "@" in team_name:
+        if (
+            "@" in team_name
+            or ctx.message.mention_everyone
+            or bool(ctx.message.role_mentions)
+            or bool(ctx.message.mentions)
+        ):
             await ctx.reply(
                 "❌ Invalid argument. Enter a registered team name, not a user, role, or everyone mention.",
                 mention_author=False,
