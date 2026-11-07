@@ -4,26 +4,18 @@
 2. Reply to it with +openmatch  (or +openmatch 77 for a single match).
    The bot unlocks each stadium, finds both teams' captains and pings ONLY the captains.
 3. The bot then reads the two captains' messages in that stadium. When both agree on a
-<<<<<<< HEAD
    time (same time, or one proposes and the other accepts) it LOCKS the stadium and posts
    a no-ping message with Yes / No buttons that only the confirmation role
    (+setconfirmrole) can press (buttons never expire, work once).
 4. Yes -> the match is saved, announced (both teams pinged) and each captain is asked about
    DMs, exactly like /match_schedule. No -> the stadium is unlocked and the captains pick
    a new time.
-=======
-   time (same time, or one proposes and the other accepts) it pings the confirmation
-   role (+setconfirmrole @role) and saves the match so the normal scheduler starts it.
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 
 Times are India time (IST) unless the captain names another timezone.
 """
 
 import re
-<<<<<<< HEAD
 import sqlite3
-=======
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -37,15 +29,12 @@ from .utility import owner_or_whitelisted
 IST = ZoneInfo("Asia/Kolkata")
 NEGOTIATION_TTL = 24 * 60 * 60          # stop listening 24h after +openmatch
 
-<<<<<<< HEAD
 # Keep these in sync with scheduling.py
 MATCH_EMOJI = "<a:arrow_arrow:1565966619291811984>"
 VS_EMOJI = "<:VS128:1559620966709993472>"
 HEADER_EMOJI = "<:emoji_60:1562481891037290637>"
 TIME_EMOJI = "<:time:1565970550067691710>"
 
-=======
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 # --------------------------------------------------------------------------- time parsing
 TZ_NAMES = {
     "ist": "Asia/Kolkata", "pkt": "Asia/Karachi", "bdt": "Asia/Dhaka",
@@ -147,7 +136,6 @@ def extract_times(text, now_utc=None):
 
 
 ACCEPT_WORDS = {
-<<<<<<< HEAD
     "yes", "yeah", "yea", "yep", "yup", "ye", "ya", "yaa", "yh", "y", "ok", "okay", "okk", "okey",
     "okie", "kk", "k", "kay", "accept", "accepted", "approve", "approved", "confirm", "confirmed",
     "fine", "sure", "agree", "agreed", "deal", "done", "fixed", "locked", "cool", "alright",
@@ -158,12 +146,6 @@ ACCEPT_WORDS = {
 # Stretched spellings: yesss, yaaa, okkk, okayyy, kkk, haaan ...
 ACCEPT_STRETCH_RE = re.compile(
     r"^(?:y+e+s+|y+e+a+h?|y+a+h*|y+e+p+|y+u+p+|y+e+|o+k+(?:a+y+)?|o+k+i+e+|k+|h+a+a*n+(?:j+i+)?)$")
-=======
-    "yes", "yeah", "yea", "yep", "yup", "ok", "okay", "okk", "okey", "kk", "accept", "accepted",
-    "confirm", "confirmed", "fine", "sure", "agree", "agreed", "deal", "done", "fixed",
-    "haan", "han", "theek", "thik", "sahi", "works", "sounds", "good", "great", "perfect",
-}
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 # Words that reject the time in a message ("can't do 8").
 NEGATIVE_WORDS = {
     "cant", "can't", "cannot", "dont", "don't", "wont", "won't", "not", "never",
@@ -171,11 +153,7 @@ NEGATIVE_WORDS = {
 }
 # Words that only block a plain acceptance ("no" -> not an accept; "no, 9 pm" is still a proposal).
 SOFT_NEGATIVE_WORDS = {"no", "nope", "nah"}
-<<<<<<< HEAD
 ACCEPT_EMOJI = ("👍", "✅", "🆗", "👌", "🤝", "✔️", "☑️", "💯", "🫡")
-=======
-ACCEPT_EMOJI = ("👍", "✅", "🆗", "👌", "🤝")
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 
 
 def classify_message(text, now_utc=None):
@@ -192,12 +170,8 @@ def classify_message(text, now_utc=None):
             return "none", None             # e.g. "can't do 8"
         return "time", (times[-1] if negative else times[0])
 
-<<<<<<< HEAD
     accepted = (polite_accept
                 or any(token in ACCEPT_WORDS or ACCEPT_STRETCH_RE.match(token) for token in tokens)
-=======
-    accepted = (polite_accept or any(token in ACCEPT_WORDS for token in tokens)
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
                 or any(e in (text or "") for e in ACCEPT_EMOJI))
     soft_negative = any(token in SOFT_NEGATIVE_WORDS for token in tokens)
     if accepted and not negative and not soft_negative and len(tokens) <= 8:
@@ -236,7 +210,6 @@ def parse_fixtures(text):
     return round_no, fixtures
 
 
-<<<<<<< HEAD
 # --------------------------------------------------------------------------- message pieces
 def _code(name):
     # Backticks inside a team name would break the inline-code formatting.
@@ -274,8 +247,6 @@ class ApprovalView(discord.ui.View):
         await self.cog.handle_approval(interaction, self.negotiation_id, False)
 
 
-=======
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 # --------------------------------------------------------------------------- cog
 class MatchDay(commands.Cog):
     def __init__(self, bot):
@@ -296,7 +267,6 @@ class MatchDay(commands.Cog):
                 opened_by INTEGER NOT NULL, opened_at REAL NOT NULL
             )""")
         self.db.commit()
-<<<<<<< HEAD
         # Columns added later (safe to run every start).
         for column in ("original_send INTEGER", "approval_message_id INTEGER"):
             try:
@@ -304,8 +274,6 @@ class MatchDay(commands.Cog):
                 self.db.commit()
             except sqlite3.OperationalError:
                 pass                            # column already exists
-=======
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
         # channel_id -> negotiation id, so ordinary chat costs nothing to ignore.
         self.active = {
             row["channel_id"]: row["id"]
@@ -313,7 +281,6 @@ class MatchDay(commands.Cog):
                 "SELECT id, channel_id FROM matchday_negotiations WHERE status = 'open' ORDER BY id")
         }
 
-<<<<<<< HEAD
     async def cog_load(self):
         # Re-attach the Yes/No buttons of confirmations that were waiting during a restart.
         rows = self.db.execute(
@@ -322,8 +289,6 @@ class MatchDay(commands.Cog):
         for row in rows:
             self.bot.add_view(ApprovalView(self, row["id"]), message_id=row["approval_message_id"])
 
-=======
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
     # ------------------------------------------------------------------ helpers
     async def _allowed(self, ctx, name):
         if await owner_or_whitelisted(ctx, command_name=name, app_owner=True):
@@ -355,12 +320,8 @@ class MatchDay(commands.Cog):
         """A fresh +openmatch replaces whatever was running in that stadium."""
         rows = self.db.execute(
             "SELECT id, match_id FROM matchday_negotiations "
-<<<<<<< HEAD
             "WHERE channel_id = ? AND status IN ('open', 'awaiting', 'approved', 'confirmed')",
             (channel_id,)).fetchall()
-=======
-            "WHERE channel_id = ? AND (status = 'open' OR status = 'confirmed')", (channel_id,)).fetchall()
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
         for row in rows:
             self.db.execute("UPDATE matchday_negotiations SET status = 'superseded' WHERE id = ?", (row["id"],))
             if row["match_id"]:
@@ -373,33 +334,21 @@ class MatchDay(commands.Cog):
     @commands.command(name="setconfirmrole")
     @commands.guild_only()
     async def setconfirmrole(self, ctx, role: discord.Role = None):
-<<<<<<< HEAD
         """+setconfirmrole @role (or the role's ID / name) — the role that approves agreed times."""
-=======
-        """+setconfirmrole @role  — the role pinged when both captains agree on a time."""
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
         if not await self._allowed(ctx, "setconfirmrole"):
             return
         none = discord.AllowedMentions.none()
         if role is None:
             current = self._confirm_role_id(ctx.guild.id)
             text = (f"Confirmation role: <@&{current}>" if current else "No confirmation role is set.")
-<<<<<<< HEAD
             await ctx.reply(text + "\nUsage: `+setconfirmrole <role ID or name>` (an ID/name doesn't ping the role)",
                             mention_author=False, allowed_mentions=none)
-=======
-            await ctx.reply(text + "\nUsage: `+setconfirmrole @role`", mention_author=False, allowed_mentions=none)
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
             return
         self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                         (f"matchday_confirm_role_{ctx.guild.id}", str(role.id)))
         self.db.commit()
-<<<<<<< HEAD
         await ctx.reply(f"✅ Confirmation role set to {role.mention}. When both captains agree on a time I'll "
                         "lock the stadium and show this role Yes/No buttons (no ping).",
-=======
-        await ctx.reply(f"✅ When both captains agree on a time, I'll ping {role.mention}.",
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
                         mention_author=False, allowed_mentions=none)
 
     async def _fetch_replied(self, ctx):
@@ -415,6 +364,171 @@ class MatchDay(commands.Cog):
             return await channel.fetch_message(reference.message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
             return None
+
+
+    def _fixture_message_text(self, message):
+        """Combine normal message text and embed text for fixture parsing."""
+        parts = [message.content or ""]
+        for embed in message.embeds:
+            if embed.title:
+                parts.append(str(embed.title))
+            if embed.description:
+                parts.append(str(embed.description))
+            for field in embed.fields:
+                parts.append(str(field.name or ""))
+                parts.append(str(field.value or ""))
+        return "\n".join(parts)
+
+    @commands.command(name="forceannounce")
+    @commands.guild_only()
+    async def forceannounce(self, ctx, *, when_text: str = ""):
+        """Bot owner only: reply to a fixtures embed/message with +forceannounce <time>."""
+        none = discord.AllowedMentions.none()
+
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.reply(
+                "Only the bot owner can use this command.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        if ctx.message.reference is None:
+            await ctx.reply(
+                "Reply to the fixtures embed/message with `+forceannounce <time>`.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        replied = await self._fetch_replied(ctx)
+        if replied is None:
+            await ctx.reply(
+                "I couldn't fetch the message you replied to.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        times = extract_times(when_text)
+        if not times:
+            await ctx.reply(
+                "Give me a valid time, for example: `+forceannounce 8 pm`, `+forceannounce 8:15 pm` or `+forceannounce tomorrow 8 pm`.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        start_time = int(times[0].timestamp())
+        if start_time <= int(time.time()):
+            await ctx.reply(
+                "That time has already passed. Use a future time.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        round_no, fixtures = parse_fixtures(self._fixture_message_text(replied))
+        if not fixtures:
+            await ctx.reply(
+                "I couldn't find any matches in that message/embed. Each match needs `Match N`, two team roles, and a stadium channel.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        scheduling = self.bot.get_cog("Scheduling")
+        if scheduling is None:
+            await ctx.reply(
+                "The scheduling module isn't loaded.",
+                mention_author=False,
+                allowed_mentions=none,
+            )
+            return
+
+        results = []
+        announced = 0
+
+        for fixture in fixtures:
+            label = f"Match {fixture['match_no']}"
+            channel = ctx.guild.get_channel(fixture["channel_id"])
+            team_a = ctx.guild.get_role(fixture["role_a"])
+            team_b = ctx.guild.get_role(fixture["role_b"])
+
+            if not isinstance(channel, discord.TextChannel):
+                results.append(f"⚠️ **{label}** — stadium channel not found.")
+                continue
+            if team_a is None or team_b is None:
+                results.append(f"⚠️ **{label}** — one or both team roles were not found.")
+                continue
+
+            match_id = uuid.uuid4().hex[:8].upper()
+            current = channel.overwrites_for(ctx.guild.default_role).send_messages
+            original_send = None if current is None else int(current)
+
+            try:
+                self.db.execute(
+                    "INSERT INTO matches (id, guild_id, team_a_id, team_b_id, channel_id, start_time, status, "
+                    "created_by, created_at, original_send_messages, announcement_message_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, NULL)",
+                    (
+                        match_id,
+                        ctx.guild.id,
+                        team_a.id,
+                        team_b.id,
+                        channel.id,
+                        start_time,
+                        ctx.author.id,
+                        time.time(),
+                        original_send,
+                    ),
+                )
+                self.db.commit()
+
+                announcement = await channel.send(
+                    f"{team_a.mention} {VS_EMOJI} {team_b.mention}\n\n"
+                    f"{MATCH_EMOJI} **Match at** <t:{start_time}:F>",
+                    allowed_mentions=scheduling.role_mentions(team_a, team_b),
+                )
+
+                self.db.execute(
+                    "UPDATE matches SET announcement_message_id = ? WHERE id = ?",
+                    (announcement.id, match_id),
+                )
+                self.db.commit()
+
+                announced += 1
+                results.append(
+                    f"✅ **{label}** — {team_a.name} vs {team_b.name} announced in {channel.mention}."
+                )
+
+                await self._log(
+                    ctx.guild,
+                    f"⚡ **FORCE ANNOUNCED** — {label}\n"
+                    f"**Teams:** {team_a.name} vs {team_b.name}\n"
+                    f"**Channel:** {channel.mention}\n"
+                    f"**Match at:** <t:{start_time}:F>\n"
+                    f"**Forced by:** <@{ctx.author.id}>\n"
+                    f"**Match ID:** `{match_id}`",
+                )
+
+            except discord.HTTPException as exc:
+                self.db.execute(
+                    "UPDATE matches SET status = 'cancelled', error = ? WHERE id = ?",
+                    (f"Force announcement failed: {exc}", match_id),
+                )
+                self.db.commit()
+                results.append(f"⚠️ **{label}** — database entry created, but the announcement failed: {exc}")
+            except Exception as exc:
+                self.db.rollback()
+                results.append(f"⚠️ **{label}** — failed: {exc}")
+
+        await ctx.reply(
+            f"**Force announced {announced}/{len(fixtures)} match(es)** for <t:{start_time}:F>\n"
+            + "\n".join(results)[:1700],
+            mention_author=False,
+            allowed_mentions=none,
+        )
 
     @commands.command(name="openmatch")
     @commands.guild_only()
@@ -503,7 +617,6 @@ class MatchDay(commands.Cog):
         self.db.commit()
         self.active[channel.id] = cursor.lastrowid
 
-<<<<<<< HEAD
         header = header_line(round_no, fixture["group"], fixture["match_no"])
         embed = discord.Embed(
             description=(
@@ -519,20 +632,6 @@ class MatchDay(commands.Cog):
         try:
             await channel.send(
                 f"{cap_a.mention} {cap_b.mention}", embed=embed,
-=======
-        header = " · ".join(part for part in (
-            f"Round {round_no}" if round_no else None,
-            f"Group {fixture['group']}" if fixture["group"] else None,
-            label) if part)
-        try:
-            await channel.send(
-                f"# 🏏 {scheduling._safe_name(name_a)} vs {scheduling._safe_name(name_b)}\n"
-                f"**{header}**\n"
-                f"{cap_a.mention} {cap_b.mention}\n\n"
-                f"🏟️ This stadium is now **unlocked**.\n"
-                f"🕒 Captains, agree on a match time here — just say a time like `8 pm` or `8:15` "
-                f"(IST unless you mention another timezone). When you both agree, it's confirmed automatically.",
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
                 allowed_mentions=discord.AllowedMentions(users=[cap_a, cap_b], roles=False,
                                                          everyone=False, replied_user=False))
         except discord.HTTPException as exc:
@@ -590,7 +689,6 @@ class MatchDay(commands.Cog):
                 return                          # nothing from the other captain to accept
         await self._confirm(row, agreed, message)
 
-<<<<<<< HEAD
     def _can_answer(self, member, guild_id):
         role_id = self._confirm_role_id(guild_id)
         if role_id:
@@ -629,11 +727,6 @@ class MatchDay(commands.Cog):
     async def _confirm(self, row, agreed_ts, message):
         claimed = self.db.execute(
             "UPDATE matchday_negotiations SET status = 'awaiting', agreed_ts = ? WHERE id = ? AND status = 'open'",
-=======
-    async def _confirm(self, row, agreed_ts, message):
-        claimed = self.db.execute(
-            "UPDATE matchday_negotiations SET status = 'confirmed', agreed_ts = ? WHERE id = ? AND status = 'open'",
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
             (agreed_ts, row["id"]))
         self.db.commit()
         if claimed.rowcount == 0:
@@ -641,7 +734,6 @@ class MatchDay(commands.Cog):
         self.active.pop(row["channel_id"], None)
 
         guild, channel = message.guild, message.channel
-<<<<<<< HEAD
         # Lock the stadium (remember what it was so it can be restored).
         overwrite = channel.overwrites_for(guild.default_role)
         original = None if overwrite.send_messages is None else int(overwrite.send_messages)
@@ -791,36 +883,6 @@ class MatchDay(commands.Cog):
         await self._log(guild, f"❌ **MATCH TIME NOT CONFIRMED** — Match {row['match_no']}\n"
                                f"**Teams:** {row['team_a_name']} vs {row['team_b_name']}\n"
                                f"**Channel:** {channel.mention}\n**Answered by:** <@{user.id}>")
-=======
-        match_id = uuid.uuid4().hex[:8].upper()
-        current = channel.overwrites_for(guild.default_role).send_messages
-        self.db.execute(
-            "INSERT INTO matches (id, guild_id, team_a_id, team_b_id, channel_id, start_time, status, "
-            "created_by, created_at, original_send_messages) VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)",
-            (match_id, guild.id, row["role_a_id"], row["role_b_id"], channel.id, agreed_ts,
-             row["opened_by"], time.time(), None if current is None else int(current)))
-        self.db.execute("UPDATE matchday_negotiations SET match_id = ? WHERE id = ?", (match_id, row["id"]))
-        self.db.commit()
-
-        role_id = self._confirm_role_id(guild.id)
-        role = guild.get_role(role_id) if role_id else None
-        ist_text = datetime.fromtimestamp(agreed_ts, IST).strftime("%I:%M %p").lstrip("0")
-        text = (f"{role.mention + ' ' if role else ''}✅ **Match {row['match_no']} — time confirmed**\n"
-                f"🏏 **{row['team_a_name']}** vs **{row['team_b_name']}**\n"
-                f"🕒 <t:{agreed_ts}:F> (<t:{agreed_ts}:R>) · **{ist_text} IST**\n"
-                f"Both captains agreed.")
-        if role is None:
-            text += "\n⚠️ No confirmation role is set — use `+setconfirmrole @role`."
-        try:
-            await channel.send(text, allowed_mentions=discord.AllowedMentions(
-                roles=[role] if role else False, users=False, everyone=False, replied_user=False))
-        except discord.HTTPException:
-            pass
-        await self._log(guild, f"✅ **MATCH TIME CONFIRMED** — Match {row['match_no']}\n"
-                               f"**Teams:** {row['team_a_name']} vs {row['team_b_name']}\n"
-                               f"**Channel:** {channel.mention}\n**Time:** <t:{agreed_ts}:F>\n"
-                               f"**Match ID:** `{match_id}`")
->>>>>>> d6300b349087e9bceb3e9d1c58b9b9706852cf22
 
 
 async def setup(bot):
