@@ -379,6 +379,61 @@ class MatchDay(commands.Cog):
                 parts.append(str(field.value or ""))
         return "\n".join(parts)
 
+    def _single_match_from_embed(self, message, guild, scheduling):
+        """Parse the individual matchday embed and resolve its teams from registered team roles."""
+        text = self._fixture_message_text(message)
+
+        # The normal matchday embed uses: `Team A` VS `Team B`.
+        pair = re.search(r"`([^`]+)`\s*(?:<[^>]+>\s*)?vs\s*(?:<[^>]+>\s*)?`([^`]+)`", text, re.I)
+        if not pair:
+            # Fallback for embeds where Discord/markdown formatting is different.
+            pair = re.search(r"([A-Za-z0-9][A-Za-z0-9 ._&'()\-]{1,80}?)\s+(?:VS|vs)\s+([A-Za-z0-9][A-Za-z0-9 ._&'()\-]{1,80}?)(?:\n|$)", text, re.I)
+        if not pair:
+            return None
+
+        name_a, name_b = pair.group(1).strip(), pair.group(2).strip()
+        match = MATCH_HEAD_RE.search(text)
+        match_no = match.group(1) if match else None
+        round_match = ROUND_RE.search(text)
+        round_no = round_match.group(1) if round_match else None
+        groups = GROUP_RE.findall(text)
+        group = groups[-1].upper() if groups else None
+
+        def norm(value):
+            return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+
+        wanted_a, wanted_b = norm(name_a), norm(name_b)
+        found = {}
+
+        # Resolve names through the registered-team mapping, not just the visible role name.
+        for role in guild.roles:
+            try:
+                linked = scheduling.teams_for_role(guild.id, role.id)
+            except Exception:
+                continue
+            if len(linked) != 1:
+                continue
+            _, registered_name, _captain_id = linked[0]
+            registered_norm = norm(registered_name)
+            role_norm = norm(role.name)
+            if wanted_a in (registered_norm, role_norm):
+                found["a"] = role
+            if wanted_b in (registered_norm, role_norm):
+                found["b"] = role
+
+        if "a" not in found or "b" not in found:
+            return {"error": f"I found **{name_a} vs {name_b}**, but couldn't resolve both registered team roles."}
+
+        return {
+            "match_no": match_no or "?",
+            "round_no": round_no,
+            "group": group,
+            "role_a": found["a"].id,
+            "role_b": found["b"].id,
+            # An individual negotiation embed is already inside its stadium.
+            "channel_id": message.channel.id,
+        }
+
     @commands.command(name="forceannounce")
     @commands.guild_only()
     async def forceannounce(self, ctx, *, when_text: str = ""):
@@ -428,16 +483,32 @@ class MatchDay(commands.Cog):
             )
             return
 
-        round_no, fixtures = parse_fixtures(self._fixture_message_text(replied))
-        if not fixtures:
+        scheduling = self.bot.get_cog("Scheduling")
+        if scheduling is None:
             await ctx.reply(
-                "I couldn't find any matches in that message/embed. Each match needs `Match N`, two team roles, and a stadium channel.",
+                "The scheduling module isn't loaded.",
                 mention_author=False,
                 allowed_mentions=none,
             )
             return
 
-        scheduling = self.bot.get_cog("Scheduling")
+        round_no, fixtures = parse_fixtures(self._fixture_message_text(replied))
+        if not fixtures:
+            single = self._single_match_from_embed(replied, ctx.guild, scheduling)
+            if single and single.get("error"):
+                await ctx.reply(single["error"], mention_author=False, allowed_mentions=none)
+                return
+            if single:
+                fixtures = [single]
+                round_no = single.get("round_no") or round_no
+            else:
+                await ctx.reply(
+                    "I couldn't detect a match in that message/embed. For an individual match embed, it must contain `Team A` vs `Team B` and both teams must be registered with team roles.",
+                    mention_author=False,
+                    allowed_mentions=none,
+                )
+                return
+
         if scheduling is None:
             await ctx.reply(
                 "The scheduling module isn't loaded.",
