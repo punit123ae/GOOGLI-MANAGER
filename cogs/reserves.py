@@ -672,7 +672,7 @@ class Reserves(commands.Cog):
             if status == "multiple":
                 safe_names = [discord.utils.escape_markdown(name) for name in suggestions]
                 message = (
-                    f"❌ **`{discord.utils.escape_markdown(team_name)}` matches multiple teams:**\\n"
+                    f"❌ **`{discord.utils.escape_markdown(team_name)}` matches multiple teams:**\n"
                     + "\n".join(f"• {name}" for name in safe_names)
                     + "\nPlease enter a more specific part of the team name."
                 )
