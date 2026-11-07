@@ -245,7 +245,8 @@ def _schedule_days(max_days: int):
     two teams; edges assigned to the same day cannot share a team. It searches
     from the theoretical minimum number of days (maximum team degree) upwards,
     stopping at max_days. This avoids wasting days when matches can be grouped.
-    """\n    rows = _all_reservations()
+    """
+    rows = _all_reservations()
     if not rows:
         return []
 
@@ -476,7 +477,8 @@ class Reserves(commands.Cog):
                 )
                 GROUP BY team_name COLLATE NOCASE
             """).fetchall()
-            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]\n            if over:
+            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]
+            if over:
                 await ctx.reply(
                     f"Cannot set the limit to {total}: these teams already exceed it: "
                     + ", ".join(over[:20]),
@@ -593,6 +595,109 @@ class Reserves(commands.Cog):
 
         # A new reservation invalidates the stored schedule.
         _clear_schedule_state()
+
+    @commands.command(name="forcereserve")
+    async def forcereserve(self, ctx):
+        """Create a reserve even if the initiating team's normal initiation quota is used."""
+        if not await self.owner_only(ctx):
+            return
+
+        limit = _limit()
+        if limit <= 0:
+            await ctx.send("Set the reserve limit first with `+setreserves <number>`.")
+            return
+
+        if ctx.guild is None:
+            await ctx.send("This command can only be used inside the server where teams are approved.")
+            return
+
+        initiating_input = await self.ask_team(ctx, "Enter the **initiating team name**:")
+        if not initiating_input:
+            return
+        opposing_input = await self.ask_team(ctx, "Enter the **opposing team name**:")
+        if not opposing_input:
+            return
+
+        initiating, status_a, suggestions_a = _resolve_approved_team(
+            ctx.guild.id, initiating_input
+        )
+        if status_a != "ok":
+            await ctx.send(_approved_team_error(initiating_input, status_a, suggestions_a))
+            return
+
+        opposing, status_b, suggestions_b = _resolve_approved_team(
+            ctx.guild.id, opposing_input
+        )
+        if status_b != "ok":
+            await ctx.send(_approved_team_error(opposing_input, status_b, suggestions_b))
+            return
+
+        if initiating.casefold() == opposing.casefold():
+            await ctx.send("A team cannot force-reserve a match against itself.")
+            return
+
+        existing = _all_reservations()
+        total_a = sum(
+            1 for row in existing
+            if initiating.casefold() in (
+                row["reserving_team"].casefold(), row["opposing_team"].casefold()
+            )
+        )
+        total_b = sum(
+            1 for row in existing
+            if opposing.casefold() in (
+                row["reserving_team"].casefold(), row["opposing_team"].casefold()
+            )
+        )
+
+        # Force reserve bypasses only the normal initiation quota. Both teams
+        # must still have one available slot under the configured total limit.
+        problems = []
+        if total_a >= limit:
+            problems.append(
+                f"**{initiating}** has no reserve slots left ({total_a}/{limit})."
+            )
+        if total_b >= limit:
+            problems.append(
+                f"**{opposing}** has no reserve slots left ({total_b}/{limit})."
+            )
+        if problems:
+            await ctx.send(
+                "❌ **Force reserve cannot be created.**\n" + "\n".join(problems)
+            )
+            return
+
+        with _connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO reservations (reserving_team, opposing_team, created_by_id) "
+                "VALUES (?, ?, ?)",
+                (initiating, opposing, ctx.author.id),
+            )
+            reserve_id = int(cur.lastrowid)
+
+        total_a += 1
+        total_b += 1
+        _clear_schedule_state()
+
+        embed = discord.Embed(
+            title="⚡ FORCE RESERVE ADDED",
+            description=(
+                f"**Reserve ID:** `{reserve_id}`\n"
+                f"**Initiating team:** {discord.utils.escape_markdown(initiating)}\n"
+                f"**Opponent:** {discord.utils.escape_markdown(opposing)}"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="Team reserve usage",
+            value=(
+                f"**{discord.utils.escape_markdown(initiating)}:** {total_a}/{limit}\n"
+                f"**{discord.utils.escape_markdown(opposing)}:** {total_b}/{limit}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Force reserve bypasses initiation quota, not team capacity.")
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="reservelist")
     async def reservelist(self, ctx):
