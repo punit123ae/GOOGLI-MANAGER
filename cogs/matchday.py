@@ -237,7 +237,8 @@ class ApprovalView(discord.ui.View):
         no = discord.ui.Button(label="No", style=discord.ButtonStyle.danger,
                                custom_id=f"mdapprove:no:{negotiation_id}")
         yes.callback, no.callback = self.on_yes, self.on_no
-        self.add_item(yes)        self.add_item(no)
+        self.add_item(yes)
+        self.add_item(no)
 
     async def on_yes(self, interaction):
         await self.cog.handle_approval(interaction, self.negotiation_id, True)
@@ -753,7 +754,8 @@ class MatchDay(commands.Cog):
     async def on_message(self, message):
         if message.author.bot or message.guild is None:
             return
-        negotiation_id = self.active.get(message.channel.id)        if negotiation_id is None:
+        negotiation_id = self.active.get(message.channel.id)
+        if negotiation_id is None:
             return
         row = self.db.execute("SELECT * FROM matchday_negotiations WHERE id = ? AND status = 'open'",
                               (negotiation_id,)).fetchone()
