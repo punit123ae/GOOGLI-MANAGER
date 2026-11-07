@@ -13,7 +13,7 @@ import re
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import commands, tasks
@@ -274,6 +274,135 @@ def parse_fielder(message: discord.Message):
     return None
 
 
+def _fielder_from_text(text: str, resolve):
+    match = re.search(r"coming\s+toward\s+<@!?(\d+)>", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"coming\s+toward\s+@?([A-Za-z0-9_.-]{2,32})", text, re.IGNORECASE)
+    return resolve(match.group(1)) if match else None
+
+
+def replay_channel(messages, resolve, wanted):
+    """Offline replay of one channel's Hand Cricket messages (oldest first).
+
+    Mirrors the live tracking rules (Match Status scores, "is out!", catch chances, drops,
+    innings change, match end) but only for players where wanted(user_id) is True.
+    Returns (results, fielder_rows, unfinished):
+      results      uid -> [matches_affected, drops, runs_after_drops, runs_without_drops]
+      fielder_rows dicts with batter, fielder, score, final, ts (final may be None)
+      unfinished   uids still batting when the history ended (not counted)
+    """
+    results, fielder_rows = {}, []
+    sessions = {}          # uid -> [first_drop_score, drop_count, last_score, [fielder rows]]
+    done = set()           # batters already finalised in the current innings
+    st = {"innings": None, "latest": {}, "pending": None, "fielder": None, "last_ts": None}
+
+    def finalize(uid, final):
+        s = sessions.pop(uid, None)
+        first, drops, rows = (s[0], s[1], s[3]) if s else (None, 0, [])
+        for r in rows:
+            r["final"] = final
+        affected = max(0, final - first) if first is not None else 0
+        without = first if first is not None else final
+        rec = results.setdefault(uid, [0, 0, 0, 0])
+        rec[0] += 1 if drops else 0
+        rec[1] += drops
+        rec[2] += affected
+        rec[3] += without
+        done.add(uid)
+
+    def end_innings():
+        for uid in list(sessions):
+            finalize(uid, sessions[uid][2])
+        done.clear()
+
+    def end_match():
+        end_innings()
+        st.update(innings="ENDED", latest={}, pending=None, fielder=None)
+
+    for m in messages:
+        ts = m.created_at.timestamp() if getattr(m, "created_at", None) else 0.0
+
+        out = parse_batter_out(m)
+        if out:
+            uid = resolve(out[0])
+            if uid and wanted(uid) and uid not in done:
+                if uid in sessions:
+                    sessions[uid][2] = out[1]
+                else:
+                    sessions[uid] = [None, 0, out[1], []]
+                finalize(uid, out[1])
+            continue
+
+        status = parse_match_status(m)
+        if status:
+            inn = status["innings"]
+            if st["innings"] == "ENDED" and inn is None:
+                continue
+            if inn == "ONE" and (st["innings"] in ("TWO", "ENDED")
+                                 or (st["innings"] == "ONE" and st["last_ts"] is not None
+                                     and ts - st["last_ts"] > 4 * 3600)):
+                if st["innings"] != "ENDED":
+                    end_match()
+            elif inn == "TWO" and st["innings"] == "ONE":
+                end_innings()
+            if inn:
+                st["innings"] = inn
+            st["last_ts"] = ts
+            latest = {}
+            for name, score in status["scores"].items():
+                uid = resolve(name)
+                if uid and wanted(uid):
+                    latest[uid] = score
+                    if uid not in done:
+                        s = sessions.setdefault(uid, [None, 0, score, []])
+                        s[2] = score
+            st["latest"] = latest
+            if status["ended"]:
+                end_match()
+            continue
+
+        text = message_text(m)
+        upper = text.upper()
+        if re.search(r"\bMatch\s+has\s+ended\b", text, re.IGNORECASE):
+            end_match()
+            continue
+
+        if "CHANCE OF WICKET!" in upper:
+            st["pending"], st["fielder"] = None, None
+            opp = parse_opportunity(m)
+            if opp and st["innings"] not in (None, "ENDED"):
+                uid = opp[0] if opp[0] else resolve(opp[1])
+                if uid and uid in st["latest"]:
+                    st["pending"] = (uid, st["latest"][uid], ts)
+                    fid = _fielder_from_text(text, resolve)
+                    if fid:
+                        st["fielder"] = (fid, ts)
+            continue
+
+        result = "dropped" if "BOZO DROPPED THE CATCH" in upper else (
+            "taken" if "TOOK THE CATCH" in upper else None)
+        if result is None:
+            continue
+        pend, fld = st["pending"], st["fielder"]
+        st["pending"], st["fielder"] = None, None
+        if result == "dropped" and pend and ts - pend[2] <= PENDING_TTL_SECONDS and pend[0] not in done:
+            uid, score = pend[0], pend[1]
+            s = sessions.get(uid)
+            if s is None:
+                s = sessions[uid] = [score, 1, score, []]
+            else:
+                if s[0] is None:
+                    s[0] = score
+                s[1] += 1
+            if fld and ts - fld[1] <= PENDING_TTL_SECONDS:
+                row = {"batter": uid, "fielder": fld[0], "score": score, "final": None, "ts": ts}
+                s[3].append(row)
+                fielder_rows.append(row)
+
+    return results, fielder_rows, set(sessions)
+
+
 class CommitConfirmView(discord.ui.View):
     def __init__(self, cog: "BatterFieldingDropStats", ctx: commands.Context):
         super().__init__(timeout=60)
@@ -451,6 +580,7 @@ class BatterFieldingDropStats(commands.Cog):
         self.latest_status = {}  # channel -> (match_id, innings, score map, monotonic timestamp)
         self.pending = {}
         self._warned_names = set()
+        self._query_tried = {}  # (guild_id, name) -> monotonic time of the last Discord member lookup
         self._pending_fielder = {}  # channel_id -> (fielder_id, created time.time())
         self._init_db()
 
@@ -851,6 +981,10 @@ class BatterFieldingDropStats(commands.Cog):
         batter_name, final_score = parsed
         uid = find_member_id(message.guild, batter_name)
         if uid is None:
+            # Record the miss so +previewlb lists this player instead of silently dropping them.
+            if (message.channel.id, batter_name) not in self._warned_names:
+                self._warned_names.add((message.channel.id, batter_name))
+                self._note_unmatched(message.guild, batter_name)
             return False
         db = self.bot.db
         if db.execute("SELECT 1 FROM batter_drop_finalized WHERE message_id=?", (message.id,)).fetchone():
@@ -891,6 +1025,17 @@ class BatterFieldingDropStats(commands.Cog):
             return
         if not self._tracking_enabled(message.guild.id, message.channel.id):
             return
+
+        # Players missing from the member cache are looked up on Discord first, so they are not skipped.
+        try:
+            pre_out = parse_batter_out(message)
+            if pre_out:
+                await self._resolve_missing(message.guild, [pre_out[0]])
+            pre_status = parse_match_status(message)
+            if pre_status:
+                await self._resolve_missing(message.guild, list(pre_status["scores"]))
+        except Exception:
+            log.exception("batfds: member lookup before tracking failed")
 
         if await self._handle_batter_out(message):
             return
@@ -2104,6 +2249,181 @@ class BatterFieldingDropStats(commands.Cog):
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def _resolve_missing(self, guild: discord.Guild, names):
+        """Ask Discord for members whose names are not in the cache, then rebuild the name table."""
+        now = time.monotonic()
+        asked = False
+        for name in names:
+            key = _clean_discord_name(name).lstrip("@")
+            if not key or find_member_id(guild, name) is not None:
+                continue
+            if now - self._query_tried.get((guild.id, key), -1e9) < 600:
+                continue  # asked recently: truly unknown / ambiguous names must not flood Discord
+            self._query_tried[(guild.id, key)] = now
+            try:
+                await guild.query_members(query=key[:100], limit=10, cache=True)
+                asked = True
+            except Exception:
+                log.warning("batfds: member lookup failed (is the Members intent enabled?)")
+                break
+        if asked:
+            invalidate_name_index(guild.id)
+
+    @commands.command(name="rescanlb")
+    @commands.guild_only()
+    async def rescanlb(self, ctx: commands.Context, hours: int = 36, mode: str = "preview"):
+        """Rebuild Batter Impact for players the bot never tracked, from chat history.
+
+        Usage: +rescanlb [hours] [apply]
+        Reads the tracked channels for the last <hours> hours and replays them for every player
+        who has NO record yet (nothing in +lb or the preview), so nobody is counted twice.
+        Without "apply" it only shows what it would add.
+        """
+        if ctx.author.id != BOT_OWNER_ID:
+            return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        apply = mode.lower() in ("apply", "confirm")
+        hours = max(1, min(int(hours), 24 * 14))
+        guild, db = ctx.guild, self.bot.db
+        if not guild.chunked:
+            try:
+                await guild.chunk()
+            except Exception:
+                log.warning("batfds: could not chunk the guild member list")
+        channel_ids = [int(r[0]) for r in db.execute(
+            "SELECT channel_id FROM fielding_tracking_channels WHERE guild_id=?", (guild.id,))]
+        if not channel_ids:
+            return await ctx.reply("No tracked channels. Use `+starttracking` first.", mention_author=False)
+        has_data = {int(r[0]) for r in db.execute(
+            "SELECT user_id FROM batter_drop_lb WHERE guild_id=? UNION "
+            "SELECT user_id FROM batter_drop_preview WHERE guild_id=?", (guild.id, guild.id))}
+        running = db.execute(
+            "SELECT COUNT(*) FROM batter_drop_matches WHERE guild_id=? AND ended=0", (guild.id,)).fetchone()[0]
+
+        progress = await ctx.reply(f"Reading the last {hours}h of {len(channel_ids)} tracked channel(s)…",
+                                   mention_author=False)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        per_channel, names = {}, set()
+        for cid in channel_ids:
+            channel = guild.get_channel(cid) or guild.get_thread(cid)
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(cid)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+            msgs = []
+            try:
+                async for m in channel.history(after=cutoff, oldest_first=True, limit=None):
+                    if m.author.id == HANDCRICKET_BOT_ID:
+                        msgs.append(m)
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+            per_channel[cid] = msgs
+            for m in msgs:
+                out = parse_batter_out(m)
+                if out:
+                    names.add(out[0])
+                status = parse_match_status(m)
+                if status:
+                    names.update(status["scores"])
+                opp = parse_opportunity(m)
+                if opp and opp[1]:
+                    names.add(opp[1])
+            try:
+                await progress.edit(content=f"Read {sum(len(v) for v in per_channel.values())} Hand Cricket "
+                                            f"messages from {len(per_channel)}/{len(channel_ids)} channel(s)…")
+            except discord.HTTPException:
+                pass
+
+        await self._resolve_missing(guild, names)
+        cache = {}
+
+        def resolve(name):
+            key = _clean_discord_name(name).lstrip("@")
+            if key not in cache:
+                cache[key] = find_member_id(guild, name)
+            return cache[key]
+
+        results, fielder_rows, unfinished = {}, [], set()
+        for cid, msgs in per_channel.items():
+            res, frows, left = replay_channel(msgs, resolve, lambda uid: uid not in has_data)
+            for uid, rec in res.items():
+                total = results.setdefault(uid, [0, 0, 0, 0])
+                for i in range(4):
+                    total[i] += rec[i]
+            for r in frows:
+                r["channel"] = cid
+            fielder_rows.extend(frows)
+            unfinished |= left
+        unresolved = sorted(k for k, v in cache.items() if v is None)
+
+        raw = {}
+        try:
+            raw = {int(u): int(r) for u, r in db.execute(
+                "SELECT p.user_id,SUM(p.runs) FROM player_match_stats p JOIN stats_imports i "
+                "ON i.source_message_id=p.source_message_id WHERE i.guild_id=? GROUP BY p.user_id", (guild.id,))}
+        except sqlite3.Error:
+            pass
+        lines, same, differ = [], 0, 0
+        for uid, (m_, d_, a_, w_) in sorted(results.items(), key=lambda kv: -(kv[1][2] + kv[1][3])):
+            member = guild.get_member(uid)
+            name = member.display_name if member else str(uid)
+            note = ""
+            if uid in raw:
+                if raw[uid] == a_ + w_:
+                    same += 1
+                else:
+                    differ += 1
+                    note = f" | RAW STATS SAY {raw[uid]}"
+            lines.append(f"{name} ({uid}): matches {m_}, drops {d_}, after {a_}, without {w_}, total {a_ + w_}{note}")
+        if unresolved:
+            lines.append("")
+            lines.append("Names that could not be matched to a member (still missing):")
+            lines.extend(f"  {n}" for n in unresolved)
+        summary = [
+            f"**Rescan of the last {hours}h:** {len(results)} player(s) with no record would be added "
+            f"({sum(r[1] for r in results.values())} drops, {sum(r[2] + r[3] for r in results.values())} runs).",
+            f"Totals agree with Hand Cricket's raw stats for **{same}**; differ for **{differ}**; "
+            f"no raw stats for {len(results) - same - differ}.",
+        ]
+        if unresolved:
+            summary.append(f"⚠️ {len(unresolved)} name(s) still could not be matched (listed in the file).")
+        if unfinished or running:
+            summary.append("⚠️ Some matches were still in progress; unfinished batters were not counted.")
+        file = discord.File(io.BytesIO("\n".join(lines).encode("utf-8")), filename="rescan.txt")
+        if not results:
+            return await ctx.reply("\n".join(summary) + "\nNothing to add.", mention_author=False)
+        if not apply:
+            summary.append(f"Nothing was written. Back up the database file, then run `+rescanlb {hours} apply`.")
+            return await ctx.reply("\n".join(summary), file=file, mention_author=False)
+
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for uid, (m_, d_, a_, w_) in results.items():
+                db.execute("""
+                    INSERT INTO batter_drop_lb
+                        (guild_id,user_id,matches_affected,drops,runs_affected,runs_without_drops)
+                    VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(guild_id,user_id) DO UPDATE SET
+                        matches_affected=matches_affected+excluded.matches_affected,
+                        drops=drops+excluded.drops,
+                        runs_affected=runs_affected+excluded.runs_affected,
+                        runs_without_drops=runs_without_drops+excluded.runs_without_drops
+                """, (guild.id, uid, m_, d_, a_, w_))
+            for r in fielder_rows:
+                if r["final"] is None:
+                    continue
+                db.execute(
+                    "INSERT INTO fielder_drop_log(guild_id,channel_id,session_key,batter_id,fielder_id,"
+                    "score_at_drop,final_score,committed,created_at) VALUES(?,?,?,?,?,?,?,1,?)",
+                    (guild.id, r["channel"], "rescan", r["batter"], r["fielder"], r["score"], r["final"], r["ts"]))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        summary.append("✅ Written to the permanent `+lb`. Run `+auditbatterimpact` to check, then `+fixbatterimpact` "
+                       "for any player whose total still differs.")
+        await ctx.reply("\n".join(summary), file=file, mention_author=False)
 
     @commands.command(name="setbatterimpact")
     @commands.guild_only()
