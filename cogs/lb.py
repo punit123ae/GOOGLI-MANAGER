@@ -24,7 +24,9 @@ BLUE = discord.Colour.from_rgb(20, 117, 255)
 # Batter-impact metrics live in the Batting category but come from batfds' table.
 # Value = index into (runs_after_drops, runs_without_drops, catches_dropped).
 BATTER_IMPACT_KEYS = {"bi_after": 0, "bi_without": 1, "bi_drops": 2}
-PAGE_SIZE = 11  # rows under the gold box; the gold box is always overall #1
+PAGE_SIZE = 11  # card rows under the gold box; the gold box is always overall #1
+EMBED_PAGE_SIZE = 10  # Fielding and Team Fielding stay as the classic embed
+EMBED_CATEGORIES = ("Fielding", "Team Fielding")
 
 METRICS = {
     "Batting": [
@@ -102,7 +104,7 @@ def _fielding_fantasy_points(rec: tuple[int, int] | None) -> float:
 def _fantasy_points(rows: list[dict]) -> float:
     """Batting + bowling fantasy points using the +stats formula itself.
 
-    Fielding points are added separately in LeaderboardView.make_card().
+    Fielding points are added separately in LeaderboardView.make_payload().
     """
     return fantasy_raw_points(rows)[2]
 
@@ -385,7 +387,38 @@ class LeaderboardView(discord.ui.View):
             return False
         return True
 
-    async def make_card(self) -> discord.File:
+    def _classic_embed(self, computed: list) -> discord.Embed:
+        """The original embed leaderboard, still used for Fielding and Team Fielding."""
+        guild = self.ctx.guild
+        total = len(computed)
+        pages = max(1, (total + EMBED_PAGE_SIZE - 1) // EMBED_PAGE_SIZE)
+        self.page = max(0, min(self.page, pages - 1))
+        current = computed[self.page * EMBED_PAGE_SIZE:(self.page + 1) * EMBED_PAGE_SIZE]
+
+        noun = "teams" if self.category == "Team Fielding" else "players"
+        embed = discord.Embed(
+            title="# **`KASHMIR TITANS S1`**",
+            description=f"**{self.category.upper()} LEADERBOARD — {self.metric_label.upper()}**\n"
+                        f"**{total} {noun} in this category**\n\n",
+            colour=BLUE,
+        )
+        lines = []
+        for index, (uid, value) in enumerate(current, start=self.page * EMBED_PAGE_SIZE + 1):
+            if self.category == "Team Fielding":
+                username = self.team_names.get(uid, f"Team {uid}")
+            else:
+                member = guild.get_member(uid) if guild else None
+                username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
+            lines.append(f"`{index}.` **{discord.utils.escape_markdown(username)}** → `{_display(self.metric_key, value)}`")
+        embed.description += "\n".join(lines) if lines else "No players qualify for this statistic yet."
+        embed.set_footer(text=f"Kashmir Titans S1 • Page {self.page + 1}/{pages} • {EMBED_PAGE_SIZE} {noun} per page")
+        for child in self.children:
+            if isinstance(child, PageButton):
+                child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
+        return embed
+
+    async def make_payload(self) -> tuple[discord.Embed | None, discord.File | None]:
+        """(embed, None) for Fielding / Team Fielding, otherwise (None, card image file)."""
         guild = self.ctx.guild
         rows_by_user = self.cog.rows_by_user
         computed = []
@@ -426,6 +459,8 @@ class LeaderboardView(discord.ui.View):
                     value += _fielding_fantasy_points(self.cog.fielding_by_user.get(uid))
                 computed.append((uid, value))
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
+        if self.category in EMBED_CATEGORIES:
+            return self._classic_embed(computed), None
         total = len(computed)
         pages = max(1, (max(total - 1, 0) + PAGE_SIZE - 1) // PAGE_SIZE)
         self.page = max(0, min(self.page, pages - 1))
@@ -443,18 +478,21 @@ class LeaderboardView(discord.ui.View):
             return {"rank": rank, "name": name, "value": _display_plain(key, value),
                     "avatar": await self.cog.avatar_bytes(member)}
 
-        top = await entry(1, *computed[0]) if computed else None
-        rows = await asyncio.gather(*[entry(first + i + 1, uid, value)
-                                      for i, (uid, value) in enumerate(current)])
+        author = self.ctx.author
+        top, *rows, you_avatar = await asyncio.gather(
+            entry(1, *computed[0]) if computed else asyncio.sleep(0),
+            *[entry(first + i + 1, uid, value) for i, (uid, value) in enumerate(current)],
+            self.cog.avatar_bytes(author),
+        )
+        rows = list(rows)
 
         # The bottom YOU row: the person who ran +lb, wherever they rank in this statistic.
-        author = self.ctx.author
         you_uid = author.id
         if is_team:
             you_uid = next((tid for tid, info in _team_rosters(guild.id).items()
                             if author.id in info["members"]), None)
         you = {"rank": "-", "name": author.name, "value": "-",
-               "avatar": await self.cog.avatar_bytes(author)}
+               "avatar": you_avatar}
         for index, (uid, value) in enumerate(computed, start=1):
             if uid == you_uid:
                 you.update(rank=index, value=_display_plain(key, value))
@@ -465,17 +503,17 @@ class LeaderboardView(discord.ui.View):
         page_text = f"PAGE {self.page + 1}/{pages}"
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(
-            None, lambda: render_card(self.category, self.metric_label, top, list(rows), you, page_text))
+            None, lambda: render_card(self.category, self.metric_label, top, rows, you, page_text))
         for child in self.children:
             if isinstance(child, PageButton):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
-        return discord.File(io.BytesIO(png), filename="leaderboard.png")
+        return None, discord.File(io.BytesIO(png), filename="leaderboard.jpg")
 
     async def refresh(self, interaction: discord.Interaction):
         await interaction.response.defer()
         self._rebuild_items()
-        card = await self.make_card()
-        await interaction.message.edit(embed=None, attachments=[card], view=self)
+        embed, card = await self.make_payload()
+        await interaction.message.edit(embed=embed, attachments=[card] if card else [], view=self)
 
 
 class LeaderboardCog(commands.Cog):
@@ -568,8 +606,8 @@ class LeaderboardCog(commands.Cog):
             self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id)
             view = LeaderboardView(self, ctx)
             async with ctx.typing():
-                card = await view.make_card()
-            message = await ctx.send(file=card, view=view)
+                embed, card = await view.make_payload()
+            message = await ctx.send(embed=embed, file=card, view=view)
             view.message = message
         except Exception as exc:
             print(f"[lb] Failed to generate leaderboard: {type(exc).__name__}: {exc}")

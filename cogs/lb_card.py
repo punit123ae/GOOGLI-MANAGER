@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -17,26 +18,41 @@ GOLD = (255, 194, 26)
 CAT_X, CAT_Y, CAT_W = 208, 310, 150      # text after "CATEGORY:"
 STAT_X, STAT_Y, STAT_W = 750, 310, 205   # text after "STAT:"
 
-GOLD_RING = (315, 425, 72)               # centre x, centre y, radius
+GOLD_RING = (315, 425, 71)               # centre x, centre y, INNER radius of the gold ring
 GOLD_RANK_X = 85
 GOLD_NAME_X = 425
 GOLD_STAT_RIGHT = 955
 
 ROWS = 11                                # rows under the gold box
-ROW_Y0, ROW_STEP = 608, 56.2             # centre y of first row, spacing
-ROW_AV_X, ROW_AV_R = 237, 20
+# measured centre y of each avatar ring on the template (the rows are not evenly spaced)
+ROW_CY = [607, 666, 723, 780, 837, 894, 952, 1010, 1066, 1119, 1171]
+ROW_AV_X, ROW_AV_R = 238, 22             # ring centre x, INNER radius
 RANK_CX = (28 + 165) // 2
 NAME_X = 285
 STAT_BOX = (838, 992)
 
-YOU_Y = 1330
+YOU_Y = 1328
+YOU_AV_X = 238
+YOU_NAME_X = 300
 YOU_RANK_CX = (40 + 165) // 2
 YOU_STAT_BOX = (835, 985)
-YOU_AV_R = 22
+YOU_AV_R = 35                            # big ring: fills the whole YOU box
 
 PAGE_RIGHT, PAGE_Y = 985, 262            # small "PAGE 1/3" text under the title
 
 
+@lru_cache(maxsize=None)
+def _template_bytes() -> bytes:
+    return TEMPLATE.read_bytes()
+
+
+@lru_cache(maxsize=None)
+def _template() -> Image.Image:
+    """Decoded once and reused; each card is drawn on a copy."""
+    return Image.open(io.BytesIO(_template_bytes())).convert("RGB")
+
+
+@lru_cache(maxsize=None)
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     for p in FONT_PATHS:
         try:
@@ -83,9 +99,9 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
     top  : {"rank", "name", "value", "avatar"} for the gold box (overall #1) or None
     rows : up to 11 dicts like top, each with its real rank
     you  : {"rank", "name", "value", "avatar"} for the person who typed +lb, or None
-    avatar is PNG/JPEG bytes or None. Returns PNG bytes.
+    avatar is PNG/JPEG bytes or None. Returns JPEG bytes.
     """
-    img = Image.open(TEMPLATE).convert("RGB")
+    img = _template().copy()
     d = ImageDraw.Draw(img)
 
     _put(d, category, 27, CAT_X, CAT_Y, ICE, CAT_W)
@@ -95,13 +111,13 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     if top:
         cx, cy, r = GOLD_RING
-        _avatar(img, top.get("avatar"), cx, cy, r - 4)
+        _avatar(img, top.get("avatar"), cx, cy, r)
         _put(d, top["rank"], 54, GOLD_RANK_X, cy, GOLD, 70, "m")
         _put(d, top["name"], 44, GOLD_NAME_X, cy, ICE, GOLD_STAT_RIGHT - 200 - GOLD_NAME_X)
         _put(d, top["value"], 44, GOLD_STAT_RIGHT, cy, GOLD, 260, "r")
 
     for i, e in enumerate(rows[:ROWS]):
-        cy = int(round(ROW_Y0 + i * ROW_STEP))
+        cy = ROW_CY[i]
         _put(d, e["rank"], 30, RANK_CX, cy, ICE, 120, "m")
         _avatar(img, e.get("avatar"), ROW_AV_X, cy, ROW_AV_R)
         _put(d, e["name"], 29, NAME_X, cy, ICE, STAT_BOX[0] - 20 - NAME_X)
@@ -109,11 +125,11 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     if you:
         _put(d, you.get("rank", "-"), 30, YOU_RANK_CX, YOU_Y, GOLD, 115, "m")
-        _avatar(img, you.get("avatar"), ROW_AV_X, YOU_Y, YOU_AV_R)
-        _put(d, you["name"], 29, NAME_X, YOU_Y, ICE, YOU_STAT_BOX[0] - 20 - NAME_X)
+        _avatar(img, you.get("avatar"), YOU_AV_X, YOU_Y, YOU_AV_R)
+        _put(d, you["name"], 29, YOU_NAME_X, YOU_Y, ICE, YOU_STAT_BOX[0] - 20 - YOU_NAME_X)
         _put(d, you["value"], 29, (YOU_STAT_BOX[0] + YOU_STAT_BOX[1]) // 2, YOU_Y, GOLD,
              YOU_STAT_BOX[1] - YOU_STAT_BOX[0] - 14, "m")
 
     out = io.BytesIO()
-    img.save(out, "PNG", optimize=True)
+    img.save(out, "JPEG", quality=90, subsampling=0)   # ~5x smaller and much faster than PNG
     return out.getvalue()
