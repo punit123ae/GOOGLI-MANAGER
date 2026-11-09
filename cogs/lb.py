@@ -24,7 +24,7 @@ BLUE = discord.Colour.from_rgb(20, 117, 255)
 # Batter-impact metrics live in the Batting category but come from batfds' table.
 # Value = index into (runs_after_drops, runs_without_drops, catches_dropped).
 BATTER_IMPACT_KEYS = {"bi_after": 0, "bi_without": 1, "bi_drops": 2}
-PAGE_SIZE = 11  # card rows under the gold box; the gold box is always overall #1
+PAGE_SIZE = 10  # players per card page: the gold box (first of the page) + 9 rows
 EMBED_PAGE_SIZE = 10  # Fielding and Team Fielding stay as the classic embed
 EMBED_CATEGORIES = ("Fielding", "Team Fielding")
 
@@ -462,10 +462,10 @@ class LeaderboardView(discord.ui.View):
         if self.category in EMBED_CATEGORIES:
             return self._classic_embed(computed), None
         total = len(computed)
-        pages = max(1, (max(total - 1, 0) + PAGE_SIZE - 1) // PAGE_SIZE)
+        pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         self.page = max(0, min(self.page, pages - 1))
-        first = 1 + self.page * PAGE_SIZE          # index of the first table row (index 0 is the gold box)
-        current = computed[first:first + PAGE_SIZE]
+        first = self.page * PAGE_SIZE              # index of the first player on this page (shown in the gold box)
+        current = computed[first + 1:first + PAGE_SIZE]
         is_team = self.category == "Team Fielding"
         key = self.metric_key
 
@@ -480,8 +480,8 @@ class LeaderboardView(discord.ui.View):
 
         author = self.ctx.author
         top, *rows, you_avatar = await asyncio.gather(
-            entry(1, *computed[0]) if computed else asyncio.sleep(0),
-            *[entry(first + i + 1, uid, value) for i, (uid, value) in enumerate(current)],
+            entry(first + 1, *computed[first]) if computed else asyncio.sleep(0),
+            *[entry(first + i + 2, uid, value) for i, (uid, value) in enumerate(current)],
             self.cog.avatar_bytes(author),
         )
         rows = list(rows)

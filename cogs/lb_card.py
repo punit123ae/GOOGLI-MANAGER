@@ -23,10 +23,10 @@ GOLD_RANK_X = 85
 GOLD_NAME_X = 425
 GOLD_STAT_RIGHT = 955
 
-ROWS = 11                                # rows under the gold box
+ROWS = 9                                 # rows under the gold box (gold + 9 = 10 players per page)
 # measured centre y of each avatar ring on the template (the rows are not evenly spaced)
-ROW_CY = [607, 666, 723, 780, 837, 894, 952, 1010, 1066, 1119, 1171]
-ROW_AV_X, ROW_AV_R = 238, 22             # ring centre x, INNER radius
+ROW_CY = [613, 682, 750, 819, 887, 956, 1024, 1093, 1161]
+ROW_AV_X, ROW_AV_R = 238, 26             # ring centre x, INNER radius
 RANK_CX = (28 + 165) // 2
 NAME_X = 285
 STAT_BOX = (838, 992)
@@ -97,7 +97,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
                 you: dict | None, page_text: str = "") -> bytes:
     """
     top  : {"rank", "name", "value", "avatar"} for the gold box (overall #1) or None
-    rows : up to 11 dicts like top, each with its real rank
+    rows : up to 9 dicts like top, each with its real rank
     you  : {"rank", "name", "value", "avatar"} for the person who typed +lb, or None
     avatar is PNG/JPEG bytes or None. Returns JPEG bytes.
     """
@@ -118,10 +118,10 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     for i, e in enumerate(rows[:ROWS]):
         cy = ROW_CY[i]
-        _put(d, e["rank"], 30, RANK_CX, cy, ICE, 120, "m")
+        _put(d, e["rank"], 33, RANK_CX, cy, ICE, 120, "m")
         _avatar(img, e.get("avatar"), ROW_AV_X, cy, ROW_AV_R)
-        _put(d, e["name"], 29, NAME_X, cy, ICE, STAT_BOX[0] - 20 - NAME_X)
-        _put(d, e["value"], 29, (STAT_BOX[0] + STAT_BOX[1]) // 2, cy, ICE, STAT_BOX[1] - STAT_BOX[0] - 14, "m")
+        _put(d, e["name"], 32, NAME_X, cy, ICE, STAT_BOX[0] - 20 - NAME_X)
+        _put(d, e["value"], 32, (STAT_BOX[0] + STAT_BOX[1]) // 2, cy, ICE, STAT_BOX[1] - STAT_BOX[0] - 14, "m")
 
     if you:
         _put(d, you.get("rank", "-"), 30, YOU_RANK_CX, YOU_Y, GOLD, 115, "m")
