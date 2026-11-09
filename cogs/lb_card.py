@@ -15,30 +15,30 @@ ICE = (232, 243, 255)
 GOLD = (255, 194, 26)
 
 # ---- coordinates on the 1024 x 1535 template ----
-CAT_X, CAT_Y, CAT_W = 208, 310, 150      # text after "CATEGORY:"
-STAT_X, STAT_Y, STAT_W = 750, 310, 205   # text after "STAT:"
+CAT_X, CAT_Y, CAT_W = 275, 230, 390      # category text in the upper-left blue panel
+STAT_X, STAT_Y, STAT_W = 870, 230, 220   # statistic text in the upper-right blue panel
 
-GOLD_RING = (315, 425, 71)               # centre x, centre y, INNER radius of the gold ring
-GOLD_RANK_X = 85
-GOLD_NAME_X = 425
-GOLD_STAT_RIGHT = 955
+GOLD_RING = (205, 465, 60)               # avatar ring centre and inner radius in the gold leader panel
+GOLD_RANK_X = 95
+GOLD_NAME_X = 320
+GOLD_STAT_RIGHT = 950
 
 ROWS = 9                                 # rows under the gold box (gold + 9 = 10 players per page)
 # measured centre y of each avatar ring on the template (the rows are not evenly spaced)
-ROW_CY = [613, 682, 750, 819, 887, 956, 1024, 1093, 1161]
-ROW_AV_X, ROW_AV_R = 238, 26             # ring centre x, INNER radius
+ROW_CY = [663, 722, 781, 839, 899, 958, 1017, 1076, 1135]
+ROW_AV_X, ROW_AV_R = 205, 26             # ring centre x, INNER radius
 RANK_CX = (28 + 165) // 2
-NAME_X = 285
-STAT_BOX = (838, 992)
+NAME_X = 295
+STAT_BOX = (820, 965)
 
-YOU_Y = 1328
-YOU_AV_X = 238
+YOU_Y = 1294
+YOU_AV_X = 205
 YOU_NAME_X = 300
 YOU_RANK_CX = (40 + 165) // 2
 YOU_STAT_BOX = (835, 985)
 YOU_AV_R = 35                            # big ring: fills the whole YOU box
 
-PAGE_RIGHT, PAGE_Y = 985, 262            # small "PAGE 1/3" text under the title
+PAGE_RIGHT, PAGE_Y = 970, 230             # page indicator in the upper-right blue panel
 
 
 @lru_cache(maxsize=None)
