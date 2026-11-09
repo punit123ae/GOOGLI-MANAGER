@@ -1709,6 +1709,19 @@ class Stats(commands.Cog):
                 (source.id,),
             )
 
+        # +rs restores the ranking state before a temporary +as import.
+        # Reset the saved rank baseline so the next +lb shows neutral markers
+        # instead of misleading reverse arrows. This table is created by cogs/lb.py.
+        try:
+            self.db.execute(
+                "DELETE FROM lb_rank_history WHERE guild_id = ?",
+                (ctx.guild.id,),
+            )
+            self.db.commit()
+        except sqlite3.Error:
+            # The leaderboard history table may not exist yet; removal still succeeds.
+            pass
+
         await ctx.reply(
             "✅ Removed that match's imported statistics. "
             "Other match records remain unchanged.",
