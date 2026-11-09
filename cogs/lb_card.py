@@ -38,7 +38,7 @@ YOU_RANK_CX = (40 + 165) // 2
 YOU_STAT_BOX = (820, 920)
 YOU_AV_R = 35                            # big ring: fills the whole YOU box
 
-PAGE_RIGHT, PAGE_Y = 970, 230             # page indicator in the upper-right blue panel
+PAGE_RIGHT, PAGE_Y = 965, 230             # page indicator in the upper-right blue panel
 
 
 @lru_cache(maxsize=None)
@@ -179,7 +179,8 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
     d.text((502, 312), headline, font=headline_font, fill=(80, 210, 235), anchor="mm",
            stroke_width=1, stroke_fill=(232, 243, 255))
     if page_text:
-        _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 200, "r")
+        # Clear baked-in page text first to avoid double-printing (e.g. PAGE 1/3 + PAGE 1/51).
+        d.rectangle((820, 210, 965, 248), fill=(3, 20, 48))\n        _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 135, "r")
 
     if top:
         cx, cy, r = GOLD_RING
@@ -188,7 +189,8 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
         _put(d, top["name"], 44, GOLD_NAME_X, cy, ICE, GOLD_STAT_RIGHT - 200 - GOLD_NAME_X)
         _put(d, top["value"], 44, GOLD_STAT_RIGHT, cy, GOLD, 260, "r")
 
-    for i, e in enumerate(rows[:ROWS]):
+    # Explicitly draw the STATS heading; the template header label is absent.
+    _put(d, "STATS", 25, 880, 610, ICE, 150, "m")\n\n    # Hide the leftover decorative avatar ring after the ninth regular row.\n    d.ellipse((179, 1109, 231, 1161), fill=(3, 20, 48))\n\n    for i, e in enumerate(rows[:ROWS]):
         cy = ROW_CY[i]
         _rank_cell(d, e["rank"], e.get("delta"), RANK_CX, cy, 33, ICE)
         _avatar(img, e.get("avatar"), ROW_AV_X, cy, ROW_AV_R)
@@ -204,7 +206,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     # The template has two small information panels beneath the pinned YOU row.
     # Keep their contents generic so the same card works for every leaderboard.
-    panel_y = 1375
+    panel_y = 1408
     _put(d, "PLAYER TO WATCH", 24, 405, panel_y, (159, 208, 255), 285, "m")
     _put(d, player_to_watch or "—", 25, 770, panel_y, ICE, 300, "m")
 
