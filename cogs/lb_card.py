@@ -180,7 +180,8 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
            stroke_width=1, stroke_fill=(232, 243, 255))
     if page_text:
         # Clear baked-in page text first to avoid double-printing (e.g. PAGE 1/3 + PAGE 1/51).
-        d.rectangle((820, 210, 965, 248), fill=(3, 20, 48))\n        _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 135, "r")
+        d.rectangle((820, 210, 965, 248), fill=(3, 20, 48))
+        _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 135, "r")
 
     if top:
         cx, cy, r = GOLD_RING
@@ -190,7 +191,12 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
         _put(d, top["value"], 44, GOLD_STAT_RIGHT, cy, GOLD, 260, "r")
 
     # Explicitly draw the STATS heading; the template header label is absent.
-    _put(d, "STATS", 25, 880, 610, ICE, 150, "m")\n\n    # Hide the leftover decorative avatar ring after the ninth regular row.\n    d.ellipse((179, 1109, 231, 1161), fill=(3, 20, 48))\n\n    for i, e in enumerate(rows[:ROWS]):
+    _put(d, "STATS", 25, 880, 610, ICE, 150, "m")
+
+    # Hide the leftover decorative avatar ring after the ninth regular row.
+    d.ellipse((179, 1109, 231, 1161), fill=(3, 20, 48))
+
+    for i, e in enumerate(rows[:ROWS]):
         cy = ROW_CY[i]
         _rank_cell(d, e["rank"], e.get("delta"), RANK_CX, cy, 33, ICE)
         _avatar(img, e.get("avatar"), ROW_AV_X, cy, ROW_AV_R)
