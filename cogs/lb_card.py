@@ -25,20 +25,20 @@ GOLD_STAT_RIGHT = 950
 
 ROWS = 9                                 # rows under the gold box (gold + 9 = 10 players per page)
 # measured centre y of each avatar ring on the template (the rows are not evenly spaced)
-ROW_CY = [647, 703, 759, 815, 871, 927, 983, 1039, 1095]
+ROW_CY = [653, 709, 765, 821, 877, 933, 989, 1045, 1101]
 ROW_AV_X, ROW_AV_R = 198, 26             # ring centre x, INNER radius
 RANK_CX = (28 + 165) // 2
 NAME_X = 242
 STAT_BOX = (820, 925)
 
-YOU_Y = 1260
+YOU_Y = 1266
 YOU_AV_X = 200
 YOU_NAME_X = 275
 YOU_RANK_CX = (40 + 165) // 2
 YOU_STAT_BOX = (820, 920)
 YOU_AV_R = 35                            # big ring: fills the whole YOU box
 
-PAGE_RIGHT, PAGE_Y = 965, 230             # page indicator in the upper-right blue panel
+PAGE_RIGHT, PAGE_Y = 920, 230             # page indicator in the upper-right blue panel
 
 
 @lru_cache(maxsize=None)
@@ -180,8 +180,8 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
            stroke_width=1, stroke_fill=(232, 243, 255))
     if page_text:
         # Clear baked-in page text first to avoid double-printing (e.g. PAGE 1/3 + PAGE 1/51).
-        d.rectangle((820, 210, 965, 248), fill=(3, 20, 48))
-        _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 135, "r")
+        d.rectangle((820, 210, 925, 248), fill=(3, 20, 48))
+        _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 105, "r")
 
     if top:
         cx, cy, r = GOLD_RING
@@ -212,7 +212,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     # The template has two small information panels beneath the pinned YOU row.
     # Keep their contents generic so the same card works for every leaderboard.
-    panel_y = 1408
+    panel_y = 1375
     _put(d, "PLAYER TO WATCH", 24, 405, panel_y, (159, 208, 255), 285, "m")
     _put(d, player_to_watch or "—", 25, 770, panel_y, ICE, 300, "m")
 
