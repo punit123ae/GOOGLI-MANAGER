@@ -419,7 +419,7 @@ class LeaderboardView(discord.ui.View):
         return embed
 
     def _rank_deltas(self, computed: list[tuple[int, Any]]) -> dict[int, int | None]:
-        """Compare this ranking with the last saved snapshot for this exact stat."""
+        """Keep movement markers stable until stats revision changes."""
         cache_key = (self.category, self.metric_key)
         if cache_key in self._rank_delta_cache:
             return self._rank_delta_cache[cache_key]
@@ -438,30 +438,82 @@ class LeaderboardView(discord.ui.View):
                 "user_id INTEGER NOT NULL, rank INTEGER NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
                 "PRIMARY KEY (guild_id, category, metric_key, user_id))"
             )
-            previous_rows = db.execute(
-                "SELECT user_id, rank FROM lb_rank_history "
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_stats_revision ("
+                "guild_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_rank_metric_revision ("
+                "guild_id INTEGER NOT NULL, category TEXT NOT NULL, metric_key TEXT NOT NULL, "
+                "revision INTEGER NOT NULL, PRIMARY KEY (guild_id, category, metric_key))"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_rank_display_delta ("
+                "guild_id INTEGER NOT NULL, category TEXT NOT NULL, metric_key TEXT NOT NULL, "
+                "user_id INTEGER NOT NULL, delta INTEGER NOT NULL, "
+                "PRIMARY KEY (guild_id, category, metric_key, user_id))"
+            )
+
+            revision_row = db.execute(
+                "SELECT revision FROM lb_stats_revision WHERE guild_id = ?", (guild_id,)
+            ).fetchone()
+            stats_revision = int(revision_row[0]) if revision_row else 0
+            metric_revision_row = db.execute(
+                "SELECT revision FROM lb_rank_metric_revision "
                 "WHERE guild_id = ? AND category = ? AND metric_key = ?",
                 (guild_id, self.category, self.metric_key),
-            ).fetchall()
-            previous = {int(row[0]): int(row[1]) for row in previous_rows}
+            ).fetchone()
+            previous_revision = int(metric_revision_row[0]) if metric_revision_row else None
+
             current = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
-            # Missing baseline means unchanged/neutral. +rs clears the baseline
-            # intentionally so restored rankings don't show reverse arrows.
-            result = {
-                uid: (previous[uid] - rank if uid in previous else 0)
-                for uid, rank in current.items()
-            }
-            db.execute(
-                "DELETE FROM lb_rank_history WHERE guild_id = ? AND category = ? AND metric_key = ?",
-                (guild_id, self.category, self.metric_key),
-            )
-            db.executemany(
-                "INSERT INTO lb_rank_history (guild_id, category, metric_key, user_id, rank) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(guild_id, self.category, self.metric_key, uid, rank)
-                 for uid, rank in current.items()],
-            )
-            db.commit()
+            if previous_revision == stats_revision:
+                saved_rows = db.execute(
+                    "SELECT user_id, delta FROM lb_rank_display_delta "
+                    "WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                    (guild_id, self.category, self.metric_key),
+                ).fetchall()
+                saved = {int(row[0]): int(row[1]) for row in saved_rows}
+                result = {uid: saved.get(uid, 0) for uid in current}
+            else:
+                previous_rows = db.execute(
+                    "SELECT user_id, rank FROM lb_rank_history "
+                    "WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                    (guild_id, self.category, self.metric_key),
+                ).fetchall()
+                previous = {int(row[0]): int(row[1]) for row in previous_rows}
+                # First run initializes a neutral baseline; subsequent revisions show movement.
+                result = {
+                    uid: (previous[uid] - rank if previous_revision is not None and uid in previous else 0)
+                    for uid, rank in current.items()
+                }
+
+                db.execute(
+                    "DELETE FROM lb_rank_history WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                    (guild_id, self.category, self.metric_key),
+                )
+                db.executemany(
+                    "INSERT INTO lb_rank_history (guild_id, category, metric_key, user_id, rank) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [(guild_id, self.category, self.metric_key, uid, rank)
+                     for uid, rank in current.items()],
+                )
+                db.execute(
+                    "DELETE FROM lb_rank_display_delta WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                    (guild_id, self.category, self.metric_key),
+                )
+                db.executemany(
+                    "INSERT INTO lb_rank_display_delta (guild_id, category, metric_key, user_id, delta) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [(guild_id, self.category, self.metric_key, uid, delta)
+                     for uid, delta in result.items()],
+                )
+                db.execute(
+                    "INSERT INTO lb_rank_metric_revision (guild_id, category, metric_key, revision) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, category, metric_key) "
+                    "DO UPDATE SET revision = excluded.revision",
+                    (guild_id, self.category, self.metric_key, stats_revision),
+                )
+                db.commit()
         except Exception as exc:
             print(f"[lb] Could not update rank history: {type(exc).__name__}: {exc}")
             result = {int(uid): None for uid, _ in computed}
