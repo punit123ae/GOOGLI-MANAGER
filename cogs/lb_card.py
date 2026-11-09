@@ -25,13 +25,13 @@ GOLD_STAT_RIGHT = 950
 
 ROWS = 9                                 # rows under the gold box (gold + 9 = 10 players per page)
 # measured centre y of each avatar ring on the template (the rows are not evenly spaced)
-ROW_CY = [653, 709, 765, 821, 877, 933, 989, 1045, 1101]
+ROW_CY = [661, 721, 781, 841, 901, 961, 1021, 1081, 1137]
 ROW_AV_X, ROW_AV_R = 198, 26             # ring centre x, INNER radius
 RANK_CX = (28 + 165) // 2
 NAME_X = 242
 STAT_BOX = (820, 925)
 
-YOU_Y = 1266
+YOU_Y = 1282
 YOU_AV_X = 200
 YOU_NAME_X = 275
 YOU_RANK_CX = (40 + 165) // 2
@@ -212,7 +212,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     # The template has two small information panels beneath the pinned YOU row.
     # Keep their contents generic so the same card works for every leaderboard.
-    panel_y = 1375
+    panel_y = 1402
     _put(d, "PLAYER TO WATCH", 24, 405, panel_y, (159, 208, 255), 285, "m")
     _put(d, player_to_watch or "—", 25, 770, panel_y, ICE, 300, "m")
 
