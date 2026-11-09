@@ -88,13 +88,20 @@ GREEN, RED, GREY = (88, 214, 66), (214, 52, 40), (150, 165, 185)
 
 
 def _rank_text(rank) -> str:
-    return f"{rank:02d}" if isinstance(rank, int) else str(rank)
+    return str(rank) if isinstance(rank, int) else str(rank)
 
 
 def _rank_cell(draw, rank, delta, cx, cy, size, fill, with_marker=True):
     """Zero-padded rank (01, 02...) with a movement marker like the reference:
     delta > 0 green up-arrow + n, delta < 0 red down-arrow + n, delta == 0 grey dot, None = no marker."""
     text = _rank_text(rank)
+    # Give the page leader a distinct medal treatment instead of a plain "01".
+    if isinstance(rank, int) and rank == 1:
+        radius = max(19, size // 2 + 2)
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius),
+                     fill=GOLD, outline=(255, 226, 128), width=3)
+        _put(draw, "1", size, cx, cy, (18, 30, 54), 48, "m")
+        return
     if delta is None or not with_marker:
         _put(draw, text, size, cx, cy, fill, 120, "m")
         return
@@ -128,7 +135,8 @@ def _avatar(img: Image.Image, data: bytes | None, cx: int, cy: int, r: int) -> N
 
 
 def render_card(category: str, stat_label: str, top: dict | None, rows: list[dict],
-                you: dict | None, page_text: str = "") -> bytes:
+                you: dict | None, page_text: str = "", guild_icon: bytes | None = None,
+                player_to_watch: str = "—") -> bytes:
     """
     top  : {"rank", "name", "value", "avatar", optional "delta"} for the gold box (overall #1) or None
     rows : up to 9 dicts like top, each with its real rank
@@ -137,6 +145,9 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
     """
     img = _template().copy()
     d = ImageDraw.Draw(img)
+
+    # The server's own icon is the only corner logo; the right corner is kept clear.
+    _avatar(img, guild_icon, 82, 145, 43)
 
     _put(d, category, 27, CAT_X, CAT_Y, ICE, CAT_W)
     _put(d, stat_label.split(" (")[0], 27, STAT_X, STAT_Y, ICE, STAT_W)
@@ -163,6 +174,12 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
         _put(d, you["name"], 29, YOU_NAME_X, YOU_Y, ICE, YOU_STAT_BOX[0] - 20 - YOU_NAME_X)
         _put(d, you["value"], 29, (YOU_STAT_BOX[0] + YOU_STAT_BOX[1]) // 2, YOU_Y, GOLD,
              YOU_STAT_BOX[1] - YOU_STAT_BOX[0] - 14, "m")
+
+    # The template has two small information panels beneath the pinned YOU row.
+    # Keep their contents generic so the same card works for every leaderboard.
+    panel_y = 1450
+    _put(d, "PLAYER TO WATCH", 24, 405, panel_y, (159, 208, 255), 285, "m")
+    _put(d, player_to_watch or "—", 25, 770, panel_y, ICE, 300, "m")
 
     out = io.BytesIO()
     img.save(out, "JPEG", quality=90, subsampling=0)   # ~5x smaller and much faster than PNG
