@@ -445,8 +445,10 @@ class LeaderboardView(discord.ui.View):
             ).fetchall()
             previous = {int(row[0]): int(row[1]) for row in previous_rows}
             current = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
+            # Missing baseline means unchanged/neutral. +rs clears the baseline
+            # intentionally so restored rankings don't show reverse arrows.
             result = {
-                uid: (previous[uid] - rank if uid in previous else None)
+                uid: (previous[uid] - rank if uid in previous else 0)
                 for uid, rank in current.items()
             }
             db.execute(
