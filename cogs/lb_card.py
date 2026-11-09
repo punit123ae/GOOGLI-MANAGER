@@ -15,27 +15,27 @@ ICE = (232, 243, 255)
 GOLD = (255, 194, 26)
 
 # ---- coordinates on the 1024 x 1535 template ----
-CAT_X, CAT_Y, CAT_W = 275, 230, 390      # category text in the upper-left blue panel
-STAT_X, STAT_Y, STAT_W = 870, 230, 220   # statistic text in the upper-right blue panel
+CAT_X, CAT_Y, CAT_W = 60, 230, 420      # category text in the upper-left blue panel
+STAT_X, STAT_Y, STAT_W = 500, 310, 650   # statistic text in the upper-right blue panel
 
 GOLD_RING = (205, 465, 60)               # avatar ring centre and inner radius in the gold leader panel
 GOLD_RANK_X = 95
-GOLD_NAME_X = 320
+GOLD_NAME_X = 280
 GOLD_STAT_RIGHT = 950
 
 ROWS = 9                                 # rows under the gold box (gold + 9 = 10 players per page)
 # measured centre y of each avatar ring on the template (the rows are not evenly spaced)
-ROW_CY = [663, 722, 781, 839, 899, 958, 1017, 1076, 1135]
-ROW_AV_X, ROW_AV_R = 205, 26             # ring centre x, INNER radius
+ROW_CY = [647, 703, 759, 815, 871, 927, 983, 1039, 1095]
+ROW_AV_X, ROW_AV_R = 198, 26             # ring centre x, INNER radius
 RANK_CX = (28 + 165) // 2
-NAME_X = 295
-STAT_BOX = (820, 965)
+NAME_X = 242
+STAT_BOX = (820, 925)
 
-YOU_Y = 1294
-YOU_AV_X = 205
-YOU_NAME_X = 300
+YOU_Y = 1260
+YOU_AV_X = 200
+YOU_NAME_X = 275
 YOU_RANK_CX = (40 + 165) // 2
-YOU_STAT_BOX = (835, 985)
+YOU_STAT_BOX = (820, 920)
 YOU_AV_R = 35                            # big ring: fills the whole YOU box
 
 PAGE_RIGHT, PAGE_Y = 970, 230             # page indicator in the upper-right blue panel
@@ -147,10 +147,37 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
     d = ImageDraw.Draw(img)
 
     # The server's own icon is the only corner logo; the right corner is kept clear.
-    _avatar(img, guild_icon, 82, 145, 43)
+    _avatar(img, guild_icon, 90, 100, 43)
 
     _put(d, category, 27, CAT_X, CAT_Y, ICE, CAT_W)
-    _put(d, stat_label.split(" (")[0], 27, STAT_X, STAT_Y, ICE, STAT_W)
+    # Dynamic headline for the selected leaderboard metric.
+    title_map = {
+        "Runs": "TOP RUN SCORERS", "Wickets": "TOP WICKET TAKERS",
+        "Batting Average": "TOP BATTER AVERAGES", "Most 50s": "MOST FIFTIES",
+        "Most 100s": "MOST CENTURIES", "Ducks": "MOST DUCKS",
+        "Highest Runs": "HIGHEST INDIVIDUAL SCORES",
+        "Highest Strike Rate (minimum 50 runs)": "TOP STRIKE RATES",
+        "Lowest Strike Rate (minimum 50 runs)": "LOWEST STRIKE RATES",
+        "Average": "TOP BOWLING AVERAGES", "Economy": "BEST ECONOMY RATES",
+        "Bowling Figures": "BEST BOWLING FIGURES", "Most Overs Bowled": "MOST OVERS BOWLED",
+        "Most Runs Leaked": "MOST RUNS CONCEDED", "Total Fantasy Points": "TOP FANTASY PLAYERS",
+        "Most Catches Caught": "TOP CATCH TAKERS", "Most Catches Dropped": "MOST CATCH DROPS",
+        "Highest Catch Efficiency": "TOP FIELDING EFFICIENCY",
+        "Most Runs After Catch Drops": "RUNS AFTER CATCH DROPS",
+        "Most Runs Without Catch Drops": "RUNS WITHOUT CATCH DROPS",
+        "Most Catches Dropped (as Batter)": "MOST BATTER CATCH DROPS",
+        "Team's Best Fielder": "TOP TEAM FIELDER",
+        "Best Team Catch Efficiency": "BEST TEAM FIELDING EFFICIENCY",
+        "Most Catches as a Team": "MOST TEAM CATCHES",
+        "Most Catch Drops as a Team": "MOST TEAM CATCH DROPS",
+        "Most Catch Opportunities as a Team": "MOST TEAM CATCH OPPORTUNITIES",
+    }
+    headline = title_map.get(stat_label, f"TOP {stat_label.upper()}")
+    # Mask only the baked-in headline while preserving the side accent lines.
+    d.rectangle((190, 275, 815, 355), fill=(3, 20, 48))
+    headline, headline_font = _fit(d, headline, 48, 610, min_size=25)
+    d.text((502, 312), headline, font=headline_font, fill=(80, 210, 235), anchor="mm",
+           stroke_width=1, stroke_fill=(232, 243, 255))
     if page_text:
         _put(d, page_text, 22, PAGE_RIGHT, PAGE_Y, (159, 208, 255), 200, "r")
 
@@ -177,7 +204,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
 
     # The template has two small information panels beneath the pinned YOU row.
     # Keep their contents generic so the same card works for every leaderboard.
-    panel_y = 1450
+    panel_y = 1375
     _put(d, "PLAYER TO WATCH", 24, 405, panel_y, (159, 208, 255), 285, "m")
     _put(d, player_to_watch or "—", 25, 770, panel_y, ICE, 300, "m")
 
