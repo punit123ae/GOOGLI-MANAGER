@@ -371,6 +371,7 @@ class LeaderboardView(discord.ui.View):
         self.metric_key, self.metric_label = METRICS[self.category][0]
         self.page = 0
         self.team_names: dict[int, str] = {}
+        self._rank_delta_cache: dict[tuple[str, str], dict[int, int | None]] = {}
         self._rebuild_items()
 
     def _rebuild_items(self):
@@ -417,6 +418,55 @@ class LeaderboardView(discord.ui.View):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
         return embed
 
+    def _rank_deltas(self, computed: list[tuple[int, Any]]) -> dict[int, int | None]:
+        """Compare this ranking with the last saved snapshot for this exact stat."""
+        cache_key = (self.category, self.metric_key)
+        if cache_key in self._rank_delta_cache:
+            return self._rank_delta_cache[cache_key]
+
+        db = getattr(self.cog.bot, "db", None)
+        if db is None:
+            result = {int(uid): None for uid, _ in computed}
+            self._rank_delta_cache[cache_key] = result
+            return result
+
+        guild_id = int(self.ctx.guild.id)
+        try:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_rank_history ("
+                "guild_id INTEGER NOT NULL, category TEXT NOT NULL, metric_key TEXT NOT NULL, "
+                "user_id INTEGER NOT NULL, rank INTEGER NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (guild_id, category, metric_key, user_id))"
+            )
+            previous_rows = db.execute(
+                "SELECT user_id, rank FROM lb_rank_history "
+                "WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                (guild_id, self.category, self.metric_key),
+            ).fetchall()
+            previous = {int(row[0]): int(row[1]) for row in previous_rows}
+            current = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
+            result = {
+                uid: (previous[uid] - rank if uid in previous else None)
+                for uid, rank in current.items()
+            }
+            db.execute(
+                "DELETE FROM lb_rank_history WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                (guild_id, self.category, self.metric_key),
+            )
+            db.executemany(
+                "INSERT INTO lb_rank_history (guild_id, category, metric_key, user_id, rank) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(guild_id, self.category, self.metric_key, uid, rank)
+                 for uid, rank in current.items()],
+            )
+            db.commit()
+        except Exception as exc:
+            print(f"[lb] Could not update rank history: {type(exc).__name__}: {exc}")
+            result = {int(uid): None for uid, _ in computed}
+
+        self._rank_delta_cache[cache_key] = result
+        return result
+
     async def make_payload(self) -> tuple[discord.Embed | None, discord.File | None]:
         """(embed, None) for Fielding / Team Fielding, otherwise (None, card image file)."""
         guild = self.ctx.guild
@@ -461,6 +511,8 @@ class LeaderboardView(discord.ui.View):
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         if self.category in EMBED_CATEGORIES:
             return self._classic_embed(computed), None
+
+        rank_deltas = self._rank_deltas(computed)
         total = len(computed)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         self.page = max(0, min(self.page, pages - 1))
@@ -472,11 +524,12 @@ class LeaderboardView(discord.ui.View):
         async def entry(rank: int, uid: int, value: Any) -> dict:
             if is_team:
                 return {"rank": rank, "name": self.team_names.get(uid, f"Team {uid}"),
-                        "value": _display_plain(key, value), "avatar": None}
+                        "value": _display_plain(key, value), "avatar": None,
+                        "delta": rank_deltas.get(uid)}
             member = guild.get_member(uid) if guild else None
             name = member.name if member else f"Unknown player ({str(uid)[-4:]})"
             return {"rank": rank, "name": name, "value": _display_plain(key, value),
-                    "avatar": await self.cog.avatar_bytes(member)}
+                    "avatar": await self.cog.avatar_bytes(member), "delta": rank_deltas.get(uid)}
 
         author = self.ctx.author
         top, *rows, you_avatar = await asyncio.gather(
@@ -492,18 +545,38 @@ class LeaderboardView(discord.ui.View):
             you_uid = next((tid for tid, info in _team_rosters(guild.id).items()
                             if author.id in info["members"]), None)
         you = {"rank": "-", "name": author.name, "value": "-",
-               "avatar": you_avatar}
+               "avatar": you_avatar, "delta": None}
         for index, (uid, value) in enumerate(computed, start=1):
             if uid == you_uid:
-                you.update(rank=index, value=_display_plain(key, value))
+                you.update(rank=index, value=_display_plain(key, value),
+                           delta=rank_deltas.get(uid))
                 if is_team:
                     you["name"] = self.team_names.get(uid, you["name"])
                 break
 
+        # Recent form: last five imported match performances, weighted toward wickets.
+        watch_uid = None
+        watch_score = None
+        for uid, player_rows in self.cog.rows_by_user.items():
+            recent = player_rows[-5:]
+            if not recent:
+                continue
+            score = sum(int(r["runs"]) + 20 * int(r["wickets"]) for r in recent)
+            runs = sum(int(r["runs"]) for r in recent)
+            wickets = sum(int(r["wickets"]) for r in recent)
+            candidate = (score, runs, wickets, -int(uid))
+            if score > 0 and (watch_score is None or candidate > watch_score):
+                watch_score, watch_uid = candidate, uid
+        watch_member = guild.get_member(watch_uid) if guild and watch_uid is not None else None
+        watch_name = watch_member.name if watch_member else (
+            f"Player {str(watch_uid)[-4:]}" if watch_uid is not None else "—"
+        )
+        guild_icon = await self.cog.guild_icon_bytes(guild)
         page_text = f"PAGE {self.page + 1}/{pages}"
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(
-            None, lambda: render_card(self.category, self.metric_label, top, rows, you, page_text))
+            None, lambda: render_card(self.category, self.metric_label, top, rows, you, page_text,
+                                      guild_icon, watch_name))
         for child in self.children:
             if isinstance(child, PageButton):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
@@ -524,11 +597,9 @@ class LeaderboardCog(commands.Cog):
         self.batter_impact_by_user: dict[int, tuple[int, int, int]] = {}
         self._avatar_cache: dict[str, bytes | None] = {}
 
-    async def avatar_bytes(self, member) -> bytes | None:
-        """Small PNG of a member's avatar, cached so flipping pages stays fast."""
-        if member is None:
+    async def _asset_bytes(self, asset) -> bytes | None:
+        if asset is None:
             return None
-        asset = member.display_avatar
         if asset.key in self._avatar_cache:
             return self._avatar_cache[asset.key]
         try:
@@ -539,6 +610,14 @@ class LeaderboardCog(commands.Cog):
             self._avatar_cache.clear()
         self._avatar_cache[asset.key] = data
         return data
+
+    async def avatar_bytes(self, member) -> bytes | None:
+        """Small PNG of a member's avatar, cached so flipping pages stays fast."""
+        return await self._asset_bytes(member.display_avatar if member is not None else None)
+
+    async def guild_icon_bytes(self, guild) -> bytes | None:
+        """Fetch the server icon for the card's top-left corner."""
+        return await self._asset_bytes(guild.icon if guild is not None else None)
 
     def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int, int]]:
         """Return {user_id: (runs_affected, runs_without_drops, drops)} for this server."""
