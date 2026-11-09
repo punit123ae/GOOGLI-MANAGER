@@ -1596,6 +1596,15 @@ class Stats(commands.Cog):
                         "INSERT OR REPLACE INTO match_teams (source_message_id, user_id, team_name) VALUES (?, ?, ?)",
                         [(source.id, int(uid), name) for uid, name in team_snapshot.items()],
                     )
+                self.db.execute(
+                    "CREATE TABLE IF NOT EXISTS lb_stats_revision "
+                    "(guild_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+                )
+                self.db.execute(
+                    "INSERT INTO lb_stats_revision (guild_id, revision) VALUES (?, 1) "
+                    "ON CONFLICT(guild_id) DO UPDATE SET revision = revision + 1",
+                    (ctx.guild.id,),
+                )
         except Exception as exc:
             if (
                 "UNIQUE constraint failed" in str(exc)
@@ -1708,19 +1717,15 @@ class Stats(commands.Cog):
                 "DELETE FROM stats_imports WHERE source_message_id = ?",
                 (source.id,),
             )
-
-        # +rs restores the ranking state before a temporary +as import.
-        # Reset the saved rank baseline so the next +lb shows neutral markers
-        # instead of misleading reverse arrows. This table is created by cogs/lb.py.
-        try:
             self.db.execute(
-                "DELETE FROM lb_rank_history WHERE guild_id = ?",
+                "CREATE TABLE IF NOT EXISTS lb_stats_revision "
+                "(guild_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+            )
+            self.db.execute(
+                "INSERT INTO lb_stats_revision (guild_id, revision) VALUES (?, 1) "
+                "ON CONFLICT(guild_id) DO UPDATE SET revision = revision + 1",
                 (ctx.guild.id,),
             )
-            self.db.commit()
-        except sqlite3.Error:
-            # The leaderboard history table may not exist yet; removal still succeeds.
-            pass
 
         await ctx.reply(
             "✅ Removed that match's imported statistics. "
