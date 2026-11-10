@@ -952,7 +952,7 @@ class Reserves(commands.Cog):
             await ctx.send(f"Stage **{stage_name}** does not exist.")
             return
         if _schedule_exists(stage_name):
-            await ctx.send("A schedule is already marked as generated. Use `+resetmatchups` first, then run `+creatematchups` to create a new one.")
+            await ctx.send(f"A reserve schedule already exists for **{stage_name}**. Use `+resetmatchups {stage_name}` first, then `+creatematchups {stage_name}`.")
             return
         limit = _limit()
         if limit <= 0:
