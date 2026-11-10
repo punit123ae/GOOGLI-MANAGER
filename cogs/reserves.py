@@ -239,6 +239,44 @@ def _clear_schedule_state():
             WHERE id = 1
         """)
 
+def _reserve_match_details(guild_id: int, guild):
+    """Resolve reserving team as host, its home stadium, and both team roles."""
+    groups_db = Path(__file__).resolve().parent.parent / "groups_schedule.db"
+    stadiums = {}
+    if groups_db.is_file():
+        conn = sqlite3.connect(f"file:{groups_db.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute("SELECT team_name, channel_id FROM team_home_stadiums WHERE guild_id = ?", (guild_id,)).fetchall()
+            stadiums = {_normalize_team_name(name): int(channel_id) for name, channel_id in rows}
+        except sqlite3.Error:
+            stadiums = {}
+        finally:
+            conn.close()
+    roles = {}
+    if TEAM_DB_PATH.is_file():
+        conn = sqlite3.connect(f"file:{TEAM_DB_PATH.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute("SELECT t.name, s.role_id FROM registered_teams t JOIN team_role_settings s ON s.team_id = t.id WHERE t.guild_id = ? AND LOWER(t.status) = 'approved'", (guild_id,)).fetchall()
+            roles = {_normalize_team_name(name): int(role_id) for name, role_id in rows}
+        except sqlite3.Error:
+            roles = {}
+        finally:
+            conn.close()
+    details, missing = {}, []
+    for row in _all_reservations():
+        host, opponent = row["reserving_team"].strip(), row["opposing_team"].strip()
+        channel_id = stadiums.get(_normalize_team_name(host))
+        host_role_id = roles.get(_normalize_team_name(host))
+        opponent_role_id = roles.get(_normalize_team_name(opponent))
+        channel = guild.get_channel(channel_id) if channel_id else None
+        host_role = guild.get_role(host_role_id) if host_role_id else None
+        opponent_role = guild.get_role(opponent_role_id) if opponent_role_id else None
+        if not isinstance(channel, discord.TextChannel): missing.append(f"{host} (home stadium)")
+        if host_role is None: missing.append(f"{host} (Discord role)")
+        if opponent_role is None: missing.append(f"{opponent} (Discord role)")
+        details[int(row["id"])] = (channel, host_role, opponent_role)
+    return details, sorted(set(missing))
+
 def _schedule_days(max_days: int):
     """
     Backtracking edge-colouring scheduler. Each reservation is an edge between
@@ -866,42 +904,40 @@ class Reserves(commands.Cog):
             await ctx.send(f"❌ Could not create the schedule: {exc}")
             return
 
+        # Reserving team is always the host; preflight all stadiums and roles.
+        match_details, missing_details = _reserve_match_details(ctx.guild.id, ctx.guild)
+        if missing_details:
+            await ctx.send(
+                "Cannot post the reserve schedule yet. Configure these first:\\n"
+                + "\\n".join(f"• {item}" for item in missing_details)
+                + "\\nSet stadiums with `+sethomestadium <team name> <#channel>` and ensure each approved team has a Discord role."
+            )
+            return
         # Save schedule before posting so it can be inspected after a restart.
         with _connect() as conn:
             conn.execute("DELETE FROM generated_schedule")
             for day, matches in days:
-                for match in matches:
-                    conn.execute(
-                        "INSERT INTO generated_schedule (reservation_id, day_number) VALUES (?, ?)",
-                        (match["id"], day),
-                    )
-            conn.execute("""
-                UPDATE schedule_state
-                SET is_generated = 1, channel_id = ?, message_ids = ''
-                WHERE id = 1
-            """, (ctx.channel.id,))
-
-        intro = discord.Embed(
-            title="✦ OFFICIAL RESERVE MATCH SCHEDULE",
-            color=discord.Color.from_rgb(35, 63, 110),
-            description=(                f"**Total reserved matches:** {len(rows)}\n"
-                f"**Days required:** {len(days)}\n"
-                "**Rule:** Each team plays at most once per day."
-            ),
-        )
-        sent = []
-        sent.append(await ctx.send(embed=intro))
-        for day, matches in days:
-            lines = [
-                f"`ID {m['id']}` **{m['a']} vs {m['b']}**"
-                for m in matches
-            ]
+            lines = []
+            ping_roles = []
+            for match in matches:
+                channel, host_role, opponent_role = match_details[int(match["id"])]
+                lines.append(
+                    f"`ID {match['id']}` **{discord.utils.escape_markdown(match['a'])}** vs **{discord.utils.escape_markdown(match['b'])}**\\n"
+                    f"🏟️ **Host:** {discord.utils.escape_markdown(match['a'])} — {channel.mention}\\n"
+                    f"👥 {host_role.mention} vs {opponent_role.mention}"
+                )
+                ping_roles.extend((host_role, opponent_role))
             embed = discord.Embed(
                 title=f"◆ MATCHDAY {day:02d}",
                 color=discord.Color.from_rgb(35, 63, 110),
-                description="\n".join(lines) if lines else "No matches",
+                description="\\n\\n".join(lines) if lines else "No matches",
             )
-            sent.append(await ctx.send(embed=embed))
+            sent.append(await ctx.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False, users=False, roles=ping_roles, replied_user=False
+                ),
+            ))
 
         ids = ",".join(str(m.id) for m in sent)
         with _connect() as conn:
