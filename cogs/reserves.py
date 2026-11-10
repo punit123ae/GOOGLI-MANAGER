@@ -64,8 +64,15 @@ def _stage_exists(guild_id: int, stage_name: str) -> bool:
     groups_db = Path(__file__).resolve().parent.parent / "groups_schedule.db"
     if not groups_db.is_file():
         return False
-    conn = sqlite3.connect(f"file:{groups_db.as_posix()}?mode=ro", uri=True, timeout=5)
+    conn = sqlite3.connect(groups_db, timeout=5)
     try:
+        if stage_name.strip().casefold() == "stage 1":
+            conn.execute(
+                "INSERT OR IGNORE INTO tournament_stages (guild_id, stage_key, stage_name, created_at) "
+                "VALUES (?, 'stage 1', 'Stage 1', CURRENT_TIMESTAMP)",
+                (guild_id,),
+            )
+            conn.commit()
         row = conn.execute(
             "SELECT 1 FROM tournament_stages WHERE guild_id=? AND LOWER(stage_name)=LOWER(?)",
             (guild_id, stage_name.strip()),
@@ -1065,15 +1072,18 @@ class Reserves(commands.Cog):
             await ctx.send("Confirmation timed out. Nothing was deleted.")
 
     @commands.command(name="resetmatchups")
-    async def resetmatchups(self, ctx):
+    async def resetmatchups(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
             return
-        if not _schedule_exists():
-            await ctx.send("There is no generated schedule to reset.")
+        if not stage_name:
+            await ctx.send("Usage: `+resetmatchups <stage name>`")
+            return
+        if not _schedule_exists(stage_name):
+            await ctx.send(f"There is no generated reserve schedule for **{stage_name}**.")
             return
         view = OwnerConfirmView(ctx.author.id)
         embed = discord.Embed(
-            title="Reset Generated Schedule?",
+            title=f"Reset {stage_name} Reserve Schedule?",
             description=(
                 "This clears the saved schedule data but does not delete reservations "
                 "or remove old schedule messages from Discord. Continue?"
@@ -1083,8 +1093,8 @@ class Reserves(commands.Cog):
         view.message = await ctx.send(embed=embed, view=view)
         await view.wait()
         if view.choice is True:
-            _clear_schedule_state()
-            await ctx.send("✅ Saved schedule cleared. Reservations are unchanged.")
+            _clear_schedule_state(stage_name)
+            await ctx.send(f"✅ Saved reserve schedule for **{stage_name}** cleared. Reservations are unchanged.")
         elif view.choice is False:
             await ctx.send("Reset cancelled. The saved schedule is unchanged.")
         else:
