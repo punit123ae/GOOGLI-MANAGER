@@ -1039,6 +1039,7 @@ class Reserves(commands.Cog):
                     SET is_generated = 0, channel_id = NULL, message_ids = NULL
                     WHERE id = 1
                 """)
+                conn.execute("UPDATE reserve_stage_schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL")
             await ctx.send("There are no reserved matches. Match numbering is reset and will start at **1**.")
             return
 
@@ -1066,6 +1067,7 @@ class Reserves(commands.Cog):
                         SET is_generated = 0, channel_id = NULL, message_ids = NULL
                         WHERE id = 1
                     """)
+                    conn.execute("UPDATE reserve_stage_schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL")
             except sqlite3.Error as exc:
                 await ctx.send(f"❌ Could not delete all reservations: `{type(exc).__name__}`. No success was reported; check the bot console/database.")
                 return
