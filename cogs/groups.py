@@ -82,11 +82,14 @@ def connect_group_db():
         if "::" not in row["group_key"]:
             conn.execute("UPDATE generated_fixtures SET group_key=? WHERE id=?",
                          ("stage 1::" + row["group_key"], row["id"]))
-    # Create Stage 1 per guild that already has legacy group records.
-    guild_rows = conn.execute("SELECT DISTINCT guild_id FROM group_styles UNION SELECT DISTINCT guild_id FROM team_groups").fetchall()
+    # Create Stage 1 per guild that already has legacy group records or format settings.
+    guild_rows = conn.execute("SELECT guild_id FROM group_styles UNION SELECT guild_id FROM team_groups UNION SELECT guild_id FROM schedule_formats").fetchall()
     for row in guild_rows:
         conn.execute("INSERT OR IGNORE INTO tournament_stages VALUES (?, ?, ?, ?)",
                      (row["guild_id"], "stage 1", "Stage 1", datetime.now(timezone.utc).isoformat()))
+    for row in conn.execute("SELECT guild_id, matches_per_pair, updated_by, updated_at FROM schedule_formats").fetchall():
+        conn.execute("INSERT OR IGNORE INTO stage_formats (guild_id, stage_key, matches_per_pair, updated_by, updated_at) VALUES (?, 'stage 1', ?, ?, ?)",
+                     (row["guild_id"], row["matches_per_pair"], row["updated_by"], row["updated_at"]))
     conn.commit()
     return conn
 
@@ -444,6 +447,15 @@ class Groups(commands.Cog):
         conn = connect_group_db()
         try:
             now = datetime.now(timezone.utc).isoformat()
+            stage_prefix = stage_key(stage_name) + "::%"
+            old_stage_keys = [row["team_name_key"] for row in conn.execute(
+                "SELECT team_name_key FROM team_groups WHERE guild_id=? AND team_name_key LIKE ?",
+                (ctx.guild.id, stage_prefix),
+            ).fetchall()]
+            for old_key in old_stage_keys:
+                conn.execute("DELETE FROM team_groups WHERE guild_id=? AND team_name_key=?", (ctx.guild.id, old_key))
+            conn.execute("DELETE FROM generated_fixtures WHERE guild_id=? AND group_key LIKE ?",
+                         (ctx.guild.id, stage_prefix))
             for team_name, team_db_key, group_key in assignments:
                 conn.execute(
                     "INSERT INTO team_groups (guild_id, team_name_key, team_name, group_key, updated_by, updated_at) "
@@ -701,7 +713,7 @@ class Groups(commands.Cog):
         try:
             group = conn.execute("SELECT group_name, group_key FROM group_styles WHERE guild_id=? AND group_key=?",
                                  (ctx.guild.id, scoped_key(stage_name, group_name))).fetchone()
-            fixtures = conn.execute("SELECT team_one, team_two, day_no FROM generated_fixtures WHERE guild_id=? AND group_key=? AND round_no=? ORDER BY day_no, id",
+            fixtures = conn.execute("SELECT team_one, team_two, day_no FROM generated_fixtures WHERE guild_id=? AND group_key=? AND day_no=? ORDER BY id",
                                     (ctx.guild.id, group["group_key"], round_no)).fetchall() if group else []
             assigned = conn.execute("SELECT team_name FROM team_groups WHERE guild_id=? AND group_key=? ORDER BY team_name COLLATE NOCASE",
                                     (ctx.guild.id, group["group_key"])).fetchall() if group else []
