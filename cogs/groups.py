@@ -334,7 +334,20 @@ class Groups(commands.Cog):
             conn.commit()
         finally:
             conn.close()
-        await ctx.send(f"✅ Renamed **{old_name}** to **{new_name}**. Its groups, teams, format and fixtures were retained.")
+        reserve_db = os.path.join(os.path.dirname(__file__), "..", "reserve_matches.db")
+        if os.path.exists(reserve_db):
+            reserve_conn = sqlite3.connect(reserve_db)
+            try:
+                reserve_conn.execute("UPDATE reservations SET stage_name=? WHERE stage_name=? COLLATE NOCASE",
+                                     (new_name, old_name))
+                reserve_conn.execute("UPDATE reserve_stage_schedule_state SET stage_name=? WHERE stage_name=? COLLATE NOCASE",
+                                     (new_name, old_name))
+                reserve_conn.commit()
+            except sqlite3.Error:
+                pass
+            finally:
+                reserve_conn.close()
+        await ctx.send(f"✅ Renamed **{old_name}** to **{new_name}**. Its groups, teams, format, fixtures and reserve matches were retained.")
 
     @commands.command(name="stages")
     async def stages(self, ctx):
