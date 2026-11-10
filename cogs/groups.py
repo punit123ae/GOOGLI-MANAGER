@@ -26,54 +26,98 @@ def connect_group_db():
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS group_styles (
-            guild_id INTEGER NOT NULL,
-            group_key TEXT NOT NULL,
-            group_name TEXT NOT NULL,
-            position INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL, group_key TEXT NOT NULL,
+            group_name TEXT NOT NULL, position INTEGER NOT NULL,
             PRIMARY KEY (guild_id, group_key)
         );
         CREATE TABLE IF NOT EXISTS team_groups (
-            guild_id INTEGER NOT NULL,
-            team_name_key TEXT NOT NULL,
-            team_name TEXT NOT NULL,
-            group_key TEXT NOT NULL,
-            updated_by INTEGER NOT NULL,
-            updated_at TEXT NOT NULL,
+            guild_id INTEGER NOT NULL, team_name_key TEXT NOT NULL,
+            team_name TEXT NOT NULL, group_key TEXT NOT NULL,
+            updated_by INTEGER NOT NULL, updated_at TEXT NOT NULL,
             PRIMARY KEY (guild_id, team_name_key)
         );
         CREATE TABLE IF NOT EXISTS team_home_stadiums (
-            guild_id INTEGER NOT NULL,
-            team_name_key TEXT NOT NULL,
-            team_name TEXT NOT NULL,
-            channel_id INTEGER NOT NULL,
-            updated_by INTEGER NOT NULL,
-            updated_at TEXT NOT NULL,
+            guild_id INTEGER NOT NULL, team_name_key TEXT NOT NULL,
+            team_name TEXT NOT NULL, channel_id INTEGER NOT NULL,
+            updated_by INTEGER NOT NULL, updated_at TEXT NOT NULL,
             PRIMARY KEY (guild_id, team_name_key)
         );
         CREATE TABLE IF NOT EXISTS schedule_formats (
-            guild_id INTEGER PRIMARY KEY,
-            matches_per_pair INTEGER NOT NULL,
-            updated_by INTEGER NOT NULL,
-            updated_at TEXT NOT NULL
+            guild_id INTEGER PRIMARY KEY, matches_per_pair INTEGER NOT NULL,
+            updated_by INTEGER NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS stage_formats (
+            guild_id INTEGER NOT NULL, stage_key TEXT NOT NULL,
+            matches_per_pair INTEGER NOT NULL, updated_by INTEGER NOT NULL,
+            updated_at TEXT NOT NULL, PRIMARY KEY (guild_id, stage_key)
         );
         CREATE TABLE IF NOT EXISTS generated_fixtures (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER NOT NULL,
-            group_key TEXT NOT NULL,
-            round_no INTEGER NOT NULL,
-            day_no INTEGER NOT NULL,
-            team_one TEXT NOT NULL,
-            team_two TEXT NOT NULL,
-            generated_at TEXT NOT NULL
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+            group_key TEXT NOT NULL, round_no INTEGER NOT NULL,
+            day_no INTEGER NOT NULL, team_one TEXT NOT NULL,
+            team_two TEXT NOT NULL, generated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tournament_stages (
+            guild_id INTEGER NOT NULL, stage_key TEXT NOT NULL,
+            stage_name TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, stage_key)
         );
         """
     )
+    # Preserve all legacy group data under a named Stage 1.
+    conn.execute(
+        "INSERT OR IGNORE INTO tournament_stages VALUES (?, ?, ?, ?)",
+        (0, "stage 1", "Stage 1", datetime.now(timezone.utc).isoformat()),
+    )
+    for row in conn.execute("SELECT guild_id, group_key FROM group_styles").fetchall():
+        if "::" not in row["group_key"]:
+            conn.execute("UPDATE group_styles SET group_key=? WHERE guild_id=? AND group_key=?",
+                         ("stage 1::" + row["group_key"], row["guild_id"], row["group_key"]))
+    for row in conn.execute("SELECT guild_id, team_name_key, group_key FROM team_groups").fetchall():
+        if "::" not in row["team_name_key"]:
+            conn.execute("UPDATE team_groups SET team_name_key=?, group_key=? WHERE guild_id=? AND team_name_key=?",
+                         ("stage 1::" + row["team_name_key"], "stage 1::" + row["group_key"],
+                          row["guild_id"], row["team_name_key"]))
+    for row in conn.execute("SELECT id, group_key FROM generated_fixtures").fetchall():
+        if "::" not in row["group_key"]:
+            conn.execute("UPDATE generated_fixtures SET group_key=? WHERE id=?",
+                         ("stage 1::" + row["group_key"], row["id"]))
+    # Create Stage 1 per guild that already has legacy group records.
+    guild_rows = conn.execute("SELECT DISTINCT guild_id FROM group_styles UNION SELECT DISTINCT guild_id FROM team_groups").fetchall()
+    for row in guild_rows:
+        conn.execute("INSERT OR IGNORE INTO tournament_stages VALUES (?, ?, ?, ?)",
+                     (row["guild_id"], "stage 1", "Stage 1", datetime.now(timezone.utc).isoformat()))
     conn.commit()
     return conn
 
-
 def norm(value):
     return " ".join(str(value).strip().casefold().split())
+
+
+
+def stage_key(stage_name):
+    return norm(stage_name)
+
+
+def scoped_key(stage_name, value):
+    return f"{stage_key(stage_name)}::{norm(value)}"
+
+
+def ensure_stage(conn, guild_id, stage_name):
+    key = stage_key(stage_name)
+    return conn.execute(
+        "SELECT stage_key, stage_name FROM tournament_stages WHERE guild_id=? AND stage_key=?",
+        (guild_id, key),
+    ).fetchone()
+
+
+def register_stage(conn, guild_id, stage_name):
+    key = stage_key(stage_name)
+    conn.execute(
+        "INSERT OR IGNORE INTO tournament_stages (guild_id, stage_key, stage_name, created_at) VALUES (?, ?, ?, ?)",
+        (guild_id, key, stage_name.strip(), datetime.now(timezone.utc).isoformat()),
+    )
+    return key
 
 
 def get_approved_teams(guild_id):
@@ -231,6 +275,74 @@ class Groups(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         connect_group_db().close()
+
+    @commands.command(name="createnewstage")
+    async def createnewstage(self, ctx, *, stage_name: str = None):
+        if not await owner_only(ctx):
+            return
+        if not stage_name or len(stage_name.strip()) > 60:
+            await ctx.send("Usage: `+createnewstage <stage name>`")
+            return
+        conn = connect_group_db()
+        try:
+            key = stage_key(stage_name)
+            if ensure_stage(conn, ctx.guild.id, stage_name):
+                await ctx.send(f"Stage **{stage_name}** already exists.")
+                return
+            register_stage(conn, ctx.guild.id, stage_name)
+            conn.commit()
+        finally:
+            conn.close()
+        await ctx.send(f"✅ Created **{stage_name.strip()}**. Existing stages and their data were kept.")
+
+    @commands.command(name="renamestage")
+    async def renamestage(self, ctx, *, names: str = None):
+        if not await owner_only(ctx):
+            return
+        parts = names.split("|", 1) if names else []
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            await ctx.send("Usage: `+renamestage <old stage name> | <new stage name>`")
+            return
+        old_name, new_name = parts[0].strip(), parts[1].strip()
+        old_key, new_key = stage_key(old_name), stage_key(new_name)
+        if old_key == new_key:
+            await ctx.send("The new stage name must be different.")
+            return
+        conn = connect_group_db()
+        try:
+            if not ensure_stage(conn, ctx.guild.id, old_name):
+                await ctx.send(f"Stage **{old_name}** was not found.")
+                return
+            if ensure_stage(conn, ctx.guild.id, new_name):
+                await ctx.send(f"Stage **{new_name}** already exists.")
+                return
+            for table, column in (("group_styles", "group_key"), ("team_groups", "team_name_key"),
+                                  ("team_groups", "group_key"), ("generated_fixtures", "group_key")):
+                rows = conn.execute(f"SELECT rowid, {column} AS value FROM {table} WHERE guild_id=? AND {column} LIKE ?",
+                                    (ctx.guild.id, old_key + "::%")).fetchall()
+                for row in rows:
+                    suffix = row["value"].split("::", 1)[1]
+                    conn.execute(f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                                 (new_key + "::" + suffix, row["rowid"]))
+            conn.execute("UPDATE tournament_stages SET stage_key=?, stage_name=? WHERE guild_id=? AND stage_key=?",
+                         (new_key, new_name, ctx.guild.id, old_key))
+            conn.execute("UPDATE stage_formats SET stage_key=? WHERE guild_id=? AND stage_key=?",
+                         (new_key, ctx.guild.id, old_key))
+            conn.commit()
+        finally:
+            conn.close()
+        await ctx.send(f"✅ Renamed **{old_name}** to **{new_name}**. Its groups, teams, format and fixtures were retained.")
+
+    @commands.command(name="stages")
+    async def stages(self, ctx):
+        conn = connect_group_db()
+        try:
+            rows = conn.execute("SELECT stage_name FROM tournament_stages WHERE guild_id=? ORDER BY created_at",
+                                (ctx.guild.id,)).fetchall()
+        finally:
+            conn.close()
+        await ctx.send("**Tournament stages:** " + (", ".join(row["stage_name"] for row in rows) if rows else "None"))
+
 
     @commands.command(name="groupstyle")
     async def groupstyle(self, ctx):
