@@ -768,6 +768,113 @@ class LeaderboardCog(commands.Cog):
             return {}
         return {int(r["user_id"]): (int(r["catches_caught"]), int(r["catches_dropped"])) for r in rows}
 
+    @commands.command(name="lbreset", aliases=["resetlb", "lb-reset"])
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def reset_leaderboard_ranks(self, ctx: commands.Context):
+        """Set every image leaderboard's current standings as the new neutral baseline."""
+        try:
+            guild_id = int(ctx.guild.id)
+            self.rows_by_user = self._rows(guild_id)
+            self.fielding_by_user = self._fielding_rows(guild_id)
+            self.batter_impact_by_user = self._batter_impact_rows(guild_id)
+            db = getattr(self.bot, "db", None)
+            if db is None:
+                raise RuntimeError("Database connection is unavailable.")
+
+            # Create the same persistence tables used by +lb.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_rank_history ("
+                "guild_id INTEGER NOT NULL, category TEXT NOT NULL, metric_key TEXT NOT NULL, "
+                "user_id INTEGER NOT NULL, rank INTEGER NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (guild_id, category, metric_key, user_id))"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_stats_revision "
+                "(guild_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_rank_metric_revision ("
+                "guild_id INTEGER NOT NULL, category TEXT NOT NULL, metric_key TEXT NOT NULL, "
+                "revision INTEGER NOT NULL, PRIMARY KEY (guild_id, category, metric_key))"
+            )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_rank_display_delta ("
+                "guild_id INTEGER NOT NULL, category TEXT NOT NULL, metric_key TEXT NOT NULL, "
+                "user_id INTEGER NOT NULL, delta INTEGER NOT NULL, "
+                "PRIMARY KEY (guild_id, category, metric_key, user_id))"
+            )
+            revision_row = db.execute(
+                "SELECT revision FROM lb_stats_revision WHERE guild_id = ?", (guild_id,)
+            ).fetchone()
+            revision = int(revision_row[0]) if revision_row else 0
+
+            # Seed each image leaderboard with its CURRENT positions and zero
+            # movement. The next successful stats import changes the revision,
+            # so +lb compares against this exact reset-time snapshot.
+            seeded = 0
+            for category, metrics in METRICS.items():
+                if category in EMBED_CATEGORIES:
+                    continue
+                for metric_key, metric_label in metrics:
+                    view = LeaderboardView(self, ctx)
+                    view.category = category
+                    view.metric_key = metric_key
+                    view.metric_label = metric_label
+                    if metric_key in BATTER_IMPACT_KEYS:
+                        index = BATTER_IMPACT_KEYS[metric_key]
+                        computed = [
+                            (uid, int(rec[index]))
+                            for uid, rec in self.batter_impact_by_user.items()
+                            if int(rec[index]) > 0
+                        ]
+                        computed.sort(key=lambda item: (_sort_key(metric_key, item[1]), item[0]))
+                    else:
+                        if metric_key == "fantasy":
+                            self.fielding_by_user = self._fielding_rows(guild_id)
+                        computed = view._generic_ranking(self.rows_by_user)
+
+                    db.execute(
+                        "DELETE FROM lb_rank_history WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                        (guild_id, category, metric_key),
+                    )
+                    db.executemany(
+                        "INSERT INTO lb_rank_history (guild_id, category, metric_key, user_id, rank) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [(guild_id, category, metric_key, uid, rank)
+                         for rank, (uid, _) in enumerate(computed, start=1)],
+                    )
+                    db.execute(
+                        "DELETE FROM lb_rank_display_delta WHERE guild_id = ? AND category = ? AND metric_key = ?",
+                        (guild_id, category, metric_key),
+                    )
+                    db.executemany(
+                        "INSERT INTO lb_rank_display_delta (guild_id, category, metric_key, user_id, delta) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [(guild_id, uid, 0) for uid, _ in computed],
+                    )
+                    db.execute(
+                        "INSERT INTO lb_rank_metric_revision (guild_id, category, metric_key, revision) "
+                        "VALUES (?, ?, ?, ?) ON CONFLICT(guild_id, category, metric_key) "
+                        "DO UPDATE SET revision = excluded.revision",
+                        (guild_id, category, metric_key, revision),
+                    )
+                    seeded += 1
+
+            db.commit()
+            await ctx.reply(
+                f"✅ Reset rank movement for **{seeded} leaderboard statistics**. "
+                "Current positions are now the baseline. All players will show neutral markers "
+                "until the next stats import; after that, movement will be measured from this reset.",
+                mention_author=False,
+            )
+        except Exception as exc:
+            print(f"[lbreset] Failed: {type(exc).__name__}: {exc}")
+            await ctx.reply(
+                "❌ Couldn't reset leaderboard rankings. Check the bot console for the error.",
+                mention_author=False,
+            )
+
     def _rows(self, guild_id: int) -> dict[int, list[dict]]:
         db = getattr(self.bot, "db", None)
         if db is None:
