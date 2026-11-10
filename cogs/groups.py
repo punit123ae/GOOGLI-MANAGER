@@ -653,7 +653,7 @@ class Groups(commands.Cog):
 
     @commands.command(name="sethomestadium")
     async def sethomestadium(self, ctx, *, details: str = None):
-        """Set a team's home stadium channel: +sethomestadium Team Name #channel"""
+        """Set a team's home stadium channel: +sethomestadium Team Name #channel."""
         if not await owner_only(ctx):
             return
         if not details:
@@ -661,45 +661,36 @@ class Groups(commands.Cog):
             return
         match = re.fullmatch(r"\s*(.+?)\s+(?:<#(\d+)>|(\d+))\s*", details)
         if not match:
-            await ctx.send("Usage: `+sethomestadium <team name> <#channel>` (example: `+sethomestadium Kashmir Titans #team-stadium`)")
+            await ctx.send("Usage: `+sethomestadium <team name> <#channel>`")
             return
         team_name = match.group(1).strip()
-        channel_id = int(match.group(2) or match.group(3))
-        channel = ctx.guild.get_channel(channel_id)
+        channel = ctx.guild.get_channel(int(match.group(2) or match.group(3)))
         if not isinstance(channel, discord.TextChannel):
             await ctx.send("Please provide a text channel from this server.")
             return
-
+        try:
+            approved = get_approved_teams(ctx.guild.id)
+        except (FileNotFoundError, sqlite3.Error) as exc:
+            await ctx.send(f"Could not read approved teams: {exc}")
+            return
+        team = next((item for item in approved if norm(item[0]) == norm(team_name) or norm(item[1]) == norm(team_name)), None)
+        if not team:
+            await ctx.send("That is not an approved team in this server.")
+            return
+        official_name, official_key = team
         conn = connect_group_db()
         try:
-            assigned_teams = conn.execute(
-                "SELECT team_name_key, team_name FROM team_groups WHERE guild_id = ?",
-                (ctx.guild.id,),
-            ).fetchall()
-            team = next(
-                (row for row in assigned_teams
-                 if norm(row["team_name"]) == norm(team_name)
-                 or row["team_name_key"] == norm(team_name)),
-                None,
+            conn.execute(
+                "INSERT INTO team_home_stadiums (guild_id, team_name_key, team_name, channel_id, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
+                "team_name=excluded.team_name, channel_id=excluded.channel_id, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (ctx.guild.id, official_key, official_name, channel.id, ctx.author.id, datetime.now(timezone.utc).isoformat()),
             )
-            if team:
-                conn.execute(
-                    "INSERT INTO team_home_stadiums "
-                    "(guild_id, team_name_key, team_name, channel_id, updated_by, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
-                    "team_name=excluded.team_name, channel_id=excluded.channel_id, "
-                    "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
-                    (ctx.guild.id, team["team_name_key"], team["team_name"], channel.id,
-                     ctx.author.id, datetime.now(timezone.utc).isoformat()),
-                )
-                conn.commit()
+            conn.commit()
         finally:
             conn.close()
-        if not team:
-            await ctx.send("That team isn't assigned to a group yet. Check `+setteamgroups`.")
-            return
-        await ctx.send(f"Home stadium for **{team['team_name']}** set to {channel.mention}.")
+        await ctx.send(f"Home stadium for **{official_name}** set to {channel.mention}. This applies across all stages.")
+
 
     @commands.command(name="schedule")
     async def schedule(self, ctx, stage_name: str = None, group_name: str = None, round_no: int = None):
