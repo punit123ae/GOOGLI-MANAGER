@@ -1121,23 +1121,32 @@ class Reserves(commands.Cog):
         rows = _all_reservations(stage_name)
         counts = {}
         initiated = {}
+        labels = {}
         issues = []
         for r in rows:
+            stage = r["stage_name"].strip()
+            stage_key = stage.casefold()
             a = r["reserving_team"].strip()
             b = r["opposing_team"].strip()
             if a.casefold() == b.casefold():
-                issues.append(f"ID {r['id']}: a team is matched against itself.")
+                issues.append(f"{stage} — ID {r['id']}: a team is matched against itself.")
             for team in (a, b):
-                counts[team.casefold()] = counts.get(team.casefold(), 0) + 1
-            initiated[a.casefold()] = initiated.get(a.casefold(), 0) + 1
+                key = (stage_key, team.casefold())
+                labels[key] = (stage, team)
+                counts[key] = counts.get(key, 0) + 1
+            key = (stage_key, a.casefold())
+            labels[key] = (stage, a)
+            initiated[key] = initiated.get(key, 0) + 1
 
-        for team_key, count in counts.items():
+        for key, count in counts.items():
+            stage, team = labels[key]
             if count > limit:
-                issues.append(f"{team_key}: total involvement {count}/{limit}.")
+                issues.append(f"{stage} — {team}: total involvement {count}/{limit}.")
         quota = limit // 2
-        for team_key, count in initiated.items():
+        for key, count in initiated.items():
+            stage, team = labels[key]
             if count > quota:
-                issues.append(f"{team_key}: initiated {count}/{quota}.")
+                issues.append(f"{stage} — {team}: initiated {count}/{quota}.")
 
         embed = discord.Embed(title=f"Reserve Audit — {stage_name}" if stage_name else "Reserve Audit — All Stages", color=discord.Color.green() if not issues else discord.Color.red())
         embed.add_field(name="Total reservations", value=str(len(rows)), inline=True)
