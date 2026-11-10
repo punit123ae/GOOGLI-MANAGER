@@ -60,6 +60,22 @@ def _connect():
 def _normalize_team_name(name: str) -> str:
     return " ".join(name.casefold().split())
 
+def _stage_exists(guild_id: int, stage_name: str) -> bool:
+    groups_db = Path(__file__).resolve().parent.parent / "groups_schedule.db"
+    if not groups_db.is_file():
+        return False
+    conn = sqlite3.connect(f"file:{groups_db.as_posix()}?mode=ro", uri=True, timeout=5)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM tournament_stages WHERE guild_id=? AND LOWER(stage_name)=LOWER(?)",
+            (guild_id, stage_name.strip()),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
 
 def _resolve_approved_team(guild_id: int, query: str):
     """Return (canonical_name, status, suggestions) from approved teams only.
@@ -165,6 +181,7 @@ def _init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 reserving_team TEXT NOT NULL COLLATE NOCASE,
                 opposing_team TEXT NOT NULL COLLATE NOCASE,
+                stage_name TEXT NOT NULL DEFAULT 'Stage 1',
                 created_by_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -191,6 +208,11 @@ def _init_db():
             VALUES (1, 0, NULL, NULL)
         """)
 
+    # Backward-compatible migration: existing reserves stay in Stage 1.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(reservations)").fetchall()}
+    if "stage_name" not in columns:
+        conn.execute("ALTER TABLE reservations ADD COLUMN stage_name TEXT NOT NULL DEFAULT 'Stage 1'")
+
 
 def _limit():
     with _connect() as conn:
@@ -214,12 +236,17 @@ def _team_counts(team_name: str):
     return int(total), int(initiated)
 
 
-def _all_reservations():
+def _all_reservations(stage_name=None):
     with _connect() as conn:
+        if stage_name is None:
+            return conn.execute("""
+                SELECT id, reserving_team, opposing_team, stage_name, created_by_id, created_at
+                FROM reservations ORDER BY id
+            """).fetchall()
         return conn.execute("""
-            SELECT id, reserving_team, opposing_team, created_by_id, created_at
-            FROM reservations ORDER BY id
-        """).fetchall()
+            SELECT id, reserving_team, opposing_team, stage_name, created_by_id, created_at
+            FROM reservations WHERE LOWER(stage_name)=LOWER(?) ORDER BY id
+        """, (stage_name,)).fetchall()
 
 
 def _schedule_exists():
@@ -239,7 +266,7 @@ def _clear_schedule_state():
             WHERE id = 1
         """)
 
-def _reserve_match_details(guild_id: int, guild):
+def _reserve_match_details(guild_id: int, guild, stage_name=None):
     """Resolve reserving team as host, its home stadium, and both team roles."""
     groups_db = Path(__file__).resolve().parent.parent / "groups_schedule.db"
     stadiums = {}
@@ -263,7 +290,7 @@ def _reserve_match_details(guild_id: int, guild):
         finally:
             conn.close()
     details, missing = {}, []
-    for row in _all_reservations():
+    for row in _all_reservations(stage_name):
         host, opponent = row["reserving_team"].strip(), row["opposing_team"].strip()
         channel_id = stadiums.get(_normalize_team_name(host))
         host_role_id = roles.get(_normalize_team_name(host))
@@ -277,14 +304,14 @@ def _reserve_match_details(guild_id: int, guild):
         details[int(row["id"])] = (channel, host_role, opponent_role)
     return details, sorted(set(missing))
 
-def _schedule_days(max_days: int):
+def _schedule_days(max_days: int, stage_name=None):
     """
     Backtracking edge-colouring scheduler. Each reservation is an edge between
     two teams; edges assigned to the same day cannot share a team. It searches
     from the theoretical minimum number of days (maximum team degree) upwards,
     stopping at max_days. This avoids wasting days when matches can be grouped.
     """
-    rows = _all_reservations()
+    rows = _all_reservations(stage_name)
     if not rows:
         return []
 
@@ -534,8 +561,14 @@ class Reserves(commands.Cog):
         )
 
     @commands.command(name="reservematch")
-    async def reservematch(self, ctx):
+    async def reservematch(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
+            return
+        if not stage_name:
+            await ctx.send("Usage: `+reservematch <stage name>`")
+            return
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist. Create it with `+createnewstage {stage_name}`.")
             return
         limit = _limit()
         if limit <= 0:
@@ -575,7 +608,7 @@ class Reserves(commands.Cog):
             await ctx.send("A team cannot reserve a match against itself.")
             return
 
-        existing = _all_reservations()
+        existing = _all_reservations(stage_name)
         total_a = sum(
             1 for r in existing
             if reserving.casefold() in (
@@ -611,9 +644,9 @@ class Reserves(commands.Cog):
 
         with _connect() as conn:
             cur = conn.execute("""
-                INSERT INTO reservations (reserving_team, opposing_team, created_by_id)
-                VALUES (?, ?, ?)
-            """, (reserving, opposing, ctx.author.id))
+                INSERT INTO reservations (reserving_team, opposing_team, stage_name, created_by_id)
+                VALUES (?, ?, ?, ?)
+            """, (reserving, opposing, stage_name.strip(), ctx.author.id))
             reserve_id = cur.lastrowid
 
         total_a += 1
@@ -879,8 +912,14 @@ class Reserves(commands.Cog):
         )
 
     @commands.command(name="creatematchups")
-    async def creatematchups(self, ctx):
+    async def creatematchups(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
+            return
+        if not stage_name:
+            await ctx.send("Usage: `+creatematchups <stage name>`")
+            return
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
             return
         if _schedule_exists():
             await ctx.send("A schedule is already marked as generated. Use `+resetmatchups` first, then run `+creatematchups` to create a new one.")
@@ -889,17 +928,17 @@ class Reserves(commands.Cog):
         if limit <= 0:
             await ctx.send("Set the limit first with `+setreserves <number>`.")
             return
-        rows = _all_reservations()
+        rows = _all_reservations(stage_name)
         if not rows:
             await ctx.send("There are no reserved matches to schedule.")
             return
         try:
-            days = await asyncio.to_thread(_schedule_days, limit)
+            days = await asyncio.to_thread(_schedule_days, limit, stage_name)
         except ValueError as exc:
             await ctx.send(f"❌ Could not create the schedule: {exc}")
             return
         # Reserving team is always the host; validate stadiums and roles before saving/posting.
-        match_details, missing_details = _reserve_match_details(ctx.guild.id, ctx.guild)
+        match_details, missing_details = _reserve_match_details(ctx.guild.id, ctx.guild, stage_name)
         if missing_details:
             await ctx.send(
                 "Cannot post the reserve schedule yet. Configure these first:\n"
@@ -918,7 +957,7 @@ class Reserves(commands.Cog):
                     )
             conn.execute("UPDATE schedule_state SET is_generated = 1, channel_id = ?, message_ids = '' WHERE id = 1", (ctx.channel.id,))
         intro = discord.Embed(
-            title="✦ OFFICIAL RESERVE MATCH SCHEDULE",
+            title=f"✦ {stage_name.upper()} — RESERVE MATCH SCHEDULE",
             color=discord.Color.from_rgb(35, 63, 110),
             description=(
                 f"**Total reserved matches:** {len(rows)}\n"
