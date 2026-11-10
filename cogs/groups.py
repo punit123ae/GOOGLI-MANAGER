@@ -107,10 +107,18 @@ def scoped_key(stage_name, value):
 
 
 def ensure_stage(conn, guild_id, stage_name):
+    # Match the canonical key first, then fall back to the displayed name.
+    # This also supports legacy rows created before stage keys were normalized.
     key = stage_key(stage_name)
-    return conn.execute(
-        "SELECT stage_key, stage_name FROM tournament_stages WHERE guild_id=? AND stage_key=?",
+    row = conn.execute(
+        "SELECT stage_key, stage_name FROM tournament_stages WHERE guild_id=? AND LOWER(TRIM(stage_key))=?",
         (guild_id, key),
+    ).fetchone()
+    if row:
+        return row
+    return conn.execute(
+        "SELECT stage_key, stage_name FROM tournament_stages WHERE guild_id=? AND LOWER(TRIM(stage_name))=LOWER(TRIM(?))",
+        (guild_id, stage_name),
     ).fetchone()
 
 
@@ -313,12 +321,19 @@ class Groups(commands.Cog):
             return
         conn = connect_group_db()
         try:
-            if not ensure_stage(conn, ctx.guild.id, old_name):
-                await ctx.send(f"Stage **{old_name}** was not found.")
+            old_stage = ensure_stage(conn, ctx.guild.id, old_name)
+            if not old_stage:
+                available = conn.execute(
+                    "SELECT stage_name FROM tournament_stages WHERE guild_id=? ORDER BY created_at",
+                    (ctx.guild.id,),
+                ).fetchall()
+                names_available = ", ".join(row["stage_name"] for row in available) or "none"
+                await ctx.send(f"Stage **{old_name}** was not found. Stages currently registered here: {names_available}")
                 return
             if ensure_stage(conn, ctx.guild.id, new_name):
                 await ctx.send(f"Stage **{new_name}** already exists.")
                 return
+            old_key = old_stage["stage_key"]
             for table, column in (("group_styles", "group_key"), ("team_groups", "team_name_key"),
                                   ("team_groups", "group_key"), ("generated_fixtures", "group_key")):
                 rows = conn.execute(f"SELECT rowid, {column} AS value FROM {table} WHERE guild_id=? AND {column} LIKE ?",
