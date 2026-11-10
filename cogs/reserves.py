@@ -555,15 +555,15 @@ class Reserves(commands.Cog):
 
         with _connect() as conn:
             current_counts = conn.execute("""
-                SELECT team_name, COUNT(*) AS n
+                SELECT stage_name, team_name, COUNT(*) AS n
                 FROM (
-                    SELECT reserving_team AS team_name FROM reservations
+                    SELECT stage_name, reserving_team AS team_name FROM reservations
                     UNION ALL
-                    SELECT opposing_team AS team_name FROM reservations
+                    SELECT stage_name, opposing_team AS team_name FROM reservations
                 )
-                GROUP BY team_name COLLATE NOCASE
+                GROUP BY stage_name COLLATE NOCASE, team_name COLLATE NOCASE
             """).fetchall()
-            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]
+            over = [f"{r['stage_name']}: {r['team_name']}" for r in current_counts if int(r["n"]) > total]
             if over:
                 await ctx.reply(
                     f"Cannot set the limit to {total}: these teams already exceed it: "
@@ -576,8 +576,8 @@ class Reserves(commands.Cog):
 
         await ctx.send(
             f"Reserve limit set to **{total} matches per team**.\n"
-            f"Each team may initiate **{total // 2}** reservations total across the server.\n"
-            "Each team's total involvement (as reserving or opposing team) cannot exceed "
+            f"Each team may initiate **{total // 2}** reservations per stage.\n"
+            "Each team's total involvement within a stage (as reserving or opposing team) cannot exceed "
             f"**{total}**."
         )
 
