@@ -489,7 +489,7 @@ class ReserveListView(discord.ui.View):
         lines = [f"**Reserved Matches ({len(self.rows)})**"]
         for index, row in enumerate(self.rows[start:start + PAGE_SIZE], start=start + 1):
             lines.append(
-                f"**{index}.** {row['reserving_team']} vs {row['opposing_team']}"
+                f"**{index}.** {row['reserving_team']} vs {row['opposing_team']} · *{row['stage_name']}*"
             )
         lines.append(f"Page {self.page + 1}/{self.pages}")
         return "\n".join(lines)
@@ -843,10 +843,10 @@ class Reserves(commands.Cog):
                 conn.execute(
                     "DELETE FROM generated_schedule WHERE reservation_id = ?", (reserve_id,)
                 )
-            _clear_schedule_state()
+            _clear_schedule_state(row["stage_name"])
             await ctx.send(
-                f"✅ Reserve ID **{reserve_id}** deleted. Team counts have been recalculated. "
-                "The generated schedule has been invalidated; run `+creatematchups` again."
+                f"✅ Reserve ID **{reserve_id}** deleted from **{row['stage_name']}**. "
+                "That stage's generated schedule has been invalidated."
             )
         elif view.choice is False:
             await ctx.send(f"Deletion cancelled. Reserve ID **{reserve_id}** was not changed.")
