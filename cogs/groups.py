@@ -704,7 +704,7 @@ class Groups(commands.Cog):
             await ctx.send(f"Group **{group_name}** is not configured in **{stage_name}**.")
             return
         if not fixtures:
-            await ctx.send(f"No fixtures for **{stage_name} / {group_name} / Round {round_no}**. Generate with `+generateschedule {stage_name} {group_name}`.")
+            await ctx.send(f"No fixtures for **{stage_name} / {group_name} / Round {round_no}**. Generate with `+generateschedule \"{stage_name}\" {group_name}`.")
             return
         if not os.path.exists(TEAM_DB):
             await ctx.send(f"Could not find {TEAM_DB}.")
