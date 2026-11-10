@@ -345,50 +345,66 @@ class Groups(commands.Cog):
 
 
     @commands.command(name="groupstyle")
-    async def groupstyle(self, ctx):
-        """Set allowed group names, e.g. A, B, C, D."""
+    async def groupstyle(self, ctx, *, stage_name: str = None):
+        """Configure group names for one stage."""
         if not await owner_only(ctx):
             return
-        msg = await ask_owner(
-            ctx,
-            "Send the allowed group names separated by commas (example: `A, B, C, D`).\n"
-            "This replaces the allowed group list. Type `cancel` to stop.",
-        )
-        if msg is None or norm(msg.content) == "cancel":
-            if msg is not None:
-                await ctx.send("Cancelled. No changes made.")
-            return
-        groups = [item.strip() for item in msg.content.split(",") if item.strip()]
-        keys = [norm(item) for item in groups]
-        if not groups or len(keys) != len(set(keys)):
-            await ctx.send("Please provide at least one group name, with no duplicates. No changes made.")
+        if not stage_name:
+            await ctx.send("Usage: `+groupstyle <stage name>`")
             return
         conn = connect_group_db()
         try:
-            assigned = conn.execute(
-                "SELECT DISTINCT group_key FROM team_groups WHERE guild_id = ?",
-                (ctx.guild.id,),
-            ).fetchall()
-            assigned_keys = {row["group_key"] for row in assigned}
-            if assigned_keys - set(keys):
-                await ctx.send(
-                    "Some teams are assigned to group names that aren't in your new list. "
-                    "Run `+setteamgroups` to reassign those teams, then `+audittgroup`."
-                )
-            conn.execute("DELETE FROM group_styles WHERE guild_id = ?", (ctx.guild.id,))
+            stage = ensure_stage(conn, ctx.guild.id, stage_name)
+        finally:
+            conn.close()
+        if not stage:
+            await ctx.send(f"Stage **{stage_name}** does not exist. Create it with `+createnewstage {stage_name}`.")
+            return
+        msg = await ask_owner(ctx, "Send the group names for this stage separated by commas (example: A, B, C).")
+        if msg is None or norm(msg.content) == "cancel":
+            await ctx.send("Cancelled. No changes made.")
+            return
+        groups = [item.strip() for item in msg.content.split(",") if item.strip()]
+        keys = [scoped_key(stage_name, item) for item in groups]
+        if not groups or len(keys) != len(set(keys)):
+            await ctx.send("Enter at least one group name, without duplicates.")
+            return
+        conn = connect_group_db()
+        try:
+            conn.execute("DELETE FROM group_styles WHERE guild_id=? AND group_key LIKE ?",
+                         (ctx.guild.id, stage_key(stage_name) + "::%"))
             conn.executemany(
                 "INSERT INTO group_styles (guild_id, group_key, group_name, position) VALUES (?, ?, ?, ?)",
-                [(ctx.guild.id, norm(name), name, i) for i, name in enumerate(groups)],
+                [(ctx.guild.id, scoped_key(stage_name, name), name, i) for i, name in enumerate(groups)],
             )
             conn.commit()
         finally:
             conn.close()
-        await ctx.send("Allowed groups saved: " + ", ".join(f"`{g}`" for g in groups))
+        await ctx.send(f"Groups saved for **{stage_name}**: " + ", ".join(f"`{x}`" for x in groups))
+
 
     @commands.command(name="setteamgroups")
-    async def setteamgroups(self, ctx):
-        """Interactively assign each approved team to one configured group."""
+    async def setteamgroups(self, ctx, *, stage_name: str = None):
+        """Select approved teams and assign them to groups in a named stage."""
         if not await owner_only(ctx):
+            return
+        if not stage_name:
+            await ctx.send("Usage: `+setteamgroups <stage name>`")
+            return
+        conn = connect_group_db()
+        try:
+            stage = ensure_stage(conn, ctx.guild.id, stage_name)
+            groups = conn.execute(
+                "SELECT group_name FROM group_styles WHERE guild_id=? AND group_key LIKE ? ORDER BY position",
+                (ctx.guild.id, stage_key(stage_name) + "::%"),
+            ).fetchall()
+        finally:
+            conn.close()
+        if not stage:
+            await ctx.send(f"Stage **{stage_name}** does not exist. Use `+createnewstage {stage_name}` first.")
+            return
+        if not groups:
+            await ctx.send(f"Set groups first with `+groupstyle {stage_name}`.")
             return
         try:
             teams = get_approved_teams(ctx.guild.id)
@@ -396,112 +412,79 @@ class Groups(commands.Cog):
             await ctx.send(f"Database error: {exc}")
             return
         if not teams:
-            await ctx.send("There are no approved teams in the team database for this server.")
+            await ctx.send("There are no approved teams.")
             return
-        conn = connect_group_db()
+        await ctx.send("**Approved teams available for " + stage_name + ":**\n" +
+                       "\n".join(f"`{i}`. {name}" for i, (name, _) in enumerate(teams, 1)))
+        msg = await ask_owner(ctx, "Enter only the team numbers to include, separated by commas (example: 1, 3, 5). Type cancel to stop.")
+        if msg is None or norm(msg.content) == "cancel":
+            await ctx.send("Cancelled. No assignments changed.")
+            return
         try:
-            groups = conn.execute(
-                "SELECT group_name, group_key FROM group_styles WHERE guild_id = ? ORDER BY position",
-                (ctx.guild.id,),
-            ).fetchall()
-        finally:
-            conn.close()
-        if not groups:
-            await ctx.send("Set allowed groups first with `+groupstyle`.")
+            indexes = [int(x.strip()) for x in msg.content.split(",") if x.strip()]
+            if not indexes or len(indexes) != len(set(indexes)) or any(i < 1 or i > len(teams) for i in indexes):
+                raise ValueError
+        except ValueError:
+            await ctx.send("Invalid selection. Use unique team numbers separated by commas.")
             return
-        choices = {row["group_key"]: row["group_name"] for row in groups}
-        await ctx.send(
-            f"Assigning {len(teams)} approved teams. Valid groups: "
-            + ", ".join(f"`{row['group_name']}`" for row in groups)
-            + ". Reply with a group name for each team, or `cancel` to stop."
-        )
+        selected = [teams[i - 1] for i in indexes]
         assignments = []
-        for index, (team_name, team_key) in enumerate(teams, start=1):
-            while True:
-                msg = await ask_owner(
-                    ctx,
-                    f"**Team {index}/{len(teams)}: {team_name}**\nWhich group? ({', '.join(choices.values())})",
-                )
-                if msg is None:
-                    return
-                answer = norm(msg.content)
-                if answer == "cancel":
-                    await ctx.send("Cancelled. No new assignments were saved.")
-                    return
-                if answer in choices:
-                    assignments.append((team_name, team_key, answer))
-                    break
-                await ctx.send("That group isn't configured. Reply with one of the listed group names.")
+        group_names = [row["group_name"] for row in groups]
+        await ctx.send("Assigning only your selected teams. Groups: " + ", ".join(group_names))
+        for index, (team_name, team_db_key) in enumerate(selected, 1):
+            msg = await ask_owner(ctx, f"**{index}/{len(selected)} — {team_name}**\nEnter its group name:")
+            if msg is None or norm(msg.content) == "cancel":
+                await ctx.send("Cancelled. No assignments saved.")
+                return
+            group_name = next((name for name in group_names if norm(name) == norm(msg.content)), None)
+            if not group_name:
+                await ctx.send(f"Invalid group for {team_name}. No assignments saved; run the command again.")
+                return
+            assignments.append((team_name, team_db_key, scoped_key(stage_name, group_name)))
         conn = connect_group_db()
         try:
             now = datetime.now(timezone.utc).isoformat()
-            conn.executemany(
-                "INSERT INTO team_groups (guild_id, team_name_key, team_name, group_key, updated_by, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
-                "team_name=excluded.team_name, group_key=excluded.group_key, "
-                "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
-                [(ctx.guild.id, key, name, group_key, ctx.author.id, now) for name, key, group_key in assignments],
-            )
-            # Remove assignments for teams that are no longer approved in the source database.
-            current_keys = {key for _, key in teams}
-            existing = conn.execute(
-                "SELECT team_name_key FROM team_groups WHERE guild_id = ?", (ctx.guild.id,)
-            ).fetchall()
-            for row in existing:
-                if row["team_name_key"] not in current_keys:
-                    conn.execute(
-                        "DELETE FROM team_groups WHERE guild_id = ? AND team_name_key = ?",
-                        (ctx.guild.id, row["team_name_key"]),
-                    )
+            for team_name, team_db_key, group_key in assignments:
+                conn.execute(
+                    "INSERT INTO team_groups (guild_id, team_name_key, team_name, group_key, updated_by, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
+                    "team_name=excluded.team_name, group_key=excluded.group_key, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                    (ctx.guild.id, scoped_key(stage_name, team_db_key), team_name, group_key, ctx.author.id, now),
+                )
             conn.commit()
         finally:
             conn.close()
-        await ctx.send(f"Saved group assignments for {len(assignments)} approved teams. Run `+audittgroup` to check them.")
+        await ctx.send(f"Saved **{len(assignments)}** selected team assignments in **{stage_name}**. Other stages were not changed.")
+
 
     @commands.command(name="audittgroup")
-    async def audittgroup(self, ctx):
-        """Check approved teams are assigned exactly once to a valid group."""
+    async def audittgroup(self, ctx, *, stage_name: str = None):
         if not await owner_only(ctx):
             return
-        try:
-            teams = get_approved_teams(ctx.guild.id)
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            await ctx.send(f"Database error: {exc}")
+        if not stage_name:
+            await ctx.send("Usage: `+audittgroup <stage name>`")
             return
         conn = connect_group_db()
         try:
-            groups = conn.execute(
-                "SELECT group_key, group_name FROM group_styles WHERE guild_id = ?",
-                (ctx.guild.id,),
-            ).fetchall()
-            assignments = conn.execute(
-                "SELECT team_name_key, team_name, group_key FROM team_groups WHERE guild_id = ?",
-                (ctx.guild.id,),
-            ).fetchall()
+            stage = ensure_stage(conn, ctx.guild.id, stage_name)
+            groups = conn.execute("SELECT group_key, group_name FROM group_styles WHERE guild_id=? AND group_key LIKE ?",
+                                  (ctx.guild.id, stage_key(stage_name) + "::%")).fetchall()
+            assignments = conn.execute("SELECT team_name, group_key FROM team_groups WHERE guild_id=? AND team_name_key LIKE ?",
+                                       (ctx.guild.id, stage_key(stage_name) + "::%")).fetchall()
         finally:
             conn.close()
-        valid_groups = {row["group_key"] for row in groups}
-        by_key = {row["team_name_key"]: row for row in assignments}
-        missing = [name for name, key in teams if key not in by_key]
-        invalid = [row["team_name"] for row in assignments if row["group_key"] not in valid_groups]
-        current_keys = {key for _, key in teams}
-        stale = [row["team_name"] for row in assignments if row["team_name_key"] not in current_keys]
-        lines = ["**Group Assignment Audit**", f"Approved teams: {len(teams)}", f"Configured groups: {len(groups)}"]
-        lines.append(f"Missing assignments: {len(missing)}")
-        if missing:
-            lines.extend(f"• {name}" for name in missing[:40])
-        lines.append(f"Assignments using unconfigured groups: {len(invalid)}")
-        if invalid:
-            lines.extend(f"• {name}" for name in invalid[:40])
-        lines.append(f"Teams no longer approved / not in source list: {len(stale)}")
-        if stale:
-            lines.extend(f"• {name}" for name in stale[:40])
-        if not missing and not invalid and not stale and groups:
-            lines.append("✅ All approved teams have exactly one valid group assignment.")
-        elif not groups:
-            lines.append("⚠️ Run `+groupstyle` first.")
-        for chunk in split_chunks("\n".join(lines)):
-            await ctx.send(chunk)
+        if not stage:
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
+            return
+        valid = {row["group_key"] for row in groups}
+        invalid = [row["team_name"] for row in assignments if row["group_key"] not in valid]
+        lines = [f"**Group Audit — {stage_name}**", f"Teams assigned: {len(assignments)}",
+                 f"Groups configured: {len(groups)}", f"Invalid assignments: {len(invalid)}"]
+        lines.extend("• " + name for name in invalid)
+        if not invalid:
+            lines.append("All saved assignments point to valid groups.")
+        await ctx.send("\n".join(lines))
+
 
     @commands.command(name="deletegroupteams")
     async def deletegroupteams(self, ctx, *, group_name: str = None):
@@ -542,42 +525,43 @@ class Groups(commands.Cog):
         )
 
     @commands.command(name="setformat")
-    async def setformat(self, ctx):
-        """Set how many times each pair of teams plays in each group."""
+    async def setformat(self, ctx, *, stage_name: str = None):
+        """Set repeat meetings per pair for one stage."""
         if not await owner_only(ctx):
             return
-        msg = await ask_owner(
-            ctx,
-            "How many times should each pair of teams play each other? Send a positive whole number "
-            "(for example, `1` or `2`). Type `cancel` to stop.",
-        )
-        if msg is None or norm(msg.content) == "cancel":
-            if msg is not None:
-                await ctx.send("Cancelled. Format unchanged.")
-            return
-        try:
-            count = int(msg.content.strip())
-            if count < 1 or count > 20:
-                raise ValueError
-        except ValueError:
-            await ctx.send("Please enter a whole number from 1 to 20. Format unchanged.")
+        if not stage_name:
+            await ctx.send("Usage: `+setformat <stage name>`")
             return
         conn = connect_group_db()
         try:
-            conn.execute(
-                "INSERT INTO schedule_formats (guild_id, matches_per_pair, updated_by, updated_at) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(guild_id) DO UPDATE SET matches_per_pair=excluded.matches_per_pair, "
-                "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
-                (ctx.guild.id, count, ctx.author.id, datetime.now(timezone.utc).isoformat()),
-            )
+            stage = ensure_stage(conn, ctx.guild.id, stage_name)
+        finally:
+            conn.close()
+        if not stage:
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
+            return
+        msg = await ask_owner(ctx, "How many times should each pair play? Enter a whole number from 1 to 20.")
+        if msg is None or norm(msg.content) == "cancel":
+            await ctx.send("Cancelled. Format unchanged.")
+            return
+        try:
+            count = int(msg.content.strip())
+            if not 1 <= count <= 20:
+                raise ValueError
+        except ValueError:
+            await ctx.send("Enter a whole number from 1 to 20.")
+            return
+        conn = connect_group_db()
+        try:
+            conn.execute("INSERT INTO stage_formats (guild_id, stage_key, matches_per_pair, updated_by, updated_at) "
+                         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id, stage_key) DO UPDATE SET "
+                         "matches_per_pair=excluded.matches_per_pair, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                         (ctx.guild.id, stage_key(stage_name), count, ctx.author.id, datetime.now(timezone.utc).isoformat()))
             conn.commit()
         finally:
             conn.close()
-        await ctx.send(
-            f"Schedule format saved: every pair plays **{count} time(s)**. "
-            "With `2`, each pair alternates home stadiums across its two matches. "
-            "Each full round will finish before the next round starts."
-        )
+        await ctx.send(f"Format saved for **{stage_name}**: each pair plays **{count}** time(s).")
+
 
     @commands.command(name="synchomestadiums")
     async def synchomestadiums(self, ctx):
@@ -706,209 +690,132 @@ class Groups(commands.Cog):
         await ctx.send(f"Home stadium for **{team['team_name']}** set to {channel.mention}.")
 
     @commands.command(name="schedule")
-    async def schedule(self, ctx, group_name: str = None, matchday: int = None):
-        """Post a generated matchday as a plain, role-mentioning message."""
+    async def schedule(self, ctx, stage_name: str = None, group_name: str = None, round_no: int = None):
+        """Post one round of a named stage and group."""
         if not await owner_only(ctx):
             return
-        if not group_name or matchday is None or matchday < 1:
-            await ctx.send("Usage: `+schedule <group> <matchday>` (example: `+schedule A 1`)")
+        if not stage_name or not group_name or round_no is None or round_no < 1:
+            await ctx.send("Usage: `+schedule <stage name> <group> <round>`")
             return
-
         conn = connect_group_db()
         try:
-            group = conn.execute(
-                "SELECT group_name, group_key FROM group_styles WHERE guild_id = ? AND group_key = ?",
-                (ctx.guild.id, norm(group_name)),
-            ).fetchone()
-            if group:
-                fixtures = conn.execute(
-                    "SELECT team_one, team_two FROM generated_fixtures "
-                    "WHERE guild_id = ? AND group_key = ? AND day_no = ? ORDER BY id",
-                    (ctx.guild.id, group["group_key"], matchday),
-                ).fetchall()
-                assigned = conn.execute(
-                    "SELECT team_name FROM team_groups WHERE guild_id = ? AND group_key = ? "
-                    "ORDER BY team_name COLLATE NOCASE",
-                    (ctx.guild.id, group["group_key"]),
-                ).fetchall()
-                home_stadiums = conn.execute(
-                    "SELECT team_name, channel_id FROM team_home_stadiums WHERE guild_id = ?",
-                    (ctx.guild.id,),
-                ).fetchall()
-            else:
-                fixtures, assigned, home_stadiums = [], [], []
+            group = conn.execute("SELECT group_name, group_key FROM group_styles WHERE guild_id=? AND group_key=?",
+                                 (ctx.guild.id, scoped_key(stage_name, group_name))).fetchone()
+            fixtures = conn.execute("SELECT team_one, team_two, day_no FROM generated_fixtures WHERE guild_id=? AND group_key=? AND round_no=? ORDER BY day_no, id",
+                                    (ctx.guild.id, group["group_key"], round_no)).fetchall() if group else []
+            assigned = conn.execute("SELECT team_name FROM team_groups WHERE guild_id=? AND group_key=? ORDER BY team_name COLLATE NOCASE",
+                                    (ctx.guild.id, group["group_key"])).fetchall() if group else []
+            home_stadiums = conn.execute("SELECT team_name, channel_id FROM team_home_stadiums WHERE guild_id=?",
+                                         (ctx.guild.id,)).fetchall()
         finally:
             conn.close()
-
         if not group:
-            await ctx.send("That group isn't configured. Check `+groupstyle`.")
+            await ctx.send(f"Group **{group_name}** is not configured in **{stage_name}**.")
             return
         if not fixtures:
-            await ctx.send(
-                f"No fixtures found for Group {group['group_name']} matchday {matchday}. "
-                f"Generate the schedule first with `+generateschedule {group['group_name']}`."
-            )
+            await ctx.send(f"No fixtures for **{stage_name} / {group_name} / Round {round_no}**. Generate with `+generateschedule {stage_name} {group_name}`.")
             return
-
-        # Resolve each assigned team to the role already configured in team registration.
         if not os.path.exists(TEAM_DB):
-            await ctx.send(f"I couldn't find `{TEAM_DB}` to resolve the team roles.")
+            await ctx.send(f"Could not find {TEAM_DB}.")
             return
         team_conn = sqlite3.connect(TEAM_DB)
         try:
-            role_rows = team_conn.execute(
-                "SELECT t.name, s.role_id FROM registered_teams t "
-                "JOIN team_role_settings s ON s.team_id = t.id "
-                "WHERE t.guild_id = ? AND LOWER(t.status) = 'approved'",
-                (ctx.guild.id,),
-            ).fetchall()
+            role_rows = team_conn.execute("SELECT t.name, s.role_id FROM registered_teams t JOIN team_role_settings s ON s.team_id=t.id WHERE t.guild_id=? AND LOWER(t.status)='approved'", (ctx.guild.id,)).fetchall()
         finally:
             team_conn.close()
         role_by_team = {norm(name): int(role_id) for name, role_id in role_rows}
-
-        resolved = []
-        missing_roles = []
-        for fixture in fixtures:
-            names = (fixture["team_one"], fixture["team_two"])
-            role_ids = [role_by_team.get(norm(name)) for name in names]
-            for name, role_id in zip(names, role_ids):
-                if role_id is None or ctx.guild.get_role(role_id) is None:
-                    missing_roles.append(name)
-            if all(role_ids) and all(ctx.guild.get_role(role_id) for role_id in role_ids):
-                resolved.append((names, role_ids))
-        if missing_roles:
-            await ctx.send("Couldn't find configured Discord roles for: " + ", ".join(sorted(set(missing_roles))))
-            return
-
         stadium_by_team = {norm(row["team_name"]): int(row["channel_id"]) for row in home_stadiums}
-        missing_channels = [names[0] for names, _ in resolved if norm(names[0]) not in stadium_by_team]
-        if missing_channels:
-            await ctx.send(
-                "Set a home stadium channel first for: " + ", ".join(sorted(set(missing_channels))) +
-                ". Use `+sethomestadium <team name> <#channel>`."
-            )
-            return
-
-        playing = {norm(name) for fixture in fixtures for name in (fixture["team_one"], fixture["team_two"])}
-        rest_roles = []
+        lines = [f"# KASHMIR TITANS — {stage_name.upper()}", f"## ROUND {round_no}", f"# GROUP {group['group_name']}"]
+        ping_roles = []
+        playing = set()
+        for index, fixture in enumerate(fixtures, 1):
+            a, b = fixture["team_one"], fixture["team_two"]
+            playing.update((norm(a), norm(b)))
+            role_a = ctx.guild.get_role(role_by_team.get(norm(a), 0))
+            role_b = ctx.guild.get_role(role_by_team.get(norm(b), 0))
+            if role_a is None or role_b is None:
+                await ctx.send(f"Missing configured role for {a} or {b}.")
+                return
+            channel_id = stadium_by_team.get(norm(a))
+            if not channel_id or ctx.guild.get_channel(channel_id) is None:
+                await ctx.send(f"Set a home stadium for host **{a}** with `+sethomestadium {a} #channel`.")
+                return
+            ping_roles.extend((role_a, role_b))
+            lines.extend(["", f"**Match {index}**", f"- {role_a.mention} vs {role_b.mention} in <#{channel_id}>"])
+        rest = []
         for row in assigned:
             if norm(row["team_name"]) not in playing:
-                role_id = role_by_team.get(norm(row["team_name"]))
-                role = ctx.guild.get_role(role_id) if role_id else None
-                if role is None:
-                    await ctx.send(f"Couldn't find the configured Discord role for resting team {row['team_name']}.")
-                    return
-                rest_roles.append(role)
+                role = ctx.guild.get_role(role_by_team.get(norm(row["team_name"]), 0))
+                if role:
+                    rest.append(role)
+        if rest:
+            lines.append("**Rest:** " + ", ".join(role.mention for role in rest))
+            ping_roles.extend(rest)
+        await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles, replied_user=False))
 
-        header_emoji = "<:emoji_60:1562481891037290637>"
-        vs_emoji = "<:VS128:1559620966709993472>"
-        lines = [
-            f"# {header_emoji}『 KASHMIR TITANS S1 』{header_emoji}",
-            f"## MATCHUPS FOR ROUND {matchday}",
-            f"# __GROUP {group['group_name']}__",
-        ]
-        all_ping_roles = []
-        for index, (names, role_ids) in enumerate(resolved, start=1):
-            role_a, role_b = role_ids
-            channel_id = stadium_by_team[norm(names[0])]
-            all_ping_roles.extend((ctx.guild.get_role(role_a), ctx.guild.get_role(role_b)))
-            lines.extend([
-                "",
-                f"**Match {index}**",
-                f"- <@&{role_a}> {vs_emoji} <@&{role_b}> in <#{channel_id}>",
-            ])
-        if rest_roles:
-            lines.append("### Rest: " + ", ".join(role.mention for role in rest_roles))
-            all_ping_roles.extend(rest_roles)
-        await ctx.send(
-            "\n".join(lines),
-            allowed_mentions=discord.AllowedMentions(
-                everyone=False, users=False, roles=all_ping_roles, replied_user=False
-            ),
-        )
 
     @commands.command(name="generateschedule")
-    async def generateschedule(self, ctx, *, group_name: str = None):
-        """Generate a saved round-robin schedule for a group: +generateschedule A"""
+    async def generateschedule(self, ctx, stage_name: str = None, *, group_name: str = None):
+        """Generate round-robin fixtures for one stage and group."""
         if not await owner_only(ctx):
             return
-        if not group_name:
-            await ctx.send("Usage: `+generateschedule <group>` (example: `+generateschedule A`)")
+        if not stage_name or not group_name:
+            await ctx.send("Usage: `+generateschedule <stage name> <group>`")
             return
         conn = connect_group_db()
         try:
-            group = conn.execute(
-                "SELECT group_name, group_key FROM group_styles WHERE guild_id = ? AND group_key = ?",
-                (ctx.guild.id, norm(group_name)),
-            ).fetchone()
-            fmt = conn.execute(
-                "SELECT matches_per_pair FROM schedule_formats WHERE guild_id = ?", (ctx.guild.id,)
-            ).fetchone()
-            assignments = conn.execute(
-                "SELECT team_name FROM team_groups WHERE guild_id = ? AND group_key = ? ORDER BY team_name COLLATE NOCASE",
-                (ctx.guild.id, norm(group_name)),
-            ).fetchall()
+            group = conn.execute("SELECT group_name, group_key FROM group_styles WHERE guild_id=? AND group_key=?",
+                                 (ctx.guild.id, scoped_key(stage_name, group_name))).fetchone()
+            fmt = conn.execute("SELECT matches_per_pair FROM stage_formats WHERE guild_id=? AND stage_key=?",
+                               (ctx.guild.id, stage_key(stage_name))).fetchone()
+            assignments = conn.execute("SELECT team_name FROM team_groups WHERE guild_id=? AND group_key=? ORDER BY team_name COLLATE NOCASE",
+                                       (ctx.guild.id, group["group_key"])).fetchall() if group else []
         finally:
             conn.close()
         if not group:
-            await ctx.send("That group isn't configured. Check `+groupstyle`.")
+            await ctx.send(f"Group **{group_name}** is not configured in **{stage_name}**.")
             return
         if not fmt:
-            await ctx.send("Set the schedule format first with `+setformat`.")
+            await ctx.send(f"Set this stage's format with `+setformat {stage_name}`.")
             return
         names = [row["team_name"] for row in assignments]
         if len(names) < 2:
-            await ctx.send(f"Group {group['group_name']} needs at least 2 assigned teams to create a schedule.")
+            await ctx.send("At least two teams must be assigned to this group.")
             return
         one_round = make_round_robin(names)
-        team_position = {norm(name): index for index, name in enumerate(names)}
-        fixtures = []
-        day_number = 1
-        for round_no in range(1, fmt["matches_per_pair"] + 1):
+        positions = {norm(name): i for i, name in enumerate(names)}
+        fixtures, day_number = [], 1
+        for leg in range(1, fmt["matches_per_pair"] + 1):
             for matches in one_round:
-                for team_one, team_two in matches:
-                    # For odd-sized groups, orient the single round robin as a
-                    # regular tournament so every team has exactly half its games at home.
+                for a, b in matches:
                     if len(names) % 2:
-                        distance = (
-                            team_position[norm(team_two)] - team_position[norm(team_one)]
-                        ) % len(names)
+                        distance = (positions[norm(b)] - positions[norm(a)]) % len(names)
                         if distance > len(names) // 2:
-                            team_one, team_two = team_two, team_one
-                    # Alternate home teams on repeat meetings so two legs are home and away.
-                    if round_no % 2 == 0:
-                        team_one, team_two = team_two, team_one
-                    fixtures.append((round_no, day_number, team_one, team_two))
+                            a, b = b, a
+                    if leg % 2 == 0:
+                        a, b = b, a
+                    fixtures.append((leg, day_number, a, b))
                 day_number += 1
         now = datetime.now(timezone.utc).isoformat()
         conn = connect_group_db()
         try:
-            conn.execute(
-                "DELETE FROM generated_fixtures WHERE guild_id = ? AND group_key = ?",
-                (ctx.guild.id, group["group_key"]),
-            )
-            conn.executemany(
-                "INSERT INTO generated_fixtures (guild_id, group_key, round_no, day_no, team_one, team_two, generated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(ctx.guild.id, group["group_key"], rnd, day, a, b, now) for rnd, day, a, b in fixtures],
-            )
+            conn.execute("DELETE FROM generated_fixtures WHERE guild_id=? AND group_key=?",
+                         (ctx.guild.id, group["group_key"]))
+            conn.executemany("INSERT INTO generated_fixtures (guild_id, group_key, round_no, day_no, team_one, team_two, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                             [(ctx.guild.id, group["group_key"], rnd, day, a, b, now) for rnd, day, a, b in fixtures])
             conn.commit()
         finally:
             conn.close()
-        lines = [f"**{group['group_name']} — Generated Schedule**", f"Teams: {len(names)} | Rounds: {fmt['matches_per_pair']}"]
-        for round_no in range(1, fmt["matches_per_pair"] + 1):
-            lines.append(f"\n**Round {round_no}**")
-            round_days = len(one_round)
-            for day in range((round_no - 1) * round_days + 1, round_no * round_days + 1):
-                day_fixtures = [f for f in fixtures if f[1] == day]
-                lines.append(f"**Day {day}**")
-                if day_fixtures:
-                    lines.extend(f"• {a} vs {b}" for _, _, a, b in day_fixtures)
-                else:
-                    lines.append("• Bye day — no matches")
-        lines.append("\nSchedule saved. Generating it again for this group will replace its previous schedule.")
+        lines = [f"**{stage_name} — Group {group['group_name']} Schedule**", f"Teams: {len(names)} | Legs: {fmt['matches_per_pair']}"]
+        for rnd in range(1, fmt["matches_per_pair"] + 1):
+            lines.append(f"\n**Round {rnd}**")
+            for _, day, a, b in fixtures:
+                if _ == rnd:
+                    lines.append(f"• {a} vs {b}")
+        lines.append("Schedule saved for this stage and group only.")
         for chunk in split_chunks("\n".join(lines)):
             await ctx.send(chunk)
+
 
 
 async def setup(bot):
