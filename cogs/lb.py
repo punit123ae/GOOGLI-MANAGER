@@ -851,7 +851,7 @@ class LeaderboardCog(commands.Cog):
                     db.executemany(
                         "INSERT INTO lb_rank_display_delta (guild_id, category, metric_key, user_id, delta) "
                         "VALUES (?, ?, ?, ?, ?)",
-                        [(guild_id, uid, 0) for uid, _ in computed],
+                        [(guild_id, category, metric_key, uid, 0) for uid, _ in computed],
                     )
                     db.execute(
                         "INSERT INTO lb_rank_metric_revision (guild_id, category, metric_key, revision) "
