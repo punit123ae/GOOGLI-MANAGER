@@ -310,7 +310,10 @@ class Groups(commands.Cog):
     async def renamestage(self, ctx, *, names: str = None):
         if not await owner_only(ctx):
             return
-        parts = names.split("|", 1) if names else []
+        # Accept both a normal pipe and a backslash-escaped pipe copied from
+        # Markdown/chat formatting (\|), then split only once.
+        cleaned_names = names.replace("\\|", "|") if names else ""
+        parts = cleaned_names.split("|", 1) if cleaned_names else []
         if len(parts) != 2 or not all(part.strip() for part in parts):
             await ctx.send("Usage: `+renamestage <old stage name> | <new stage name>`")
             return
