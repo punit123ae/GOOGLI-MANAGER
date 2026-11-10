@@ -355,14 +355,14 @@ class Groups(commands.Cog):
                     ("generated_fixtures", "group_key"),
                 ):
                     rows = conn.execute(
-                        f"SELECT rowid, {column} AS value FROM {table} WHERE guild_id=? AND {column} LIKE ?",
+                        f"SELECT rowid AS row_id, {column} AS value FROM {table} WHERE guild_id=? AND {column} LIKE ?",
                         (ctx.guild.id, old_key + "::%"),
                     ).fetchall()
                     for row in rows:
                         suffix = row["value"].split("::", 1)[1]
                         conn.execute(
                             f"UPDATE {table} SET {column}=? WHERE rowid=?",
-                            (new_key + "::" + suffix, row["rowid"]),
+                            (new_key + "::" + suffix, row["row_id"]),
                         )
 
                 conn.execute(
