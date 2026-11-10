@@ -207,11 +207,18 @@ def _init_db():
                 (id, is_generated, channel_id, message_ids)
             VALUES (1, 0, NULL, NULL)
         """)
-
-    # Backward-compatible migration: existing reserves stay in Stage 1.
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(reservations)").fetchall()}
-    if "stage_name" not in columns:
-        conn.execute("ALTER TABLE reservations ADD COLUMN stage_name TEXT NOT NULL DEFAULT 'Stage 1'")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reserve_stage_schedule_state (
+                stage_name TEXT PRIMARY KEY COLLATE NOCASE,
+                is_generated INTEGER NOT NULL DEFAULT 0,
+                channel_id INTEGER,
+                message_ids TEXT
+            )
+        """)
+        conn.execute("INSERT OR IGNORE INTO reserve_stage_schedule_state (stage_name) VALUES ('Stage 1')")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(reservations)").fetchall()}
+        if "stage_name" not in columns:
+            conn.execute("ALTER TABLE reservations ADD COLUMN stage_name TEXT NOT NULL DEFAULT 'Stage 1'")
 
 
 def _limit():
@@ -249,22 +256,29 @@ def _all_reservations(stage_name=None):
         """, (stage_name,)).fetchall()
 
 
-def _schedule_exists():
+def _schedule_exists(stage_name=None):
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT is_generated FROM schedule_state WHERE id = 1"
-        ).fetchone()
-        return bool(row["is_generated"])
+        if stage_name is None:
+            row = conn.execute("SELECT is_generated FROM schedule_state WHERE id=1").fetchone()
+        else:
+            row = conn.execute("SELECT is_generated FROM reserve_stage_schedule_state WHERE stage_name=? COLLATE NOCASE",
+                               (stage_name,)).fetchone()
+        return bool(row and row["is_generated"])
 
 
-def _clear_schedule_state():
+def _clear_schedule_state(stage_name=None):
     with _connect() as conn:
-        conn.execute("DELETE FROM generated_schedule")
-        conn.execute("""
-            UPDATE schedule_state
-            SET is_generated = 0, channel_id = NULL, message_ids = NULL
-            WHERE id = 1
-        """)
+        if stage_name is None:
+            conn.execute("DELETE FROM generated_schedule")
+            conn.execute("UPDATE schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL WHERE id=1")
+        else:
+            ids = [row["id"] for row in conn.execute(
+                "SELECT id FROM reservations WHERE stage_name=? COLLATE NOCASE", (stage_name,)
+            ).fetchall()]
+            if ids:
+                conn.executemany("DELETE FROM generated_schedule WHERE reservation_id=?", [(item,) for item in ids])
+            conn.execute("UPDATE reserve_stage_schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL WHERE stage_name=? COLLATE NOCASE",
+                         (stage_name,))
 
 def _reserve_match_details(guild_id: int, guild, stage_name=None):
     """Resolve reserving team as host, its home stadium, and both team roles."""
@@ -656,6 +670,7 @@ class Reserves(commands.Cog):
             title="Reservation Added",
             description=(
                 f"**ID:** `{int(reserve_id)}`\n"
+                f"**Stage:** {stage_name.strip()}\n"
                 f"**Match:** {reserving} vs {opposing}\n"
                 f"**Team limits:** {total_a}/{limit} · {total_b}/{limit}\n"
                 f"**Initiated by {reserving}:** {initiated_a}/{initiation_quota}"
@@ -665,7 +680,7 @@ class Reserves(commands.Cog):
         await ctx.send(embed=embed)
 
         # A new reservation invalidates the stored schedule.
-        _clear_schedule_state()
+        _clear_schedule_state(stage_name)
 
     @commands.command(name="forcereserve")
     async def forcereserve(self, ctx):
@@ -921,7 +936,7 @@ class Reserves(commands.Cog):
         if not _stage_exists(ctx.guild.id, stage_name):
             await ctx.send(f"Stage **{stage_name}** does not exist.")
             return
-        if _schedule_exists():
+        if _schedule_exists(stage_name):
             await ctx.send("A schedule is already marked as generated. Use `+resetmatchups` first, then run `+creatematchups` to create a new one.")
             return
         limit = _limit()
@@ -948,14 +963,16 @@ class Reserves(commands.Cog):
             return
         # Save schedule before posting so it can be inspected after a restart.
         with _connect() as conn:
-            conn.execute("DELETE FROM generated_schedule")
+            conn.executemany("DELETE FROM generated_schedule WHERE reservation_id=?", [(row["id"],) for row in rows])
             for day, matches in days:
                 for match in matches:
                     conn.execute(
                         "INSERT INTO generated_schedule (reservation_id, day_number) VALUES (?, ?)",
                         (match["id"], day),
                     )
-            conn.execute("UPDATE schedule_state SET is_generated = 1, channel_id = ?, message_ids = '' WHERE id = 1", (ctx.channel.id,))
+            conn.execute("INSERT INTO reserve_stage_schedule_state (stage_name, is_generated, channel_id, message_ids) VALUES (?, 1, ?, '') "
+                         "ON CONFLICT(stage_name) DO UPDATE SET is_generated=1, channel_id=excluded.channel_id, message_ids=''",
+                         (stage_name.strip(), ctx.channel.id))
         intro = discord.Embed(
             title=f"✦ {stage_name.upper()} — RESERVE MATCH SCHEDULE",
             color=discord.Color.from_rgb(35, 63, 110),
@@ -988,7 +1005,8 @@ class Reserves(commands.Cog):
             ))
         ids = ",".join(str(message.id) for message in sent)
         with _connect() as conn:
-            conn.execute("UPDATE schedule_state SET message_ids = ? WHERE id = 1", (ids,))
+            conn.execute("UPDATE reserve_stage_schedule_state SET message_ids=? WHERE stage_name=? COLLATE NOCASE",
+                         (ids, stage_name.strip()))
         await ctx.send("✅ Complete reserve schedule posted successfully.")
 
     @commands.command(name="deleteallreserves")
