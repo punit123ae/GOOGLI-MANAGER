@@ -887,10 +887,11 @@ class PointsTable(commands.Cog):
 
         pages = []
         try:
-            # Rebuild from the database on every request; this repairs stale cached images.
-            await self._sync_points_images(ctx.guild.id)
             for group in configured:
                 path = cache_file(ctx.guild.id, group["group_key"])
+                if not path.exists():
+                    # First use only: draw the tables if their cached images are missing.
+                    await self._sync_points_images(ctx.guild.id)
                 if path.exists():
                     pages.append((group["group_name"], path.read_bytes()))
         except (OSError, sqlite3.Error) as exc:
