@@ -310,62 +310,99 @@ class Groups(commands.Cog):
     async def renamestage(self, ctx, *, names: str = None):
         if not await owner_only(ctx):
             return
-        # Accept both a normal pipe and a backslash-escaped pipe copied from
-        # Markdown/chat formatting (\|), then split only once.
-        cleaned_names = names.replace("\\|", "|") if names else ""
-        parts = cleaned_names.split("|", 1) if cleaned_names else []
-        if len(parts) != 2 or not all(part.strip() for part in parts):
-            await ctx.send("Usage: `+renamestage <old stage name> | <new stage name>`")
-            return
-        old_name, new_name = parts[0].strip(), parts[1].strip()
-        old_key, new_key = stage_key(old_name), stage_key(new_name)
-        if old_key == new_key:
-            await ctx.send("The new stage name must be different.")
-            return
-        conn = connect_group_db()
+
+        # Acknowledge immediately so a slow or failed database operation is visible.
+        status = await ctx.send("⏳ Processing stage rename...")
+
         try:
-            old_stage = ensure_stage(conn, ctx.guild.id, old_name)
-            if not old_stage:
-                available = conn.execute(
-                    "SELECT stage_name FROM tournament_stages WHERE guild_id=? ORDER BY created_at",
-                    (ctx.guild.id,),
-                ).fetchall()
-                names_available = ", ".join(row["stage_name"] for row in available) or "none"
-                await ctx.send(f"Stage **{old_name}** was not found. Stages currently registered here: {names_available}")
+            cleaned_names = names.replace("\\|", "|") if names else ""
+            parts = cleaned_names.split("|", 1) if cleaned_names else []
+            if len(parts) != 2 or not all(part.strip() for part in parts):
+                await status.edit(content="Usage: `+renamestage <old stage name> | <new stage name>`")
                 return
-            if ensure_stage(conn, ctx.guild.id, new_name):
-                await ctx.send(f"Stage **{new_name}** already exists.")
+
+            old_name, new_name = parts[0].strip(), parts[1].strip()
+            if len(new_name) > 60:
+                await status.edit(content="The new stage name must be 60 characters or fewer.")
                 return
-            old_key = old_stage["stage_key"]
-            for table, column in (("group_styles", "group_key"), ("team_groups", "team_name_key"),
-                                  ("team_groups", "group_key"), ("generated_fixtures", "group_key")):
-                rows = conn.execute(f"SELECT rowid, {column} AS value FROM {table} WHERE guild_id=? AND {column} LIKE ?",
-                                    (ctx.guild.id, old_key + "::%")).fetchall()
-                for row in rows:
-                    suffix = row["value"].split("::", 1)[1]
-                    conn.execute(f"UPDATE {table} SET {column}=? WHERE rowid=?",
-                                 (new_key + "::" + suffix, row["rowid"]))
-            conn.execute("UPDATE tournament_stages SET stage_key=?, stage_name=? WHERE guild_id=? AND stage_key=?",
-                         (new_key, new_name, ctx.guild.id, old_key))
-            conn.execute("UPDATE stage_formats SET stage_key=? WHERE guild_id=? AND stage_key=?",
-                         (new_key, ctx.guild.id, old_key))
-            conn.commit()
-        finally:
-            conn.close()
-        reserve_db = os.path.join(os.path.dirname(__file__), "..", "reserve_matches.db")
-        if os.path.exists(reserve_db):
-            reserve_conn = sqlite3.connect(reserve_db)
+            old_key, new_key = stage_key(old_name), stage_key(new_name)
+            if old_key == new_key:
+                await status.edit(content="The new stage name must be different.")
+                return
+
+            conn = connect_group_db()
             try:
-                reserve_conn.execute("UPDATE reservations SET stage_name=? WHERE stage_name=? COLLATE NOCASE",
-                                     (new_name, old_name))
-                reserve_conn.execute("UPDATE reserve_stage_schedule_state SET stage_name=? WHERE stage_name=? COLLATE NOCASE",
-                                     (new_name, old_name))
-                reserve_conn.commit()
-            except sqlite3.Error:
-                pass
+                old_stage = ensure_stage(conn, ctx.guild.id, old_name)
+                if not old_stage:
+                    available = conn.execute(
+                        "SELECT stage_name FROM tournament_stages WHERE guild_id=? ORDER BY created_at",
+                        (ctx.guild.id,),
+                    ).fetchall()
+                    names_available = ", ".join(row["stage_name"] for row in available) or "none"
+                    await status.edit(content=f"Stage **{old_name}** was not found. Stages registered here: {names_available}")
+                    return
+
+                if ensure_stage(conn, ctx.guild.id, new_name):
+                    await status.edit(content=f"Stage **{new_name}** already exists.")
+                    return
+
+                old_key = old_stage["stage_key"]
+                conn.execute("BEGIN IMMEDIATE")
+                for table, column in (
+                    ("group_styles", "group_key"),
+                    ("team_groups", "team_name_key"),
+                    ("team_groups", "group_key"),
+                    ("generated_fixtures", "group_key"),
+                ):
+                    rows = conn.execute(
+                        f"SELECT rowid, {column} AS value FROM {table} WHERE guild_id=? AND {column} LIKE ?",
+                        (ctx.guild.id, old_key + "::%"),
+                    ).fetchall()
+                    for row in rows:
+                        suffix = row["value"].split("::", 1)[1]
+                        conn.execute(
+                            f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                            (new_key + "::" + suffix, row["rowid"]),
+                        )
+
+                conn.execute(
+                    "UPDATE tournament_stages SET stage_key=?, stage_name=? WHERE guild_id=? AND stage_key=?",
+                    (new_key, new_name, ctx.guild.id, old_key),
+                )
+                conn.execute(
+                    "UPDATE stage_formats SET stage_key=? WHERE guild_id=? AND stage_key=?",
+                    (new_key, ctx.guild.id, old_key),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             finally:
-                reserve_conn.close()
-        await ctx.send(f"✅ Renamed **{old_name}** to **{new_name}**. Its groups, teams, format, fixtures and reserve matches were retained.")
+                conn.close()
+
+            # Reserve data is secondary: do not fail the stage rename if its schema differs.
+            reserve_db = os.path.join(os.path.dirname(__file__), "..", "reserve_matches.db")
+            if os.path.exists(reserve_db):
+                reserve_conn = sqlite3.connect(reserve_db)
+                try:
+                    reserve_conn.execute(
+                        "UPDATE reservations SET stage_name=? WHERE stage_name=? COLLATE NOCASE",
+                        (new_name, old_name),
+                    )
+                    reserve_conn.execute(
+                        "UPDATE reserve_stage_schedule_state SET stage_name=? WHERE stage_name=? COLLATE NOCASE",
+                        (new_name, old_name),
+                    )
+                    reserve_conn.commit()
+                except sqlite3.Error as exc:
+                    print(f"[groups] Stage renamed, but reserve-stage names were not updated: {exc}")
+                finally:
+                    reserve_conn.close()
+
+            await status.edit(content=f"✅ Renamed **{old_name}** to **{new_name}**. Its groups, teams, format and fixtures were retained.")
+        except Exception as exc:
+            print(f"[groups] +renamestage failed for guild {getattr(ctx.guild, 'id', 'DM')}: {type(exc).__name__}: {exc}")
+            await status.edit(content=f"❌ Stage rename failed: `{type(exc).__name__}: {str(exc)[:1200]}`")
 
     @commands.command(name="stages")
     async def stages(self, ctx):
