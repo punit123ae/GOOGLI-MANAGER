@@ -782,6 +782,7 @@ class Reserves(commands.Cog):
             title="⚡ FORCE RESERVE ADDED",
             description=(
                 f"**Reserve ID:** `{reserve_id}`\n"
+                f"**Stage:** {stage_name.strip()}\n"
                 f"**Initiating team:** {discord.utils.escape_markdown(initiating)}\n"
                 f"**Opponent:** {discord.utils.escape_markdown(opposing)}"
             ),
