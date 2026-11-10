@@ -460,6 +460,32 @@ class LiveDraws(commands.Cog):
             await ctx.send("This setting contains no teams.")
             return
 
+        await self._send_team_list(ctx, saved_teams)
+        await ctx.send("Select the teams for THIS stage by number, separated by commas (example: `1, 3, 5`). Reply `all` to include everyone or `cancel` to stop.")
+        try:
+            selection = (await self._wait_for_reply(ctx)).content.strip().casefold()
+        except asyncio.TimeoutError:
+            await ctx.send("Team selection timed out. No draw was started.")
+            return
+        if selection == "cancel":
+            await ctx.send("Draw cancelled. No teams were changed.")
+            return
+        if selection != "all":
+            try:
+                indexes = [int(part.strip()) for part in selection.split(",") if part.strip()]
+                if not indexes or len(indexes) != len(set(indexes)) or any(i < 1 or i > len(saved_teams) for i in indexes):
+                    raise ValueError
+            except ValueError:
+                await ctx.send("Invalid selection. Use unique team numbers separated by commas, or `all`. Run the draw again.")
+                return
+            saved_teams = [saved_teams[i - 1] for i in indexes]
+        if len(saved_teams) < 2:
+            await ctx.send("Select at least 2 teams to run a group draw.")
+            return
+        if setting["group_count"] > len(saved_teams):
+            await ctx.send(f"This setup has {setting['group_count']} groups but you selected only {len(saved_teams)} teams. Re-run setup with fewer groups or select more teams.")
+            return
+
         group_count = setting["group_count"]
         groups = [[] for _ in range(group_count)]
         preset_rows = self.db.execute(
