@@ -418,6 +418,36 @@ class LeaderboardView(discord.ui.View):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
         return embed
 
+    def _generic_ranking(self, rows_by_user: dict[int, list[dict]]) -> list[tuple[int, Any]]:
+        """Ranking for the metrics that come from imported match rows (everything except fielding/batter-impact)."""
+        computed = []
+        for uid, rows in rows_by_user.items():
+            if not _eligible(self.metric_key, rows):
+                continue
+            value = _value(self.metric_key, rows)
+            if self.metric_key == "fantasy":
+                # Total = batting + bowling + fielding, same as +stats.
+                value += _fielding_fantasy_points(self.cog.fielding_by_user.get(uid))
+            computed.append((uid, value))
+        computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
+        return computed
+
+    def _history_deltas(self, computed: list[tuple[int, Any]]) -> dict[int, int]:
+        """Movement caused by the most recent imported match: current rank vs the standings
+        without it. Worked out from the match history, so it never depends on a saved snapshot."""
+        latest = self.cog.latest_match_id
+        current = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
+        if latest is None:
+            return {uid: 0 for uid in current}
+        before: dict[int, list[dict]] = {}
+        for uid, rows in self.cog.rows_by_user.items():
+            kept = [r for r in rows if r.get("match") != latest]
+            if kept:
+                before[uid] = kept
+        previous = {int(uid): rank for rank, (uid, _) in enumerate(self._generic_ranking(before), start=1)}
+        # Players who were not ranked before the latest match count as unchanged.
+        return {uid: (previous[uid] - rank if uid in previous else 0) for uid, rank in current.items()}
+
     def _rank_deltas(self, computed: list[tuple[int, Any]]) -> dict[int, int | None]:
         """Keep movement markers stable until stats revision changes."""
         cache_key = (self.category, self.metric_key)
@@ -554,19 +584,15 @@ class LeaderboardView(discord.ui.View):
             if self.metric_key == "fantasy":
                 # Re-read so catch totals edited elsewhere show up, like +stats does.
                 self.cog.fielding_by_user = self.cog._fielding_rows(guild.id)
-            for uid, rows in rows_by_user.items():
-                if not _eligible(self.metric_key, rows):
-                    continue
-                value = _value(self.metric_key, rows)
-                if self.metric_key == "fantasy":
-                    # Total = batting + bowling + fielding, same as +stats.
-                    value += _fielding_fantasy_points(self.cog.fielding_by_user.get(uid))
-                computed.append((uid, value))
+            computed = self._generic_ranking(rows_by_user)
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         if self.category in EMBED_CATEGORIES:
             return self._classic_embed(computed), None
 
-        rank_deltas = self._rank_deltas(computed)
+        from_matches = self.category not in EMBED_CATEGORIES and self.metric_key not in BATTER_IMPACT_KEYS
+        # Match-based metrics: movement from the latest match (always recoverable from the history).
+        # Batter-impact has no per-match history, so it keeps the saved-snapshot method.
+        rank_deltas = self._history_deltas(computed) if from_matches else self._rank_deltas(computed)
         total = len(computed)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         self.page = max(0, min(self.page, pages - 1))
@@ -650,6 +676,7 @@ class LeaderboardCog(commands.Cog):
         self.fielding_by_user: dict[int, tuple[int, int]] = {}
         self.batter_impact_by_user: dict[int, tuple[int, int, int]] = {}
         self._avatar_cache: dict[str, bytes | None] = {}
+        self.latest_match_id: int | None = None
 
     async def _asset_bytes(self, asset) -> bytes | None:
         if asset is None:
@@ -713,14 +740,17 @@ class LeaderboardCog(commands.Cog):
         if db is None:
             raise RuntimeError("The bot database connection is not available.")
         result: dict[int, list[dict]] = defaultdict(list)
-        query = """SELECT p.user_id, p.runs, p.balls_faced, p.runs_conceded,
+        query = """SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced, p.runs_conceded,
                           p.balls_bowled, p.wickets, p.not_out
                    FROM player_match_stats p
                    JOIN stats_imports i ON i.source_message_id = p.source_message_id
                    WHERE i.guild_id = ?
                    ORDER BY i.imported_at ASC, p.source_message_id ASC"""
+        latest_match = None
         for row in db.execute(query, (guild_id,)).fetchall():
+            latest_match = int(row["source_message_id"])   # rows are in import order, so the last one wins
             result[int(row["user_id"])].append({
+                "match": int(row["source_message_id"]),
                 "runs": int(row["runs"]),
                 "balls_faced": int(row["balls_faced"]),
                 "runs_conceded": int(row["runs_conceded"]),
@@ -728,6 +758,7 @@ class LeaderboardCog(commands.Cog):
                 "wickets": int(row["wickets"]),
                 "not_out": int(row["not_out"]),
             })
+        self.latest_match_id = latest_match
         return result
 
     @commands.command(name="lb", aliases=["leaderboard", "leaderboards"])
