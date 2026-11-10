@@ -83,7 +83,7 @@ def connect_group_db():
             conn.execute("UPDATE generated_fixtures SET group_key=? WHERE id=?",
                          ("stage 1::" + row["group_key"], row["id"]))
     # Create Stage 1 per guild that already has legacy group records or format settings.
-    guild_rows = conn.execute("SELECT guild_id FROM group_styles UNION SELECT guild_id FROM team_groups UNION SELECT guild_id FROM schedule_formats").fetchall()
+    guild_rows = conn.execute("SELECT guild_id FROM group_styles UNION SELECT guild_id FROM team_groups UNION SELECT guild_id FROM generated_fixtures UNION SELECT guild_id FROM schedule_formats").fetchall()
     for row in guild_rows:
         conn.execute("INSERT OR IGNORE INTO tournament_stages VALUES (?, ?, ?, ?)",
                      (row["guild_id"], "stage 1", "Stage 1", datetime.now(timezone.utc).isoformat()))
