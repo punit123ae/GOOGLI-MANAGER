@@ -829,6 +829,7 @@ class Reserves(commands.Cog):
             title="Delete this reservation?",
             description=(
                 f"**ID:** `{int(reserve_id)}`\n"
+                f"**Stage:** {row['stage_name']}\n"
                 f"**Match:** {row['reserving_team']} vs {row['opposing_team']}\n\n"
                 "Confirm to delete it."
             ),
@@ -1110,11 +1111,14 @@ class Reserves(commands.Cog):
             await ctx.send("Confirmation timed out. Nothing was reset.")
 
     @commands.command(name="reserveaudit")
-    async def reserveaudit(self, ctx):
+    async def reserveaudit(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
             return
+        if stage_name and not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
+            return
         limit = _limit()
-        rows = _all_reservations()
+        rows = _all_reservations(stage_name)
         counts = {}
         initiated = {}
         issues = []
@@ -1135,7 +1139,7 @@ class Reserves(commands.Cog):
             if count > quota:
                 issues.append(f"{team_key}: initiated {count}/{quota}.")
 
-        embed = discord.Embed(title="Reserve Audit", color=discord.Color.green() if not issues else discord.Color.red())
+        embed = discord.Embed(title=f"Reserve Audit — {stage_name}" if stage_name else "Reserve Audit — All Stages", color=discord.Color.green() if not issues else discord.Color.red())
         embed.add_field(name="Total reservations", value=str(len(rows)), inline=True)
         embed.add_field(name="Per-team limit", value=str(limit), inline=True)
         embed.add_field(name="Initiation quota", value=str(quota), inline=True)
