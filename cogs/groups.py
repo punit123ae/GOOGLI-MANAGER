@@ -298,7 +298,7 @@ class Groups(commands.Cog):
             conn.close()
         await ctx.send(f"✅ Created **{stage_name.strip()}**. Existing stages and their data were kept.")
 
-    @commands.command(name="renamestage")
+    @commands.command(name="namestage", aliases=["renamestage"])
     async def renamestage(self, ctx, *, names: str = None):
         if not await owner_only(ctx):
             return
@@ -809,11 +809,11 @@ class Groups(commands.Cog):
             conn.commit()
         finally:
             conn.close()
-        lines = [f"**{stage_name} — Group {group['group_name']} Schedule**", f"Teams: {len(names)} | Legs: {fmt['matches_per_pair']}"]
-        for rnd in range(1, fmt["matches_per_pair"] + 1):
-            lines.append(f"\n**Round {rnd}**")
-            for _, day, a, b in fixtures:
-                if _ == rnd:
+        lines = [f"**{stage_name} — Group {group['group_name']} Schedule**", f"Teams: {len(names)} | Legs per pair: {fmt['matches_per_pair']}"]
+        for day in sorted({item[1] for item in fixtures}):
+            lines.append(f"\n**Round {day}**")
+            for leg, fixture_day, a, b in fixtures:
+                if fixture_day == day:
                     lines.append(f"• {a} vs {b}")
         lines.append("Schedule saved for this stage and group only.")
         for chunk in split_chunks("\n".join(lines)):
