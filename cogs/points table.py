@@ -90,6 +90,29 @@ def connect_points_db():
     return conn
 
 
+def points_storage_key(conn, guild_id, team_name_key):
+    """Use the existing legacy key when stage migration prefixed the team key."""
+    candidates = [team_name_key]
+    if "::" in team_name_key:
+        candidates.append(team_name_key.split("::", 1)[1])
+
+    for candidate in candidates:
+        found = conn.execute(
+            """
+            SELECT 1 FROM team_points
+            WHERE guild_id=? AND team_name_key=?
+            UNION ALL
+            SELECT 1 FROM team_match_history
+            WHERE guild_id=? AND team_name_key=?
+            LIMIT 1
+            """,
+            (guild_id, candidate, guild_id, candidate),
+        ).fetchone()
+        if found:
+            return candidate
+    return team_name_key
+
+
 _HERE = Path(__file__).resolve().parent
 
 # Keep Agrandir-TextBold.otf in the same folder as this file (or in ./fonts/).
@@ -374,16 +397,21 @@ class PointsTable(commands.Cog):
                 histories.setdefault(history_row["team_name_key"], []).append(
                     history_row["result"]
                 )
+            storage_keys = {
+                team["team_name_key"]: points_storage_key(points_conn, guild_id, team["team_name_key"])
+                for team in teams
+            }
         finally:
             points_conn.close()
 
         rows = []
         for team in teams:
-            stat = stats.get(team["team_name_key"])
+            storage_key = storage_keys[team["team_name_key"]]
+            stat = stats.get(storage_key)
             wins = int(stat["matches_won"]) if stat else 0
             losses = int(stat["matches_lost"]) if stat else 0
 
-            history = histories.get(team["team_name_key"], [])
+            history = histories.get(storage_key, [])
             # +setpt sets totals without logging matches, so the history can be
             # shorter than W+L. Treat the missing matches as older results.
             missing_w = max(0, wins - history.count("W"))
@@ -511,6 +539,7 @@ class PointsTable(commands.Cog):
 
         conn = connect_points_db()
         try:
+            storage_key = points_storage_key(conn, ctx.guild.id, team["team_name_key"])
             conn.execute(
                 """
                 INSERT INTO team_points
@@ -525,7 +554,7 @@ class PointsTable(commands.Cog):
                 """,
                 (
                     ctx.guild.id,
-                    team["team_name_key"],
+                    storage_key,
                     wins,
                     losses,
                     ctx.author.id,
@@ -536,12 +565,12 @@ class PointsTable(commands.Cog):
             # new totals exactly (old results must not survive an overwrite).
             conn.execute(
                 "DELETE FROM team_match_history WHERE guild_id=? AND team_name_key=?",
-                (ctx.guild.id, team["team_name_key"]),
+                (ctx.guild.id, storage_key),
             )
             conn.executemany(
                 "INSERT INTO team_match_history (guild_id, team_name_key, result) "
                 "VALUES (?, ?, ?)",
-                [(ctx.guild.id, team["team_name_key"], r)
+                [(ctx.guild.id, storage_key, r)
                  for r in ["W"] * wins + ["L"] * losses],
             )
             conn.commit()
@@ -658,6 +687,8 @@ class PointsTable(commands.Cog):
         conn = connect_points_db()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            winner_storage_key = points_storage_key(conn, ctx.guild.id, winner["team_name_key"])
+            loser_storage_key = points_storage_key(conn, ctx.guild.id, loser["team_name_key"])
             duplicate = conn.execute(
                 "SELECT 1 FROM imported_match_results WHERE guild_id=? AND match_no=?",
                 (ctx.guild.id, match_no),
@@ -669,10 +700,10 @@ class PointsTable(commands.Cog):
 
             conn.execute(
                 "INSERT INTO imported_match_results (guild_id, match_no, winner_team_key, loser_team_key, imported_by) VALUES (?, ?, ?, ?, ?)",
-                (ctx.guild.id, match_no, winner["team_name_key"], loser["team_name_key"], ctx.author.id),
+                (ctx.guild.id, match_no, winner_storage_key, loser_storage_key, ctx.author.id),
             )
 
-            for team, result in ((winner, "W"), (loser, "L")):
+            for team, result, storage_key in ((winner, "W", winner_storage_key), (loser, "L", loser_storage_key)):
                 conn.execute(
                     """
                     INSERT INTO team_points
@@ -684,12 +715,12 @@ class PointsTable(commands.Cog):
                         updated_by=excluded.updated_by,
                         updated_at=CURRENT_TIMESTAMP
                     """,
-                    (ctx.guild.id, team["team_name_key"], 1 if result == "W" else 0,
+                    (ctx.guild.id, storage_key, 1 if result == "W" else 0,
                      1 if result == "L" else 0, ctx.author.id),
                 )
                 conn.execute(
                     "INSERT INTO team_match_history (guild_id, team_name_key, result) VALUES (?, ?, ?)",
-                    (ctx.guild.id, team["team_name_key"], result),
+                    (ctx.guild.id, storage_key, result),
                 )
             conn.commit()
         except sqlite3.Error:
@@ -779,13 +810,14 @@ class PointsTable(commands.Cog):
 
         conn = connect_points_db()
         try:
+            storage_key = points_storage_key(conn, ctx.guild.id, team["team_name_key"])
             existing = conn.execute(
                 """
                 SELECT matches_won, matches_lost
                 FROM team_points
                 WHERE guild_id=? AND team_name_key=?
                 """,
-                (ctx.guild.id, team["team_name_key"]),
+                (ctx.guild.id, storage_key),
             ).fetchone()
 
             wins = int(existing["matches_won"]) if existing else 0
@@ -810,7 +842,7 @@ class PointsTable(commands.Cog):
                 """,
                 (
                     ctx.guild.id,
-                    team["team_name_key"],
+                    storage_key,
                     wins,
                     losses,
                     ctx.author.id,
@@ -823,7 +855,7 @@ class PointsTable(commands.Cog):
                     (guild_id, team_name_key, result)
                 VALUES (?, ?, ?)
                 """,
-                (ctx.guild.id, team["team_name_key"], result),
+                (ctx.guild.id, storage_key, result),
             )
 
             conn.commit()
@@ -855,11 +887,10 @@ class PointsTable(commands.Cog):
 
         pages = []
         try:
+            # Rebuild from the database on every request; this repairs stale cached images.
+            await self._sync_points_images(ctx.guild.id)
             for group in configured:
                 path = cache_file(ctx.guild.id, group["group_key"])
-                if not path.exists():
-                    # First use only: nothing saved yet, so draw everything once.
-                    await self._sync_points_images(ctx.guild.id)
                 if path.exists():
                     pages.append((group["group_name"], path.read_bytes()))
         except (OSError, sqlite3.Error) as exc:
