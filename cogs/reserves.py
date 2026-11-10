@@ -690,9 +690,15 @@ class Reserves(commands.Cog):
         _clear_schedule_state(stage_name)
 
     @commands.command(name="forcereserve")
-    async def forcereserve(self, ctx):
+    async def forcereserve(self, ctx, *, stage_name: str = None):
         """Create a reserve even if the initiating team's normal initiation quota is used."""
         if not await self.owner_only(ctx):
+            return
+        if not stage_name:
+            await ctx.send("Usage: `+forcereserve <stage name>`")
+            return
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
             return
 
         limit = _limit()
@@ -729,7 +735,7 @@ class Reserves(commands.Cog):
             await ctx.send("A team cannot force-reserve a match against itself.")
             return
 
-        existing = _all_reservations()
+        existing = _all_reservations(stage_name)
         total_a = sum(
             1 for row in existing
             if initiating.casefold() in (
@@ -762,15 +768,15 @@ class Reserves(commands.Cog):
 
         with _connect() as conn:
             cur = conn.execute(
-                "INSERT INTO reservations (reserving_team, opposing_team, created_by_id) "
-                "VALUES (?, ?, ?)",
-                (initiating, opposing, ctx.author.id),
+                "INSERT INTO reservations (reserving_team, opposing_team, stage_name, created_by_id) "
+                "VALUES (?, ?, ?, ?)",
+                (initiating, opposing, stage_name.strip(), ctx.author.id),
             )
             reserve_id = int(cur.lastrowid)
 
         total_a += 1
         total_b += 1
-        _clear_schedule_state()
+        _clear_schedule_state(stage_name)
 
         embed = discord.Embed(
             title="⚡ FORCE RESERVE ADDED",
