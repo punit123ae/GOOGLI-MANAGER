@@ -432,24 +432,46 @@ class LeaderboardView(discord.ui.View):
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         return computed
 
-    def _history_deltas(self, computed: list[tuple[int, Any]]) -> dict[int, int]:
-        """Movement caused by the most recent imported match: current rank vs the standings
-        without it. Worked out from the match history, so it never depends on a saved snapshot."""
-        latest = self.cog.latest_match_id
-        current = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
-        if latest is None:
-            return {uid: 0 for uid in current}
+    def _pre_batch_rows(self) -> dict[int, list[dict]]:
+        """Return match rows from before the latest closely-spaced import batch.
+
+        stats_imports.imported_at is a Unix timestamp. Imports made within 30
+        minutes of one another are treated as one admin import session. This
+        lets the first leaderboard render recover movement across a batch of
+        matches instead of comparing against only its final match.
+        """
+        imports: dict[int, float] = {}
+        for rows in self.cog.rows_by_user.values():
+            for row in rows:
+                match_id = int(row["match"])
+                imported_at = float(row.get("imported_at", 0) or 0)
+                if imported_at:
+                    imports[match_id] = imported_at
+
+        if not imports:
+            return {}
+
+        ordered = sorted(imports.items(), key=lambda item: (item[1], item[0]))
+        batch_start = ordered[-1][1]
+        batch_gap_seconds = 30 * 60
+        for _, imported_at in reversed(ordered[:-1]):
+            if batch_start - imported_at > batch_gap_seconds:
+                break
+            batch_start = imported_at
+
         before: dict[int, list[dict]] = {}
         for uid, rows in self.cog.rows_by_user.items():
-            kept = [r for r in rows if r.get("match") != latest]
+            kept = [row for row in rows if float(row.get("imported_at", 0) or 0) < batch_start]
             if kept:
-                before[uid] = kept
-        previous = {int(uid): rank for rank, (uid, _) in enumerate(self._generic_ranking(before), start=1)}
-        # Players who were not ranked before the latest match count as unchanged.
-        return {uid: (previous[uid] - rank if uid in previous else 0) for uid, rank in current.items()}
+                before[int(uid)] = kept
+        return before
 
     def _rank_deltas(self, computed: list[tuple[int, Any]]) -> dict[int, int | None]:
-        """Keep movement markers stable until stats revision changes."""
+        """Keep movement markers stable until stats revision changes.
+
+        On the first render, seed the previous positions from all matches before
+        the latest import session. Later imports compare against the saved ranks.
+        """
         cache_key = (self.category, self.metric_key)
         if cache_key in self._rank_delta_cache:
             return self._rank_delta_cache[cache_key]
@@ -511,9 +533,20 @@ class LeaderboardView(discord.ui.View):
                     (guild_id, self.category, self.metric_key),
                 ).fetchall()
                 previous = {int(row[0]): int(row[1]) for row in previous_rows}
-                # First run initializes a neutral baseline; subsequent revisions show movement.
+
+                # If this metric has never been snapshotted, reconstruct the
+                # previous table before yesterday's multi-match import session.
+                # Once saved, all future movement comes from rank history.
+                if previous_revision is None:
+                    before_rows = self._pre_batch_rows()
+                    if before_rows:
+                        previous = {
+                            int(uid): rank
+                            for rank, (uid, _) in enumerate(self._generic_ranking(before_rows), start=1)
+                        }
+
                 result = {
-                    uid: (previous[uid] - rank if previous_revision is not None and uid in previous else 0)
+                    uid: (previous[uid] - rank if uid in previous else 0)
                     for uid, rank in current.items()
                 }
 
@@ -589,10 +622,10 @@ class LeaderboardView(discord.ui.View):
         if self.category in EMBED_CATEGORIES:
             return self._classic_embed(computed), None
 
-        from_matches = self.category not in EMBED_CATEGORIES and self.metric_key not in BATTER_IMPACT_KEYS
-        # Match-based metrics: movement from the latest match (always recoverable from the history).
-        # Batter-impact has no per-match history, so it keeps the saved-snapshot method.
-        rank_deltas = self._history_deltas(computed) if from_matches else self._rank_deltas(computed)
+        # All image leaderboard metrics use saved rank snapshots. Match-based
+        # metrics bootstrap their first snapshot from the standings before the
+        # latest import session; batter-impact metrics start with a neutral baseline.
+        rank_deltas = self._rank_deltas(computed)
         total = len(computed)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         self.page = max(0, min(self.page, pages - 1))
@@ -741,7 +774,7 @@ class LeaderboardCog(commands.Cog):
             raise RuntimeError("The bot database connection is not available.")
         result: dict[int, list[dict]] = defaultdict(list)
         query = """SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced, p.runs_conceded,
-                          p.balls_bowled, p.wickets, p.not_out
+                          p.balls_bowled, p.wickets, p.not_out, i.imported_at
                    FROM player_match_stats p
                    JOIN stats_imports i ON i.source_message_id = p.source_message_id
                    WHERE i.guild_id = ?
@@ -751,6 +784,7 @@ class LeaderboardCog(commands.Cog):
             latest_match = int(row["source_message_id"])   # rows are in import order, so the last one wins
             result[int(row["user_id"])].append({
                 "match": int(row["source_message_id"]),
+                "imported_at": float(row["imported_at"]),
                 "runs": int(row["runs"]),
                 "balls_faced": int(row["balls_faced"]),
                 "runs_conceded": int(row["runs_conceded"]),
