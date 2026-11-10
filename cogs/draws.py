@@ -449,15 +449,21 @@ class LiveDraws(commands.Cog):
             await ctx.send(f"Couldn't read the team database: {exc}")
             return
         saved_teams = json.loads(setting["team_names_json"])
-        # A draw uses the exact verified setup list. Warn if the live database has changed.
-        if set(current_teams) != set(saved_teams):
+        # Teams removed from approved status are automatically excluded. Newly
+        # approved teams require a fresh setup so they cannot enter unnoticed.
+        saved_lookup = {self._setting_key(name) for name in saved_teams}
+        new_teams = [name for name in current_teams if self._setting_key(name) not in saved_lookup]
+        if new_teams:
             await ctx.send(
-                "The approved team list has changed since this setting was created. "
-                "Run `+setuplivedraws` again to verify and save the current list before drawing."
+                "Newly approved teams were found that are not part of this draw setup: "
+                + ", ".join(discord.utils.escape_markdown(name) for name in new_teams)
+                + ". Run `+setuplivedraws` again if they should be included."
             )
             return
-        if not saved_teams:
-            await ctx.send("This setting contains no teams.")
+        current_lookup = {self._setting_key(name) for name in current_teams}
+        saved_teams = [name for name in saved_teams if self._setting_key(name) in current_lookup]
+        if len(saved_teams) < 2:
+            await ctx.send("Fewer than 2 teams from this setup are still approved. No draw can be started.")
             return
 
         await self._send_team_list(ctx, saved_teams)
