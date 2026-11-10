@@ -883,12 +883,8 @@ class Reserves(commands.Cog):
         if not await self.owner_only(ctx):
             return
         if _schedule_exists():
-            await ctx.send(
-                "A schedule is already marked as generated. Use `+resetmatchups` first, "
-                "then run `+creatematchups` to create a new one."
-            )
+            await ctx.send("A schedule is already marked as generated. Use `+resetmatchups` first, then run `+creatematchups` to create a new one.")
             return
-
         limit = _limit()
         if limit <= 0:
             await ctx.send("Set the limit first with `+setreserves <number>`.")
@@ -897,14 +893,12 @@ class Reserves(commands.Cog):
         if not rows:
             await ctx.send("There are no reserved matches to schedule.")
             return
-
         try:
             days = await asyncio.to_thread(_schedule_days, limit)
         except ValueError as exc:
             await ctx.send(f"❌ Could not create the schedule: {exc}")
             return
-
-        # Reserving team is always the host; preflight all stadiums and roles.
+        # Reserving team is always the host; validate stadiums and roles before saving/posting.
         match_details, missing_details = _reserve_match_details(ctx.guild.id, ctx.guild)
         if missing_details:
             await ctx.send(
@@ -917,6 +911,23 @@ class Reserves(commands.Cog):
         with _connect() as conn:
             conn.execute("DELETE FROM generated_schedule")
             for day, matches in days:
+                for match in matches:
+                    conn.execute(
+                        "INSERT INTO generated_schedule (reservation_id, day_number) VALUES (?, ?)",
+                        (match["id"], day),
+                    )
+            conn.execute("UPDATE schedule_state SET is_generated = 1, channel_id = ?, message_ids = '' WHERE id = 1", (ctx.channel.id,))
+        intro = discord.Embed(
+            title="✦ OFFICIAL RESERVE MATCH SCHEDULE",
+            color=discord.Color.from_rgb(35, 63, 110),
+            description=(
+                f"**Total reserved matches:** {len(rows)}\\n"
+                f"**Days required:** {len(days)}\\n"
+                "**Rule:** Each team plays at most once per day. The reserving team is the host."
+            ),
+        )
+        sent = [await ctx.send(embed=intro)]
+        for day, matches in days:
             lines = []
             ping_roles = []
             for match in matches:
@@ -934,17 +945,12 @@ class Reserves(commands.Cog):
             )
             sent.append(await ctx.send(
                 embed=embed,
-                allowed_mentions=discord.AllowedMentions(
-                    everyone=False, users=False, roles=ping_roles, replied_user=False
-                ),
+                allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles, replied_user=False),
             ))
-
-        ids = ",".join(str(m.id) for m in sent)
+        ids = ",".join(str(message.id) for message in sent)
         with _connect() as conn:
-            conn.execute(
-                "UPDATE schedule_state SET message_ids = ? WHERE id = 1", (ids,)
-            )
-        await ctx.send("✅ Complete schedule posted successfully.")
+            conn.execute("UPDATE schedule_state SET message_ids = ? WHERE id = 1", (ids,))
+        await ctx.send("✅ Complete reserve schedule posted successfully.")
 
     @commands.command(name="deleteallreserves")
     async def deleteallreserves(self, ctx):
