@@ -902,9 +902,9 @@ class Reserves(commands.Cog):
         match_details, missing_details = _reserve_match_details(ctx.guild.id, ctx.guild)
         if missing_details:
             await ctx.send(
-                "Cannot post the reserve schedule yet. Configure these first:\\n"
-                + "\\n".join(f"• {item}" for item in missing_details)
-                + "\\nSet stadiums with `+sethomestadium <team name> <#channel>` and ensure each approved team has a Discord role."
+                "Cannot post the reserve schedule yet. Configure these first:\n"
+                + "\n".join(f"• {item}" for item in missing_details)
+                + "\nSet stadiums with `+sethomestadium <team name> <#channel>` and ensure each approved team has a Discord role."
             )
             return
         # Save schedule before posting so it can be inspected after a restart.
@@ -921,8 +921,8 @@ class Reserves(commands.Cog):
             title="✦ OFFICIAL RESERVE MATCH SCHEDULE",
             color=discord.Color.from_rgb(35, 63, 110),
             description=(
-                f"**Total reserved matches:** {len(rows)}\\n"
-                f"**Days required:** {len(days)}\\n"
+                f"**Total reserved matches:** {len(rows)}\n"
+                f"**Days required:** {len(days)}\n"
                 "**Rule:** Each team plays at most once per day. The reserving team is the host."
             ),
         )
@@ -933,15 +933,15 @@ class Reserves(commands.Cog):
             for match in matches:
                 channel, host_role, opponent_role = match_details[int(match["id"])]
                 lines.append(
-                    f"`ID {match['id']}` **{discord.utils.escape_markdown(match['a'])}** vs **{discord.utils.escape_markdown(match['b'])}**\\n"
-                    f"🏟️ **Host:** {discord.utils.escape_markdown(match['a'])} — {channel.mention}\\n"
+                    f"`ID {match['id']}` **{discord.utils.escape_markdown(match['a'])}** vs **{discord.utils.escape_markdown(match['b'])}**\n"
+                    f"🏟️ **Host:** {discord.utils.escape_markdown(match['a'])} — {channel.mention}\n"
                     f"👥 {host_role.mention} vs {opponent_role.mention}"
                 )
                 ping_roles.extend((host_role, opponent_role))
             embed = discord.Embed(
                 title=f"◆ MATCHDAY {day:02d}",
                 color=discord.Color.from_rgb(35, 63, 110),
-                description="\\n\\n".join(lines) if lines else "No matches",
+                description="\n\n".join(lines) if lines else "No matches",
             )
             sent.append(await ctx.send(
                 embed=embed,
