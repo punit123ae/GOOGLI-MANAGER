@@ -512,42 +512,38 @@ class Groups(commands.Cog):
 
 
     @commands.command(name="deletegroupteams")
-    async def deletegroupteams(self, ctx, *, group_name: str = None):
-        """Remove every team assignment from one group after button confirmation."""
+    async def deletegroupteams(self, ctx, stage_name: str = None, *, group_name: str = None):
+        """Clear one group's assignments inside a named stage."""
         if not await owner_only(ctx):
             return
-        if not group_name:
-            await ctx.send("Usage: `+deletegroupteams <group>` (example: `+deletegroupteams A`)")
+        if not stage_name or not group_name:
+            await ctx.send("Usage: `+deletegroupteams <stage name> <group>`")
             return
-
         conn = connect_group_db()
         try:
             group = conn.execute(
-                "SELECT group_name, group_key FROM group_styles WHERE guild_id = ? AND group_key = ?",
-                (ctx.guild.id, norm(group_name)),
+                "SELECT group_name, group_key FROM group_styles WHERE guild_id=? AND group_key=?",
+                (ctx.guild.id, scoped_key(stage_name, group_name)),
             ).fetchone()
-            if group:
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM team_groups WHERE guild_id = ? AND group_key = ?",
-                    (ctx.guild.id, group["group_key"]),
-                ).fetchone()[0]
+            count = conn.execute(
+                "SELECT COUNT(*) FROM team_groups WHERE guild_id=? AND group_key=?",
+                (ctx.guild.id, group["group_key"]),
+            ).fetchone()[0] if group else 0
         finally:
             conn.close()
-
         if not group:
-            await ctx.send("That group isn't configured. Check `+groupstyle`.")
+            await ctx.send(f"Group **{group_name}** is not configured in **{stage_name}**.")
             return
         if count == 0:
-            await ctx.send(f"Group **{group['group_name']}** has no assigned teams to delete.")
+            await ctx.send(f"Group **{group_name}** in **{stage_name}** has no assigned teams.")
             return
-
-        view = ClearGroupConfirmView(ctx, group["group_key"], group["group_name"])
+        view = ClearGroupConfirmView(ctx, group["group_key"], f"{stage_name} / {group['group_name']}")
         view.message = await ctx.send(
-            f"⚠️ **Confirm deletion**\nThis will remove all **{count} team assignment(s)** from "
-            f"group **{group['group_name']}** and delete its generated schedule.\n"
-            "The approved teams in `team_registration.db` will NOT be deleted, and the group name will remain configured.",
+            f"Confirm removal of **{count} team assignment(s)** from **{stage_name} / {group['group_name']}**? "
+            "Only this stage's group assignments and fixtures will be removed.",
             view=view,
         )
+
 
     @commands.command(name="setformat")
     async def setformat(self, ctx, *, stage_name: str = None):
@@ -590,37 +586,27 @@ class Groups(commands.Cog):
 
     @commands.command(name="synchomestadiums")
     async def synchomestadiums(self, ctx):
-        """Sync home stadium channels from channel topics; bot owner only."""
-        if ctx.guild is None:
-            await ctx.reply("Use this command in your server, not in DMs.", mention_author=False)
+        """Sync home stadium channels from channel topics."""
+        if not await owner_only(ctx):
             return
-        if not await ctx.bot.is_owner(ctx.author):
-            await ctx.reply("Only the bot owner can use this command.", mention_author=False)
-            return
-
-        conn = connect_group_db()
         try:
-            teams = conn.execute(
-                "SELECT team_name_key, team_name FROM team_groups WHERE guild_id = ?",
-                (ctx.guild.id,),
-            ).fetchall()
-        finally:
-            conn.close()
-        if not teams:
-            await ctx.send("No teams are assigned to groups yet. Run `+setteamgroups` first.")
+            approved = get_approved_teams(ctx.guild.id)
+        except (FileNotFoundError, sqlite3.Error) as exc:
+            await ctx.send(f"Could not read approved teams: {exc}")
             return
-
+        teams = [{"team_name_key": key, "team_name": name} for name, key in approved]
+        if not teams:
+            await ctx.send("No approved teams were found.")
+            return
         teams_by_name = {norm(row["team_name"]): row for row in teams}
-        found = {}
-        ambiguous = {}
+        found, ambiguous = {}, {}
         for channel in ctx.guild.text_channels:
-            topic = channel.topic or ""
-            marker = re.search(r"home\s+stadium\s+of\s+(.+?)\s*$", topic, re.IGNORECASE)
+            marker = re.search(r"home\s+stadium\s+of\s+(.+?)\s*$", channel.topic or "", re.IGNORECASE)
             if not marker:
                 continue
-            described_name = marker.group(1).strip().strip(" <>`*_~.,;:!。")
-            team = teams_by_name.get(norm(described_name))
-            if team is None:
+            described = marker.group(1).strip().strip(" <>\x60*_~.,;:!")
+            team = teams_by_name.get(norm(described))
+            if not team:
                 continue
             key = team["team_name_key"]
             if key in found:
@@ -629,40 +615,29 @@ class Groups(commands.Cog):
                 ambiguous[key].append(channel)
             else:
                 found[key] = channel
-
         now = datetime.now(timezone.utc).isoformat()
         conn = connect_group_db()
         try:
             for key, channel in found.items():
                 team = next(row for row in teams if row["team_name_key"] == key)
                 conn.execute(
-                    "INSERT INTO team_home_stadiums "
-                    "(guild_id, team_name_key, team_name, channel_id, updated_by, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
-                    "team_name=excluded.team_name, channel_id=excluded.channel_id, "
-                    "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                    "INSERT INTO team_home_stadiums (guild_id, team_name_key, team_name, channel_id, updated_by, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(guild_id, team_name_key) DO UPDATE SET "
+                    "team_name=excluded.team_name, channel_id=excluded.channel_id, updated_by=excluded.updated_by, updated_at=excluded.updated_at",
                     (ctx.guild.id, key, team["team_name"], channel.id, ctx.author.id, now),
                 )
             conn.commit()
         finally:
             conn.close()
-
-        lines = [f"✅ Synced home stadiums for **{len(found)} team(s)**."]
-        for key, channel in found.items():
-            team = next(row for row in teams if row["team_name_key"] == key)
-            lines.append(f"• **{team['team_name']}** → {channel.mention}")
+        lines = [f"Synced home stadiums for **{len(found)} team(s)** across all stages."]
+        lines.extend(f"• **{next(row['team_name'] for row in teams if row['team_name_key']==key)}** → {channel.mention}"
+                     for key, channel in found.items())
         if ambiguous:
-            lines.append("\n⚠️ Multiple matching stadium channels found; left these teams unchanged:")
-            for key, channels in ambiguous.items():
-                team = next(row for row in teams if row["team_name_key"] == key)
-                lines.append(f"• **{team['team_name']}**: " + ", ".join(ch.mention for ch in channels))
-        missing = [row["team_name"] for row in teams
-                   if row["team_name_key"] not in found and row["team_name_key"] not in ambiguous]
-        if missing:
-            lines.append("\nNo matching channel topic found for: " + ", ".join(missing))
-        for chunk in split_chunks("\n".join(lines)):
-            await ctx.send(chunk)
+            lines.append("Multiple matching channels found for: " + ", ".join(
+                next(row["team_name"] for row in teams if row["team_name_key"] == key) for key in ambiguous
+            ))
+        await ctx.send("\n".join(lines))
+
 
     @commands.command(name="sethomestadium")
     async def sethomestadium(self, ctx, *, details: str = None):
