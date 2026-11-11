@@ -384,7 +384,7 @@ class MatchDay(commands.Cog):
         text = self._fixture_message_text(message)
 
         # The normal matchday embed uses: `Team A` VS `Team B`.
-        pair = re.search(r"`([^`]+)`\s*(?:<[^>]+>\s*)?vs\s*(?:<[^>]+>\s*)?`([^`]+)`", text, re.I)
+        pair = re.search(r"`([^`]+)`\s*(?:(?:<a?:[A-Za-z0-9_]+:\d+>)|vs\.?)\s*`([^`]+)`", text, re.I)
         if not pair:
             # Fallback for embeds where Discord/markdown formatting is different.
             pair = re.search(r"([A-Za-z0-9][A-Za-z0-9 ._&'()\-]{1,80}?)\s+(?:VS|vs)\s+([A-Za-z0-9][A-Za-z0-9 ._&'()\-]{1,80}?)(?:\n|$)", text, re.I)
@@ -437,12 +437,12 @@ class MatchDay(commands.Cog):
     @commands.command(name="forceannounce")
     @commands.guild_only()
     async def forceannounce(self, ctx, *, when_text: str = ""):
-        """Bot owner only: reply to a fixtures embed/message with +forceannounce <time>."""
+        """Bot owner or a role whitelisted for forceannounce: reply to a match with +forceannounce <time>."""
         none = discord.AllowedMentions.none()
 
-        if not await self.bot.is_owner(ctx.author):
+        if not await owner_or_whitelisted(ctx, app_owner=True):
             await ctx.reply(
-                "Only the bot owner can use this command.",
+                "Only the bot owner or a role whitelisted for `forceannounce` can use this command.",
                 mention_author=False,
                 allowed_mentions=none,
             )
@@ -568,6 +568,20 @@ class MatchDay(commands.Cog):
                 )
                 self.db.commit()
 
+                # Lock the stadium channel after the force announcement.
+                lock_overwrite = channel.overwrites_for(ctx.guild.default_role)
+                lock_overwrite.send_messages = False
+                try:
+                    await channel.set_permissions(
+                        ctx.guild.default_role,
+                        overwrite=lock_overwrite,
+                        reason=f"Locking channel for force-announced match {match_id}",
+                    )
+                except discord.HTTPException as lock_exc:
+                    results.append(
+                        f"⚠️ **{label}** — match announced, but channel lock failed: {lock_exc}"
+                    )
+
                 announced += 1
                 results.append(
                     f"✅ **{label}** — {team_a.name} vs {team_b.name} announced in {channel.mention}."
@@ -582,6 +596,30 @@ class MatchDay(commands.Cog):
                     f"**Forced by:** <@{ctx.author.id}>\n"
                     f"**Match ID:** `{match_id}`",
                 )
+
+
+                # Give both registered team captains the same opt-in DM choice
+                # used by regular scheduled matches.
+                try:
+                    prompt_count, prompt_errors = await scheduling.send_captain_prompts(
+                        ctx.guild,
+                        channel,
+                        {
+                            "id": match_id,
+                            "team_a_id": team_a.id,
+                            "team_b_id": team_b.id,
+                            "channel_id": channel.id,
+                            "start_time": start_time,
+                        },
+                    )
+                    results.append(
+                        f"✉️ **Captain DM options:** {prompt_count}/2 prompt(s) sent."
+                    )
+                    results.extend(f"⚠️ {error}" for error in prompt_errors)
+                except Exception as prompt_exc:
+                    results.append(
+                        f"⚠️ Match announced, but captain DM prompts could not be created: {prompt_exc}"
+                    )
 
             except discord.HTTPException as exc:
                 self.db.execute(

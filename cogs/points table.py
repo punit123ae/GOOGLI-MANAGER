@@ -22,6 +22,15 @@ TEMPLATE = Path(__file__).with_name("points_table_landscape_bg.png")
 CACHE_DIR = Path("points_cache")
 
 MAX_ROWS = 11
+HEADER_RE = re.compile(
+    r"^[#\s_*]*Match\s+([^\n_*]+?)[_*\s]*\n+[\s*_]*(.+?)\s+vs\.?\s+(.+?)[\s*_]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+WINNER_LINE_RE = re.compile(
+    r"^[ \t]*>?[ \t]*\*{0,3}\[?([^\n\[\]*]+?)\]?(?:\(https?://[^)\s]+\))?\*{0,3}[ \t]+won\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+SYNC_SCAN_LIMIT = 500   # max messages +syncresult scans after the replied message
 POINTS_PER_WIN = 2
 
 # Layout for the 1376x768 landscape template.
@@ -71,6 +80,10 @@ def connect_points_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Older databases don't have match_no on the history table yet.
+    history_cols = [r[1] for r in conn.execute("PRAGMA table_info(team_match_history)")]
+    if "match_no" not in history_cols:
+        conn.execute("ALTER TABLE team_match_history ADD COLUMN match_no TEXT")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_team_match_history_lookup
         ON team_match_history (guild_id, team_name_key, id DESC)
@@ -88,6 +101,29 @@ def connect_points_db():
     """)
     conn.commit()
     return conn
+
+
+def points_storage_key(conn, guild_id, team_name_key):
+    """Use the existing legacy key when stage migration prefixed the team key."""
+    candidates = [team_name_key]
+    if "::" in team_name_key:
+        candidates.append(team_name_key.split("::", 1)[1])
+
+    for candidate in candidates:
+        found = conn.execute(
+            """
+            SELECT 1 FROM team_points
+            WHERE guild_id=? AND team_name_key=?
+            UNION ALL
+            SELECT 1 FROM team_match_history
+            WHERE guild_id=? AND team_name_key=?
+            LIMIT 1
+            """,
+            (guild_id, candidate, guild_id, candidate),
+        ).fetchone()
+        if found:
+            return candidate
+    return team_name_key
 
 
 _HERE = Path(__file__).resolve().parent
@@ -304,6 +340,34 @@ class PointsPagesView(discord.ui.View):
                 pass
 
 
+class ConfirmResetView(discord.ui.View):
+    """Confirm / Cancel buttons for +resetpt (only the command author can press)."""
+
+    def __init__(self, author_id):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = None
+        self.message = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message("Only the person who ran the command can confirm.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Yes, reset everything", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction, button):
+        self.confirmed = True
+        await interaction.response.edit_message(content="Resetting...", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction, button):
+        self.confirmed = False
+        await interaction.response.edit_message(content="Reset cancelled.", view=None)
+        self.stop()
+
+
 class PointsTable(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -362,7 +426,7 @@ class PointsTable(commands.Cog):
             histories = {}
             history_rows = points_conn.execute(
                 """
-                SELECT team_name_key, result
+                SELECT id, team_name_key, result, match_no
                 FROM team_match_history
                 WHERE guild_id=?
                 ORDER BY id ASC
@@ -370,20 +434,36 @@ class PointsTable(commands.Cog):
                 (guild_id,),
             ).fetchall()
 
-            for history_row in history_rows:
+            def form_order(item):
+                # Imported matches are ordered by match number, whatever order
+                # they were synced in. Manual / +setpt entries (no number) count
+                # as older; non-numeric labels (Final, SF1...) count as newer.
+                number = (item["match_no"] or "").strip()
+                if not number:
+                    return (-1, 0, item["id"])
+                if number.isdigit():
+                    return (0, int(number), item["id"])
+                return (1, 0, item["id"])
+
+            for history_row in sorted(history_rows, key=form_order):
                 histories.setdefault(history_row["team_name_key"], []).append(
                     history_row["result"]
                 )
+            storage_keys = {
+                team["team_name_key"]: points_storage_key(points_conn, guild_id, team["team_name_key"])
+                for team in teams
+            }
         finally:
             points_conn.close()
 
         rows = []
         for team in teams:
-            stat = stats.get(team["team_name_key"])
+            storage_key = storage_keys[team["team_name_key"]]
+            stat = stats.get(storage_key)
             wins = int(stat["matches_won"]) if stat else 0
             losses = int(stat["matches_lost"]) if stat else 0
 
-            history = histories.get(team["team_name_key"], [])
+            history = histories.get(storage_key, [])
             # +setpt sets totals without logging matches, so the history can be
             # shorter than W+L. Treat the missing matches as older results.
             missing_w = max(0, wins - history.count("W"))
@@ -511,6 +591,7 @@ class PointsTable(commands.Cog):
 
         conn = connect_points_db()
         try:
+            storage_key = points_storage_key(conn, ctx.guild.id, team["team_name_key"])
             conn.execute(
                 """
                 INSERT INTO team_points
@@ -525,7 +606,7 @@ class PointsTable(commands.Cog):
                 """,
                 (
                     ctx.guild.id,
-                    team["team_name_key"],
+                    storage_key,
                     wins,
                     losses,
                     ctx.author.id,
@@ -536,12 +617,12 @@ class PointsTable(commands.Cog):
             # new totals exactly (old results must not survive an overwrite).
             conn.execute(
                 "DELETE FROM team_match_history WHERE guild_id=? AND team_name_key=?",
-                (ctx.guild.id, team["team_name_key"]),
+                (ctx.guild.id, storage_key),
             )
             conn.executemany(
                 "INSERT INTO team_match_history (guild_id, team_name_key, result) "
                 "VALUES (?, ?, ?)",
-                [(ctx.guild.id, team["team_name_key"], r)
+                [(ctx.guild.id, storage_key, r)
                  for r in ["W"] * wins + ["L"] * losses],
             )
             conn.commit()
@@ -572,146 +653,768 @@ class PointsTable(commands.Cog):
             mention_author=False,
         )
 
-    async def _addresult_from_reply(self, ctx):
-        """Import both teams' W/L from a reply to a published match result."""
-        reference = ctx.message.reference
-        if reference is None or reference.message_id is None:
-            await ctx.reply(
-                "Reply to a match result message in the results channel, then run `+addresult`.",
-                mention_author=False,
-            )
-            return
+    # ------------------------------------------------------------------
+    # Result import helpers (shared by +addresult and +syncresult)
+    # ------------------------------------------------------------------
 
-        replied = reference.resolved
-        if not isinstance(replied, discord.Message):
-            try:
-                channel_id = getattr(reference, "channel_id", None) or ctx.channel.id
-                channel = ctx.guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-                replied = await channel.fetch_message(reference.message_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
-                await ctx.reply("I couldn't fetch the message you replied to.", mention_author=False)
-                return
+    @staticmethod
+    def _message_text(message):
+        """Message content plus any embed text (results may be posted as embeds)."""
+        parts = [message.content or ""]
+        for embed in message.embeds:
+            for piece in (embed.title, embed.description):
+                if piece:
+                    parts.append(piece)
+            for field in embed.fields:
+                parts.append(f"{field.name}\n{field.value}")
+        return "\n".join(p for p in parts if p).strip()
 
-        if replied.guild is None or replied.guild.id != ctx.guild.id:
-            await ctx.reply("The replied result must be from this server.", mention_author=False)
-            return
-        if replied.author.id != self.bot.user.id:
-            await ctx.reply("Reply directly to a match-result message posted by this bot.", mention_author=False)
-            return
+    @staticmethod
+    def _parse_result(body):
+        """Return ((match_no, team_a, team_b, winner), None) or (None, error)."""
+        header = HEADER_RE.search(body)
+        if not header:
+            return None, "I couldn't find the `Match N` / `Team A vs Team B` header."
 
-        body = replied.content.strip()
-        match_header = re.search(r"^# __Match (.+?)__\s*\n\*\*(.+?) vs (.+?)\*\*", body, re.IGNORECASE)
-        winner_line = re.search(r">\s*\*{3}\[(.+?)\]\((https?://[^)]+)\)\s+won by\s+\d+\s+(?:runs?|wickets?)\*{3}", body, re.IGNORECASE)
-        if not match_header or not winner_line:
-            await ctx.reply(
-                "That message doesn't match the published match-result format. "
-                "Reply to the actual result post; its format remains unchanged.",
-                mention_author=False,
-            )
-            return
+        winner_line = WINNER_LINE_RE.search(body)
+        if not winner_line:
+            return None, ("I couldn't find a `<team> won by ...` line "
+                          "(ties / no-results can't be imported automatically).")
 
-        match_no = match_header.group(1).strip()
-        team_a_name = match_header.group(2).strip()
-        team_b_name = match_header.group(3).strip()
-        winner_name = winner_line.group(1).strip()
+        def clean(text):
+            return text.strip().strip("*_~ \t")
 
-        if norm(team_a_name) == norm(team_b_name):
-            await ctx.reply("The result message contains the same team twice.", mention_author=False)
-            return
+        match_no = clean(header.group(1))
+        team_a = clean(header.group(2))
+        team_b = clean(header.group(3))
+        winner = clean(winner_line.group(1))
 
-        if norm(winner_name) == norm(team_a_name):
-            winner_input, loser_input = team_a_name, team_b_name
-        elif norm(winner_name) == norm(team_b_name):
-            winner_input, loser_input = team_b_name, team_a_name
-        else:
-            await ctx.reply("The winner listed in the result doesn't match either team.", mention_author=False)
-            return
+        if norm(team_a) == norm(team_b):
+            return None, "The result message contains the same team twice."
+        if norm(winner) not in (norm(team_a), norm(team_b)):
+            return None, "The winner listed in the result doesn't match either team."
+        return (match_no, team_a, team_b, winner), None
 
-        group_conn = sqlite3.connect(GROUP_DB)
-        group_conn.row_factory = sqlite3.Row
+    def _find_team(self, guild_id, name):
+        """Look a team up in +setteamgroups by name or key."""
+        key = norm(name)
+        conn = sqlite3.connect(GROUP_DB)
+        conn.row_factory = sqlite3.Row
         try:
-            assigned = group_conn.execute(
-                "SELECT team_name, team_name_key FROM team_groups WHERE guild_id=?",
-                (ctx.guild.id,),
+            rows = conn.execute(
+                "SELECT team_name, team_name_key, group_key FROM team_groups WHERE guild_id=?",
+                (guild_id,),
             ).fetchall()
-            def resolve_team(supplied):
-                key = norm(supplied)
-                return next((row for row in assigned
-                             if norm(row["team_name"]) == key or norm(row["team_name_key"]) == key), None)
-            winner = resolve_team(winner_input)
-            loser = resolve_team(loser_input)
         finally:
-            group_conn.close()
+            conn.close()
+        return next(
+            (r for r in rows if norm(r["team_name"]) == key or norm(r["team_name_key"]) == key),
+            None,
+        )
 
-        if winner is None or loser is None:
-            missing = winner_input if winner is None else loser_input
-            await ctx.reply(
-                f"Couldn't match **{missing}** to a team assigned with `+setteamgroups`. "
-                "Make sure both teams are assigned to the points table.",
-                mention_author=False,
+    @staticmethod
+    def _bump(conn, guild_id, storage_key, result, user_id, match_no=None):
+        """Add one W or L to a team (atomic increment + history row)."""
+        conn.execute(
+            """
+            INSERT INTO team_points
+                (guild_id, team_name_key, matches_won, matches_lost, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id, team_name_key) DO UPDATE SET
+                matches_won=team_points.matches_won + excluded.matches_won,
+                matches_lost=team_points.matches_lost + excluded.matches_lost,
+                updated_by=excluded.updated_by,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (guild_id, storage_key, 1 if result == "W" else 0,
+             1 if result == "L" else 0, user_id),
+        )
+        conn.execute(
+            "INSERT INTO team_match_history (guild_id, team_name_key, result, match_no) "
+            "VALUES (?, ?, ?, ?)",
+            (guild_id, storage_key, result, match_no),
+        )
+
+    @staticmethod
+    def _unbump(conn, guild_id, storage_key, result, match_no=None):
+        """Reverse one W or L (used when a synced result changes)."""
+        column = "matches_won" if result == "W" else "matches_lost"
+        conn.execute(
+            f"UPDATE team_points SET {column}=MAX({column}-1, 0) "
+            "WHERE guild_id=? AND team_name_key=?",
+            (guild_id, storage_key),
+        )
+        # Remove this match's own history row; older rows saved before match
+        # numbers existed fall back to the team's latest row of that result.
+        removed = conn.execute(
+            """
+            DELETE FROM team_match_history WHERE id=(
+                SELECT id FROM team_match_history
+                WHERE guild_id=? AND team_name_key=? AND result=? AND match_no=?
+                ORDER BY id DESC LIMIT 1)
+            """,
+            (guild_id, storage_key, result, match_no),
+        ).rowcount
+        if not removed:
+            conn.execute(
+                """
+                DELETE FROM team_match_history WHERE id=(
+                    SELECT id FROM team_match_history
+                    WHERE guild_id=? AND team_name_key=? AND result=?
+                    ORDER BY id DESC LIMIT 1)
+                """,
+                (guild_id, storage_key, result),
             )
-            return
-        if winner["team_name_key"] == loser["team_name_key"]:
-            await ctx.reply("Both result teams resolved to the same points-table team.", mention_author=False)
-            return
 
+    def _record_match(self, guild_id, user_id, match_no, winner, loser, resync, guard=False):
+        """Returns 'new', 'corrected', 'unchanged', 'duplicate' or 'conflict'.
+
+        guard=True (bulk sync): if this match number is already stored for two
+        completely different teams, it's probably a different match that reuses
+        the number, so don't overwrite it - report 'conflict' instead.
+        """
         conn = connect_points_db()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            duplicate = conn.execute(
-                "SELECT 1 FROM imported_match_results WHERE guild_id=? AND match_no=?",
-                (ctx.guild.id, match_no),
+            w_key = points_storage_key(conn, guild_id, winner["team_name_key"])
+            l_key = points_storage_key(conn, guild_id, loser["team_name_key"])
+            old = conn.execute(
+                "SELECT winner_team_key, loser_team_key FROM imported_match_results "
+                "WHERE guild_id=? AND match_no=?",
+                (guild_id, match_no),
             ).fetchone()
-            if duplicate:
-                conn.rollback()
-                await ctx.reply(f"Match **{match_no}** has already been imported into the points table.", mention_author=False)
-                return
 
+            status = "new"
+            if old:
+                if not resync:
+                    conn.rollback()
+                    return "duplicate"
+                if old["winner_team_key"] == w_key and old["loser_team_key"] == l_key:
+                    conn.rollback()
+                    return "unchanged"
+                if guard and not ({old["winner_team_key"], old["loser_team_key"]} & {w_key, l_key}):
+                    conn.rollback()
+                    return "conflict"
+                self._unbump(conn, guild_id, old["winner_team_key"], "W", match_no)
+                self._unbump(conn, guild_id, old["loser_team_key"], "L", match_no)
+                status = "corrected"
+
+            self._bump(conn, guild_id, w_key, "W", user_id, match_no)
+            self._bump(conn, guild_id, l_key, "L", user_id, match_no)
             conn.execute(
-                "INSERT INTO imported_match_results (guild_id, match_no, winner_team_key, loser_team_key, imported_by) VALUES (?, ?, ?, ?, ?)",
-                (ctx.guild.id, match_no, winner["team_name_key"], loser["team_name_key"], ctx.author.id),
+                "INSERT OR REPLACE INTO imported_match_results "
+                "(guild_id, match_no, winner_team_key, loser_team_key, imported_by) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (guild_id, match_no, w_key, l_key, user_id),
             )
-
-            for team, result in ((winner, "W"), (loser, "L")):
-                conn.execute(
-                    """
-                    INSERT INTO team_points
-                        (guild_id, team_name_key, matches_won, matches_lost, updated_by, updated_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(guild_id, team_name_key) DO UPDATE SET
-                        matches_won=team_points.matches_won + excluded.matches_won,
-                        matches_lost=team_points.matches_lost + excluded.matches_lost,
-                        updated_by=excluded.updated_by,
-                        updated_at=CURRENT_TIMESTAMP
-                    """,
-                    (ctx.guild.id, team["team_name_key"], 1 if result == "W" else 0,
-                     1 if result == "L" else 0, ctx.author.id),
-                )
-                conn.execute(
-                    "INSERT INTO team_match_history (guild_id, team_name_key, result) VALUES (?, ?, ?)",
-                    (ctx.guild.id, team["team_name_key"], result),
-                )
             conn.commit()
+            return status
         except sqlite3.Error:
             conn.rollback()
             raise
         finally:
             conn.close()
 
+    async def _get_replied_message(self, ctx):
+        reference = ctx.message.reference
+        if reference is None or reference.message_id is None:
+            return None
+        replied = reference.resolved
+        if isinstance(replied, discord.Message):
+            return replied
+        try:
+            channel_id = getattr(reference, "channel_id", None) or ctx.channel.id
+            channel = ctx.guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            return await channel.fetch_message(reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            return None
+
+    async def _find_latest_result_message(self, ctx):
+        """Fallback for +syncresult without a reply: newest parseable result post."""
+        async for msg in ctx.channel.history(limit=50, before=ctx.message):
+            parsed, _ = self._parse_result(self._message_text(msg))
+            if parsed:
+                return msg
+        return None
+
+    def _process_result_text(self, guild_id, user_id, text, resync, guard=False):
+        """Parse one message and apply it. No Discord replies here.
+
+        Returns (status, match_no, winner_name, loser_name, detail) where status
+        is new / corrected / unchanged / duplicate / skip (not a result post) /
+        error (result post that couldn't be applied; detail says why).
+        """
+        parsed, error = self._parse_result(text)
+        if parsed is None:
+            return "skip", None, None, None, error
+        match_no, team_a, team_b, winner_name = parsed
+        loser_name = team_b if norm(winner_name) == norm(team_a) else team_a
+
+        winner = self._find_team(guild_id, winner_name)
+        loser = self._find_team(guild_id, loser_name)
+        if winner is None or loser is None:
+            missing = winner_name if winner is None else loser_name
+            return ("error", match_no, winner_name, loser_name,
+                    f"team **{missing}** isn't assigned with `+setteamgroups`")
+        if winner["team_name_key"] == loser["team_name_key"]:
+            return "error", match_no, winner_name, loser_name, "both teams resolved to the same team"
+
+        status = self._record_match(guild_id, user_id, match_no, winner, loser, resync, guard)
+        detail = None
+        if status == "conflict":
+            old_w, old_l = self._stored_match_teams(guild_id, match_no)
+            detail = (f"number already used by **{old_w}** vs **{old_l}** "
+                      f"(this post is {winner['team_name']} vs {loser['team_name']})")
+        return status, match_no, winner["team_name"], loser["team_name"], detail
+
+    def _stored_match_teams(self, guild_id, match_no):
+        """Display names of the teams stored for an imported match number."""
+        conn = connect_points_db()
+        try:
+            row = conn.execute(
+                "SELECT winner_team_key, loser_team_key FROM imported_match_results "
+                "WHERE guild_id=? AND match_no=?",
+                (guild_id, match_no),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return "?", "?"
+
+        def display(key):
+            found = self._find_team(guild_id, key.split("::", 1)[-1])
+            return found["team_name"] if found else key
+        return display(row["winner_team_key"]), display(row["loser_team_key"])
+
+    @staticmethod
+    def _looks_like_result(text):
+        return bool(re.search(r"(?<![A-Za-z])Match\s+\d+", text, re.IGNORECASE)
+                    and re.search(r"\bvs\b|\bwon\b", text, re.IGNORECASE))
+
+    async def _import_result_message(self, ctx, replied, resync):
+        """Single-message import (used by +addresult and +syncresult fallback)."""
+        if replied.guild is None or replied.guild.id != ctx.guild.id:
+            await ctx.reply("The result message must be from this server.", mention_author=False)
+            return
+
+        status, match_no, winner, loser, detail = self._process_result_text(
+            ctx.guild.id, ctx.author.id, self._message_text(replied), resync
+        )
+
+        if status == "skip":
+            await ctx.reply(
+                f"{detail}\nReply to the actual match-result post.", mention_author=False
+            )
+            return
+        if status == "error":
+            await ctx.reply(f"Match **{match_no}**: {detail}.", mention_author=False)
+            return
+        if status == "duplicate":
+            await ctx.reply(
+                f"Match **{match_no}** is already in the points table. "
+                "Use `+syncresult` (reply to it) if the result needs correcting.",
+                mention_author=False,
+            )
+            return
+        if status == "unchanged":
+            await ctx.reply(
+                f"Match **{match_no}** is already synced - nothing to change.",
+                mention_author=False,
+            )
+            return
+
         await self._sync_points_images(ctx.guild.id)
 
+        verb = "Corrected" if status == "corrected" else "Imported"
         await ctx.reply(
-            f"✅ Imported **Match {match_no}** into the points table.\n"
-            f"🏆 **{winner['team_name']}**: +1 Win, +{POINTS_PER_WIN} Points\n"
-            f"**{loser['team_name']}**: +1 Loss, +0 Points\n"
-            "Both teams' PL/W/L/PTS and recent form have been updated.",
+            f"✅ {verb} **Match {match_no}**.\n"
+            f"🏆 **{winner}**: +1 Win, +{POINTS_PER_WIN} Points\n"
+            f"**{loser}**: +1 Loss, +0 Points\n"
+            "PL/W/L/PTS and recent form are updated.",
             mention_author=False,
         )
+
+    async def _sync_from_message_onwards(self, ctx, first):
+        """Sync `first` and every message after it, up to the latest in the channel."""
+        if first.guild is None or first.guild.id != ctx.guild.id:
+            await ctx.reply("The message must be from this server.", mention_author=False)
+            return
+
+        messages = [first]
+        truncated = False
+        async with ctx.typing():
+            async for msg in first.channel.history(
+                limit=SYNC_SCAN_LIMIT + 1, after=first, oldest_first=True
+            ):
+                if msg.id == ctx.message.id:
+                    continue
+                messages.append(msg)
+            if len(messages) > SYNC_SCAN_LIMIT:
+                messages = messages[:SYNC_SCAN_LIMIT]
+                truncated = True
+
+            counts = {"new": 0, "corrected": 0, "unchanged": 0, "duplicate": 0,
+                      "error": 0, "conflict": 0}
+            problems = []
+            unreadable = []
+            for msg in messages:
+                text = self._message_text(msg)
+                status, match_no, _w, _l, detail = self._process_result_text(
+                    ctx.guild.id, ctx.author.id, text, True, guard=True
+                )
+                if status == "skip":
+                    if self._looks_like_result(text):
+                        unreadable.append(f"[this post]({msg.jump_url}) - {detail}")
+                    continue
+                counts[status] += 1
+                if status in ("error", "conflict"):
+                    problems.append(f"Match **{match_no}** ([post]({msg.jump_url})): {detail}")
+
+            changed = counts["new"] + counts["corrected"]
+            if changed:
+                await self._sync_points_images(ctx.guild.id)
+
+        found = sum(counts.values())
+        if found == 0 and not unreadable:
+            await ctx.reply(
+                "I didn't find any match-result posts from that message onwards.",
+                mention_author=False,
+            )
+            return
+
+        lines = [f"✅ Synced from that message to the latest ({len(messages)} messages checked)."]
+        lines.append(f"New: **{counts['new']}** | Corrected: **{counts['corrected']}** | "
+                     f"Already synced: **{counts['unchanged']}**")
+        if problems:
+            lines.append(f"⚠️ **{len(problems)}** not imported:")
+            lines.extend(f"• {p}" for p in problems[:6])
+            if len(problems) > 6:
+                lines.append(f"• ...and {len(problems) - 6} more")
+        if unreadable:
+            lines.append(f"❓ **{len(unreadable)}** post(s) look like results but I couldn't read them:")
+            lines.extend(f"• {u}" for u in unreadable[:6])
+            if len(unreadable) > 6:
+                lines.append(f"• ...and {len(unreadable) - 6} more")
+        if truncated:
+            lines.append(f"Only the first {SYNC_SCAN_LIMIT} messages were scanned - "
+                         "run it again from the last synced result to continue.")
+        await ctx.reply("\n".join(lines)[:1900], mention_author=False)
+
+    async def _addresult_from_reply(self, ctx):
+        replied = await self._get_replied_message(ctx)
+        if replied is None:
+            await ctx.reply(
+                "Reply to a match result message, then run `+addresult` "
+                "(or use `+addresult <team> <W/L>`).",
+                mention_author=False,
+            )
+            return
+        await self._import_result_message(ctx, replied, resync=False)
+
+    @commands.command(name="syncresult", aliases=["syncpt"])
+    @commands.guild_only()
+    async def sync_result(self, ctx):
+        """Reply to a result post: sync it AND every result posted after it.
+
+        Reads winner/loser from each result post from the replied message up to
+        the latest message in the channel and updates the points table.
+        Safe to run again - already-synced matches aren't counted twice, and a
+        changed winner is corrected. Without a reply it syncs the latest post.
+        """
+        if not await self._allowed(ctx):
+            return
+
+        replied = await self._get_replied_message(ctx)
+        if replied is not None:
+            await self._sync_from_message_onwards(ctx, replied)
+            return
+
+        latest = await self._find_latest_result_message(ctx)
+        if latest is None:
+            await ctx.reply(
+                "Reply to the first result post you want to sync from and run `+syncresult`.",
+                mention_author=False,
+            )
+            return
+        await self._import_result_message(ctx, latest, resync=True)
+
+    @commands.command(name="editresult", aliases=["fixresult"])
+    @commands.guild_only()
+    async def edit_result(self, ctx, *, arguments: str = ""):
+        """Fix a wrong result post in place: +editresult <winner> [by <margin>].
+
+        Reply to the bot's result post. It edits that message to the new winner
+        (keeping the scorecard link) and corrects the points table to match.
+        Example: +editresult REDBLADES by 5 wickets
+        """
+        if not await self._allowed(ctx):
+            return
+
+        usage = ("Reply to the bot's result post, then run "
+                 "`+editresult <winner>` or `+editresult <winner> by <margin>`.\n"
+                 "Example: `+editresult REDBLADES by 5 wickets`")
+        replied = await self._get_replied_message(ctx)
+        if replied is None or not arguments.strip():
+            await ctx.reply(usage, mention_author=False)
+            return
+        if replied.guild is None or replied.guild.id != ctx.guild.id:
+            await ctx.reply("The result message must be from this server.", mention_author=False)
+            return
+        if replied.author.id != self.bot.user.id:
+            await ctx.reply(
+                "I can only edit my own messages. For someone else's post, ask them to "
+                "edit it, then reply to it with `+syncresult`.",
+                mention_author=False,
+            )
+            return
+
+        content = replied.content or ""
+        parsed, error = self._parse_result(content)
+        winner_match = WINNER_LINE_RE.search(content)
+        if parsed is None or winner_match is None:
+            await ctx.reply(
+                f"{error or 'No result line found.'}\nI can only edit result posts that are plain message text.",
+                mention_author=False,
+            )
+            return
+        match_no, team_a, team_b, _old_winner = parsed
+
+        split = re.split(r"\s+by\s+", arguments.strip(), maxsplit=1, flags=re.IGNORECASE)
+        wanted = norm(split[0])
+        margin = split[1].strip().strip("*_ ") if len(split) == 2 else ""
+        if len(margin) > 40:
+            await ctx.reply("That margin is too long.", mention_author=False)
+            return
+
+        candidates = [t for t in (team_a, team_b) if norm(t) == wanted]
+        if not candidates:
+            candidates = [t for t in (team_a, team_b) if wanted and wanted in norm(t)]
+        if len(candidates) != 1:
+            await ctx.reply(
+                f"The winner must be **{team_a}** or **{team_b}**.", mention_author=False
+            )
+            return
+        new_winner = candidates[0]
+
+        # Rewrite only the team name (and margin) on the winner line.
+        line_end = content.find("\n", winner_match.end())
+        line_end = len(content) if line_end == -1 else line_end
+        line_start = content.rfind("\n", 0, winner_match.start(1)) + 1
+        line = content[line_start:line_end]
+        name_start = winner_match.start(1) - line_start
+        name_end = winner_match.end(1) - line_start
+        line = line[:name_start] + new_winner + line[name_end:]
+        if margin:
+            won_at = re.search(r"\bwon\b", line[name_start + len(new_winner):])
+            head = line[: name_start + len(new_winner) + won_at.start()] + "won by "
+            if line.rstrip().endswith("***"):
+                tail = f"{margin}***"
+            elif "**" in line[name_start + len(new_winner) + won_at.start():]:
+                tail = f"**{margin}**"
+            else:
+                tail = margin
+            line = head + tail
+        new_content = content[:line_start] + line + content[line_end:]
+
+        # Update the points table first; abort (without editing) if it can't apply.
+        status, _m, winner_name, loser_name, detail = self._process_result_text(
+            ctx.guild.id, ctx.author.id, new_content, True
+        )
+        if status in ("error", "skip"):
+            await ctx.reply(
+                f"Nothing changed - match **{match_no}**: {detail}.", mention_author=False
+            )
+            return
+
+        edit_ok = True
+        if new_content != content:
+            try:
+                await replied.edit(content=new_content)
+            except discord.HTTPException:
+                edit_ok = False
+
+        if status in ("new", "corrected"):
+            await self._sync_points_images(ctx.guild.id)
+
+        table_note = {
+            "corrected": "Points table corrected (old result reversed).",
+            "new": "Points table updated.",
+            "unchanged": "Points table already matched this winner.",
+        }.get(status, "Points table updated.")
+        message_note = ("Result post edited." if edit_ok
+                        else "⚠️ I couldn't edit the message itself (missing permission?).")
+        await ctx.reply(
+            f"✅ **Match {match_no}**: 🏆 **{winner_name}** beat **{loser_name}**.\n"
+            f"{message_note} {table_note}",
+            mention_author=False,
+        )
+
+    @commands.command(name="editteams", aliases=["fixteams"])
+    @commands.guild_only()
+    async def edit_teams(self, ctx, *, arguments: str = ""):
+        """Fix wrong team names in a result post: +editteams <Team A> vs <Team B>.
+
+        Reply to the bot's result post. It rewrites the team names in the post
+        (the winner keeps their position: A stays the winner if A was) and moves
+        the W/L from the wrong teams to the right ones in the points table.
+        To also change the winner add: won <team>.
+        Example: +editteams REDBLADES vs Delhi Dogs won Delhi Dogs
+        """
+        if not await self._allowed(ctx):
+            return
+
+        usage = ("Reply to the bot's result post, then run\n"
+                 "`+editteams <Team A> vs <Team B>`\n"
+                 "Add `won <team>` if the winner changes too.\n"
+                 "Example: `+editteams REDBLADES vs Delhi Dogs won Delhi Dogs`")
+        replied = await self._get_replied_message(ctx)
+        if replied is None or not arguments.strip():
+            await ctx.reply(usage, mention_author=False)
+            return
+        if replied.guild is None or replied.guild.id != ctx.guild.id:
+            await ctx.reply("The result message must be from this server.", mention_author=False)
+            return
+        if replied.author.id != self.bot.user.id:
+            await ctx.reply(
+                "I can only edit my own messages. For someone else's post, ask them to "
+                "edit it, then reply to it with `+syncresult`.",
+                mention_author=False,
+            )
+            return
+
+        content = replied.content or ""
+        parsed, error = self._parse_result(content)
+        header = HEADER_RE.search(content)
+        winner_match = WINNER_LINE_RE.search(content)
+        if parsed is None or header is None or winner_match is None:
+            await ctx.reply(
+                f"{error or 'No result found.'}\nI can only edit result posts that are plain message text.",
+                mention_author=False,
+            )
+            return
+        match_no, old_a, old_b, old_winner = parsed
+
+        # Parse "<A> vs <B> [won <W>]"
+        winner_arg = None
+        parts = re.split(r"\s+won\s+", arguments.strip(), maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            winner_arg = parts[1].strip()
+        names = re.split(r"\s+vs\.?\s+", parts[0].strip(), maxsplit=1, flags=re.IGNORECASE)
+        if len(names) != 2 or not names[0].strip() or not names[1].strip():
+            await ctx.reply(usage, mention_author=False)
+            return
+
+        team_a = self._find_team(ctx.guild.id, names[0].strip())
+        team_b = self._find_team(ctx.guild.id, names[1].strip())
+        for typed, found in ((names[0], team_a), (names[1], team_b)):
+            if found is None:
+                await ctx.reply(
+                    f"I couldn't find **{typed.strip()}** in `+setteamgroups`. "
+                    "Use the exact team name.",
+                    mention_author=False,
+                )
+                return
+        if team_a["team_name_key"] == team_b["team_name_key"]:
+            await ctx.reply("Team A and Team B can't be the same team.", mention_author=False)
+            return
+
+        # Who wins: keep the old winner's position unless a winner was given.
+        if winner_arg:
+            if norm(winner_arg) == norm(team_a["team_name"]):
+                new_winner = team_a["team_name"]
+            elif norm(winner_arg) == norm(team_b["team_name"]):
+                new_winner = team_b["team_name"]
+            else:
+                await ctx.reply(
+                    f"The winner must be **{team_a['team_name']}** or **{team_b['team_name']}**.",
+                    mention_author=False,
+                )
+                return
+        else:
+            new_winner = (team_a if norm(old_winner) == norm(old_a) else team_b)["team_name"]
+
+        def inner_span(group):
+            """Span of the group's text without the markdown (*, _, ~) around it."""
+            start, end = header.start(group), header.end(group)
+            while start < end and content[start] in "*_~ \t":
+                start += 1
+            while end > start and content[end - 1] in "*_~ \t":
+                end -= 1
+            return start, end
+
+        a_start, a_end = inner_span(2)
+        b_start, b_end = inner_span(3)
+        edits = [
+            (winner_match.start(1), winner_match.end(1), new_winner),
+            (b_start, b_end, team_b["team_name"]),
+            (a_start, a_end, team_a["team_name"]),
+        ]
+        new_content = content
+        for start, end, text in sorted(edits, reverse=True):
+            new_content = new_content[:start] + text + new_content[end:]
+
+        # Update the points table first; abort (without editing) if it can't apply.
+        status, _m, winner_name, loser_name, detail = self._process_result_text(
+            ctx.guild.id, ctx.author.id, new_content, True
+        )
+        if status in ("error", "skip"):
+            await ctx.reply(
+                f"Nothing changed - match **{match_no}**: {detail}.", mention_author=False
+            )
+            return
+
+        edit_ok = True
+        if new_content != content:
+            try:
+                await replied.edit(content=new_content)
+            except discord.HTTPException:
+                edit_ok = False
+
+        if status in ("new", "corrected"):
+            await self._sync_points_images(ctx.guild.id)
+
+        table_note = {
+            "corrected": "Points table corrected - the wrong teams' result was reversed.",
+            "new": "Points table updated.",
+            "unchanged": "Points table already matched.",
+        }.get(status, "Points table updated.")
+        message_note = ("Result post edited." if edit_ok
+                        else "⚠️ I couldn't edit the message itself (missing permission?).")
+        await ctx.reply(
+            f"✅ **Match {match_no}**: **{team_a['team_name']}** vs **{team_b['team_name']}**\n"
+            f"🏆 **{winner_name}** won, **{loser_name}** lost.\n"
+            f"{message_note} {table_note}",
+            mention_author=False,
+        )
+
+    @commands.command(name="missingresults", aliases=["missing"])
+    @commands.guild_only()
+    async def missing_results(self, ctx, total: int = 0):
+        """List match numbers not in the table: +missingresults [total matches].
+
+        Run it in the results channel. It also searches the channel for posts
+        about each missing match so you can see why it wasn't imported.
+        """
+        if not await self._allowed(ctx):
+            return
+
+        conn = connect_points_db()
+        try:
+            rows = conn.execute(
+                "SELECT match_no FROM imported_match_results WHERE guild_id=?",
+                (ctx.guild.id,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        numbers = {int(r["match_no"]) for r in rows if str(r["match_no"]).isdigit()}
+        labelled = len(rows) - len(numbers)
+        if not numbers:
+            await ctx.reply("No numbered matches are in the points table yet.", mention_author=False)
+            return
+
+        last = total if total > 0 else max(numbers)
+        missing = [n for n in range(1, last + 1) if n not in numbers]
+        beyond = sorted(n for n in numbers if n > last)
+
+        def ranges(values):
+            out, start, prev = [], None, None
+            for v in values:
+                if start is None:
+                    start = prev = v
+                elif v == prev + 1:
+                    prev = v
+                else:
+                    out.append(f"{start}-{prev}" if start != prev else str(start))
+                    start = prev = v
+            if start is not None:
+                out.append(f"{start}-{prev}" if start != prev else str(start))
+            return ", ".join(out)
+
+        lines = [f"📋 Imported: **{len(rows)}** matches (numbers 1-{last} covered: "
+                 f"**{last - len(missing)}** of {last})."]
+        if labelled:
+            lines.append(f"{labelled} imported with non-numeric labels (Final, SF1...).")
+        if beyond:
+            lines.append(f"Numbers above {last}: {ranges(beyond)}")
+        if not missing:
+            lines.append("✅ No numbers missing in that range.")
+            await ctx.reply("\n".join(lines), mention_author=False)
+            return
+        lines.append(f"❌ Missing: **{ranges(missing)}**")
+
+        # Look for posts about the missing numbers in this channel.
+        wanted = set(missing)
+        found = {}
+        async with ctx.typing():
+            async for msg in ctx.channel.history(limit=2000, before=ctx.message):
+                text = self._message_text(msg)
+                hit = re.search(r"(?<![A-Za-z])Match\s+(\d+)", text, re.IGNORECASE)
+                if hit and int(hit.group(1)) in wanted and int(hit.group(1)) not in found:
+                    found[int(hit.group(1))] = msg
+        shown = missing[:10]
+        lines.append("")
+        for n in shown:
+            msg = found.get(n)
+            if msg is None:
+                lines.append(f"• Match **{n}**: no post found in the last 2000 messages here")
+                continue
+            parsed, error = self._parse_result(self._message_text(msg))
+            why = error if parsed is None else "readable - run `+syncresult` from it"
+            lines.append(f"• Match **{n}**: [post found]({msg.jump_url}) - {why}")
+        if len(missing) > len(shown):
+            lines.append(f"• ...and {len(missing) - len(shown)} more")
+        await ctx.reply("\n".join(lines)[:1900], mention_author=False)
+
+    @commands.command(name="resetpt", aliases=["resetpoints"])
+    @commands.guild_only()
+    async def reset_points(self, ctx):
+        """Wipe the whole points table (W/L, form, imported matches)."""
+        if not await self._allowed(ctx):
+            return
+
+        view = ConfirmResetView(ctx.author.id)
+        view.message = await ctx.reply(
+            "⚠️ This will reset **every team's** W/L/points and form, and forget all "
+            "imported matches for this server. This can't be undone.",
+            view=view,
+            mention_author=False,
+        )
+        await view.wait()
+
+        if view.confirmed is not True:
+            text = "Reset cancelled." if view.confirmed is False else "Reset timed out - nothing changed."
+            try:
+                await view.message.edit(content=text, view=None)
+            except discord.HTTPException:
+                pass
+            return
+
+        conn = connect_points_db()
+        try:
+            for table in ("team_points", "team_match_history", "imported_match_results"):
+                conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (ctx.guild.id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        if CACHE_DIR.exists():
+            for old in CACHE_DIR.glob(f"points_{ctx.guild.id}_*.png"):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        await self._sync_points_images(ctx.guild.id)
+
+        try:
+            await view.message.edit(content="✅ Points table reset. Everyone is back to 0.", view=None)
+        except discord.HTTPException:
+            await ctx.send("✅ Points table reset. Everyone is back to 0.")
 
     @commands.command(name="addresult")
     @commands.guild_only()
     async def add_result(self, ctx, *, arguments: str = ""):
-        """Record one match result and automatically update W/L/PTS."""
+        """Record one match result: reply to a result post, or +addresult <team> <W/L>."""
         if not await self._allowed(ctx):
             return
 
@@ -720,116 +1423,38 @@ class PointsTable(commands.Cog):
             return
 
         parts = arguments.rsplit(maxsplit=1)
-        if len(parts) != 2:
-            await ctx.reply(
-                "Usage: `+addresult <team name> <W/L>`\n"
-                "Example: `+addresult Kashmir Titans W`",
-                mention_author=False,
-            )
-            return
-
-        team_name, result = parts
-        result = result.strip().upper()
-
+        result = parts[1].strip().upper() if len(parts) == 2 else ""
         if result not in ("W", "L"):
             await ctx.reply(
-                "Result must be `W` or `L`.\n"
-                "Example: `+addresult Kashmir Titans W`",
+                "Usage: `+addresult <team name> <W/L>` or reply to a result post "
+                "with `+addresult`.\nExample: `+addresult Kashmir Titans W`",
                 mention_author=False,
             )
             return
 
-        group_conn = sqlite3.connect(GROUP_DB)
-        group_conn.row_factory = sqlite3.Row
-        try:
-            team = group_conn.execute(
-                """
-                SELECT team_name, team_name_key, group_key
-                FROM team_groups
-                WHERE guild_id=? AND team_name_key=?
-                """,
-                (ctx.guild.id, norm(team_name)),
-            ).fetchone()
-
-            if team is None:
-                candidates = group_conn.execute(
-                    """
-                    SELECT team_name, team_name_key, group_key
-                    FROM team_groups
-                    WHERE guild_id=?
-                    """,
-                    (ctx.guild.id,),
-                ).fetchall()
-                team = next(
-                    (
-                        item for item in candidates
-                        if norm(item["team_name"]) == norm(team_name)
-                    ),
-                    None,
-                )
-        finally:
-            group_conn.close()
-
+        team = self._find_team(ctx.guild.id, parts[0])
         if team is None:
-            await ctx.reply(
-                "I couldn't find that team in `+setteamgroups`.",
-                mention_author=False,
-            )
+            await ctx.reply("I couldn't find that team in `+setteamgroups`.", mention_author=False)
             return
 
         conn = connect_points_db()
         try:
-            existing = conn.execute(
-                """
-                SELECT matches_won, matches_lost
-                FROM team_points
-                WHERE guild_id=? AND team_name_key=?
-                """,
-                (ctx.guild.id, team["team_name_key"]),
+            conn.execute("BEGIN IMMEDIATE")
+            storage_key = points_storage_key(conn, ctx.guild.id, team["team_name_key"])
+            self._bump(conn, ctx.guild.id, storage_key, result, ctx.author.id)
+            row = conn.execute(
+                "SELECT matches_won, matches_lost FROM team_points "
+                "WHERE guild_id=? AND team_name_key=?",
+                (ctx.guild.id, storage_key),
             ).fetchone()
-
-            wins = int(existing["matches_won"]) if existing else 0
-            losses = int(existing["matches_lost"]) if existing else 0
-
-            if result == "W":
-                wins += 1
-            else:
-                losses += 1
-
-            conn.execute(
-                """
-                INSERT INTO team_points
-                    (guild_id, team_name_key, matches_won, matches_lost,
-                     updated_by, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id, team_name_key) DO UPDATE SET
-                    matches_won=excluded.matches_won,
-                    matches_lost=excluded.matches_lost,
-                    updated_by=excluded.updated_by,
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                (
-                    ctx.guild.id,
-                    team["team_name_key"],
-                    wins,
-                    losses,
-                    ctx.author.id,
-                ),
-            )
-
-            conn.execute(
-                """
-                INSERT INTO team_match_history
-                    (guild_id, team_name_key, result)
-                VALUES (?, ?, ?)
-                """,
-                (ctx.guild.id, team["team_name_key"], result),
-            )
-
             conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
+        wins, losses = int(row["matches_won"]), int(row["matches_lost"])
         await self._sync_points_images(ctx.guild.id)
 
         await ctx.reply(
@@ -858,7 +1483,7 @@ class PointsTable(commands.Cog):
             for group in configured:
                 path = cache_file(ctx.guild.id, group["group_key"])
                 if not path.exists():
-                    # First use only: nothing saved yet, so draw everything once.
+                    # First use only: draw the tables if their cached images are missing.
                     await self._sync_points_images(ctx.guild.id)
                 if path.exists():
                     pages.append((group["group_name"], path.read_bytes()))

@@ -1596,6 +1596,15 @@ class Stats(commands.Cog):
                         "INSERT OR REPLACE INTO match_teams (source_message_id, user_id, team_name) VALUES (?, ?, ?)",
                         [(source.id, int(uid), name) for uid, name in team_snapshot.items()],
                     )
+                self.db.execute(
+                    "CREATE TABLE IF NOT EXISTS lb_stats_revision "
+                    "(guild_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+                )
+                self.db.execute(
+                    "INSERT INTO lb_stats_revision (guild_id, revision) VALUES (?, 1) "
+                    "ON CONFLICT(guild_id) DO UPDATE SET revision = revision + 1",
+                    (ctx.guild.id,),
+                )
         except Exception as exc:
             if (
                 "UNIQUE constraint failed" in str(exc)
@@ -1707,6 +1716,15 @@ class Stats(commands.Cog):
             self.db.execute(
                 "DELETE FROM stats_imports WHERE source_message_id = ?",
                 (source.id,),
+            )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS lb_stats_revision "
+                "(guild_id INTEGER PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)"
+            )
+            self.db.execute(
+                "INSERT INTO lb_stats_revision (guild_id, revision) VALUES (?, 1) "
+                "ON CONFLICT(guild_id) DO UPDATE SET revision = revision + 1",
+                (ctx.guild.id,),
             )
 
         await ctx.reply(

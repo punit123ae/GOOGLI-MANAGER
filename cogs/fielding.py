@@ -226,6 +226,80 @@ class ResetConfirmView(discord.ui.View):
                 pass
 
 
+class SyncConfirmView(discord.ui.View):
+    """Confirm / cancel for +syncfielding, usable only by the person who ran it."""
+
+    def __init__(self, cog, ctx, match_id, rows):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.ctx = ctx
+        self.match_id = match_id
+        self.rows = rows
+        self.owner_id = ctx.author.id
+        self.message = None
+        self.finished = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can confirm or cancel it.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _disable(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Add to totals", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            await interaction.response.defer()
+            return
+        self.finished = True
+        self._disable()
+        self.stop()
+        try:
+            ok = self.cog._apply_match_sync(self.ctx.guild.id, self.match_id, self.rows)
+        except Exception as exc:
+            await interaction.response.edit_message(
+                content=f"❌ Sync failed, nothing was changed (`{type(exc).__name__}`).",
+                embed=None, view=self,
+            )
+            return
+        text = (
+            f"✅ Added this match's catches to the fielding totals ({len(self.rows)} player(s))."
+            if ok else "This match was already added earlier. Nothing changed."
+        )
+        await interaction.response.edit_message(content=text, embed=None, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            await interaction.response.defer()
+            return
+        self.finished = True
+        self._disable()
+        self.stop()
+        await interaction.response.edit_message(
+            content="Cancelled. No fielding stats were changed.", embed=None, view=self
+        )
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        self._disable()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content="Timed out. No fielding stats were changed.", embed=None, view=self
+                )
+            except discord.HTTPException:
+                pass
+
+
 class CatchTracker(commands.Cog):
     """Tracks catch chances and outcomes in channels where tracking is started."""
 
@@ -265,6 +339,17 @@ class CatchTracker(commands.Cog):
                 guild_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, channel_id)
+            )
+            """
+        )
+        # Matches whose imported catches were added to fielding_stats by +syncfielding,
+        # so the same match can never be added twice.
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fielding_synced_matches (
+                source_message_id INTEGER PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                synced_at REAL NOT NULL
             )
             """
         )
@@ -327,6 +412,54 @@ class CatchTracker(commands.Cog):
         )
         self.bot.db.commit()
         return cur.rowcount
+
+    def _match_fielding_rows(self, guild_id, match_id):
+        """[(user_id, caught, dropped)] recorded for one imported match (from +as)."""
+        rows = self.bot.db.execute(
+            """
+            SELECT f.user_id, f.catches_taken, f.catches_dropped
+            FROM player_match_fielding f
+            JOIN stats_imports i ON i.source_message_id = f.source_message_id
+            WHERE i.guild_id = ? AND f.source_message_id = ?
+              AND (f.catches_taken > 0 OR f.catches_dropped > 0)
+            ORDER BY f.catches_taken DESC, f.user_id
+            """,
+            (int(guild_id), int(match_id)),
+        ).fetchall()
+        return [(int(r[0]), int(r[1]), int(r[2])) for r in rows]
+
+    def _is_match_synced(self, match_id):
+        row = self.bot.db.execute(
+            "SELECT 1 FROM fielding_synced_matches WHERE source_message_id=?",
+            (int(match_id),),
+        ).fetchone()
+        return row is not None
+
+    def _apply_match_sync(self, guild_id, match_id, rows):
+        """Add a match's catches to the totals. Returns False if it was already synced."""
+        db = self.bot.db
+        try:
+            with db:  # one transaction: the mark and the totals succeed or fail together
+                db.execute(
+                    "INSERT INTO fielding_synced_matches (source_message_id, guild_id, synced_at) "
+                    "VALUES (?, ?, ?)",
+                    (int(match_id), int(guild_id), time.time()),
+                )
+                db.executemany(
+                    """
+                    INSERT INTO fielding_stats (guild_id, user_id, catches_caught, catches_dropped)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        catches_caught=catches_caught + excluded.catches_caught,
+                        catches_dropped=catches_dropped + excluded.catches_dropped
+                    """,
+                    [(int(guild_id), uid, c, d) for uid, c, d in rows],
+                )
+        except Exception as exc:
+            if "UNIQUE" in str(exc) or "PRIMARY KEY" in str(exc):
+                return False
+            raise
+        return True
 
     # ------------------------------------------------------------------ parsing
     @staticmethod
@@ -840,6 +973,169 @@ class CatchTracker(commands.Cog):
             embed=pages[0],
             view=view,
             mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.command(name="syncfielding")
+    @commands.guild_only()
+    async def sync_fielding(self, ctx, match_id: int = None):
+        """Add one imported match's catches to the fielding totals.
+
+        Use for a match played while tracking was off. Reply to the raw-stats
+        message you imported with +as (or give its message ID):
+            +syncfielding            (as a reply to the raw-stats message)
+            +syncfielding <id>
+        Each match can only be added once.
+        """
+        if not await self._tracking_permission(ctx, "syncfielding"):
+            return
+        ref = ctx.message.reference
+        if match_id is None:
+            if ref is None or ref.message_id is None:
+                await ctx.reply(
+                    "Reply to the raw-stats message of the match with `+syncfielding`, "
+                    "or use `+syncfielding <message id>`.",
+                    mention_author=False,
+                )
+                return
+            match_id = ref.message_id
+
+        if self._is_match_synced(match_id):
+            await ctx.reply(
+                "That match was already added to the fielding totals.", mention_author=False
+            )
+            return
+        rows = self._match_fielding_rows(ctx.guild.id, match_id)
+        if not rows:
+            await ctx.reply(
+                "I found no catch records for that match. Make sure it was imported with "
+                "`+as` **with catch sync turned on**, and that this is the raw-stats message.",
+                mention_author=False,
+            )
+            return
+
+        lines = []
+        for uid, c, d in rows[:25]:
+            m = ctx.guild.get_member(uid)
+            nm = discord.utils.escape_markdown(m.display_name if m else f"Unknown ({str(uid)[-4:]})")
+            lines.append(f"**{nm}** → `+{c}` caught • `+{d}` dropped")
+        if len(rows) > 25:
+            lines.append(f"…and {len(rows) - 25} more player(s)")
+        embed = discord.Embed(
+            title="🧤 Add this match to fielding totals?",
+            description="\n".join(lines),
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        embed.set_footer(
+            text="Only do this if tracking was OFF during the match, or it will be counted twice."
+        )
+        view = SyncConfirmView(self, ctx, match_id, rows)
+        view.message = await ctx.reply(
+            embed=embed, view=view, mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    def _audit_fielding(self, guild_id):
+        """Players whose saved totals differ from the sum of their imported matches.
+
+        Returns (differences, matches_counted). differences is a list of
+        (user_id, stored_c, stored_d, match_c, match_d), biggest gap first.
+        Matches imported before the last fielding reset are ignored, because the
+        reset wiped the totals they would have contributed to.
+        """
+        db = self.bot.db
+        stored = {
+            int(r[0]): (int(r[1]), int(r[2]))
+            for r in db.execute(
+                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=?",
+                (int(guild_id),),
+            ).fetchall()
+        }
+        from_matches, matches = {}, 0
+        try:
+            for r in db.execute(
+                """
+                SELECT f.user_id, SUM(f.catches_taken), SUM(f.catches_dropped)
+                FROM player_match_fielding f
+                JOIN stats_imports i ON i.source_message_id = f.source_message_id
+                WHERE i.guild_id = ?
+                  AND i.imported_at > COALESCE(
+                      (SELECT reset_at FROM fielding_reset_marks WHERE guild_id = ?), 0)
+                GROUP BY f.user_id
+                """,
+                (int(guild_id), int(guild_id)),
+            ).fetchall():
+                from_matches[int(r[0])] = (int(r[1] or 0), int(r[2] or 0))
+            matches = int(db.execute(
+                """
+                SELECT COUNT(DISTINCT f.source_message_id)
+                FROM player_match_fielding f
+                JOIN stats_imports i ON i.source_message_id = f.source_message_id
+                WHERE i.guild_id = ?
+                  AND i.imported_at > COALESCE(
+                      (SELECT reset_at FROM fielding_reset_marks WHERE guild_id = ?), 0)
+                """,
+                (int(guild_id), int(guild_id)),
+            ).fetchone()[0])
+        except Exception:
+            pass
+        diffs = []
+        for uid in set(stored) | set(from_matches):
+            sc, sd = stored.get(uid, (0, 0))
+            mc, md = from_matches.get(uid, (0, 0))
+            if (sc, sd) != (mc, md):
+                diffs.append((uid, sc, sd, mc, md))
+        diffs.sort(key=lambda r: (-(abs(r[1] - r[3]) + abs(r[2] - r[4])), r[0]))
+        return diffs, matches
+
+    @commands.command(name="auditfielding", aliases=["fdaudit"])
+    @commands.guild_only()
+    async def audit_fielding(self, ctx):
+        """Compare every player's saved fielding totals with their imported matches."""
+        if not await self._tracking_permission(ctx, "auditfielding"):
+            return
+        try:
+            diffs, matches = self._audit_fielding(ctx.guild.id)
+        except Exception as exc:
+            await ctx.reply(f"❌ Audit failed (`{type(exc).__name__}`).", mention_author=False)
+            return
+        if not diffs:
+            await ctx.reply(
+                f"✅ Every player's fielding totals match their imported matches "
+                f"({matches} match(es) checked).",
+                mention_author=False,
+            )
+            return
+
+        per_page = 10
+        chunks = [diffs[i:i + per_page] for i in range(0, len(diffs), per_page)]
+        pages = []
+        for n, chunk in enumerate(chunks, start=1):
+            lines = []
+            for uid, sc, sd, mc, md in chunk:
+                m = ctx.guild.get_member(uid)
+                nm = discord.utils.escape_markdown(m.display_name if m else f"Unknown ({str(uid)[-4:]})")
+                lines.append(
+                    f"**{nm}**\n"
+                    f"Saved totals: `{sc}` caught • `{sd}` dropped\n"
+                    f"From matches: `{mc}` caught • `{md}` dropped\n"
+                    f"Difference (saved − matches): `{sc - mc:+}` caught • `{sd - md:+}` dropped"
+                )
+            embed = discord.Embed(
+                title=f"🧤 FIELDING AUDIT — {len(diffs)} player(s) differ",
+                description="\n\n".join(lines),
+                color=discord.Color.orange(),
+            )
+            embed.set_footer(
+                text=f"Checked {matches} imported match(es) • Page {n}/{len(chunks)} • "
+                     "Matches imported without catch sync, manual edits and "
+                     "tracking gaps all show up here"
+            )
+            pages.append(embed)
+
+        view = PagedEmbedView(ctx, pages)
+        view.message = await ctx.reply(
+            embed=pages[0], view=view, mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 

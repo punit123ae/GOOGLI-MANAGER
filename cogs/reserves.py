@@ -60,6 +60,29 @@ def _connect():
 def _normalize_team_name(name: str) -> str:
     return " ".join(name.casefold().split())
 
+def _stage_exists(guild_id: int, stage_name: str) -> bool:
+    groups_db = Path(__file__).resolve().parent.parent / "groups_schedule.db"
+    if not groups_db.is_file():
+        return False
+    conn = sqlite3.connect(groups_db, timeout=5)
+    try:
+        if stage_name.strip().casefold() == "stage 1":
+            conn.execute(
+                "INSERT OR IGNORE INTO tournament_stages (guild_id, stage_key, stage_name, created_at) "
+                "VALUES (?, 'stage 1', 'Stage 1', CURRENT_TIMESTAMP)",
+                (guild_id,),
+            )
+            conn.commit()
+        row = conn.execute(
+            "SELECT 1 FROM tournament_stages WHERE guild_id=? AND LOWER(stage_name)=LOWER(?)",
+            (guild_id, stage_name.strip()),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
 
 def _resolve_approved_team(guild_id: int, query: str):
     """Return (canonical_name, status, suggestions) from approved teams only.
@@ -103,7 +126,7 @@ def _resolve_approved_team(guild_id: int, query: str):
     if len(exact) > 1:
         return None, "multiple", exact
 
-    # Allow a unique prefix for convenience, but never guess if ambiguous.
+    # Allow a unique prefix first, then a unique substring; never guess if ambiguous.
     matches = [
         row["name"] for row in rows
         if _normalize_team_name(row["name"]).startswith(key)
@@ -112,6 +135,15 @@ def _resolve_approved_team(guild_id: int, query: str):
         return matches[0], "ok", []
     if len(matches) > 1:
         return None, "multiple", matches[:10]
+
+    partial_matches = [
+        row["name"] for row in rows
+        if key in _normalize_team_name(row["name"])
+    ]
+    if len(partial_matches) == 1:
+        return partial_matches[0], "ok", []
+    if len(partial_matches) > 1:
+        return None, "multiple", partial_matches[:10]
     return None, "missing", []
 
 
@@ -156,6 +188,7 @@ def _init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 reserving_team TEXT NOT NULL COLLATE NOCASE,
                 opposing_team TEXT NOT NULL COLLATE NOCASE,
+                stage_name TEXT NOT NULL DEFAULT 'Stage 1',
                 created_by_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -181,6 +214,18 @@ def _init_db():
                 (id, is_generated, channel_id, message_ids)
             VALUES (1, 0, NULL, NULL)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reserve_stage_schedule_state (
+                stage_name TEXT PRIMARY KEY COLLATE NOCASE,
+                is_generated INTEGER NOT NULL DEFAULT 0,
+                channel_id INTEGER,
+                message_ids TEXT
+            )
+        """)
+        conn.execute("INSERT OR IGNORE INTO reserve_stage_schedule_state (stage_name) VALUES ('Stage 1')")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(reservations)").fetchall()}
+        if "stage_name" not in columns:
+            conn.execute("ALTER TABLE reservations ADD COLUMN stage_name TEXT NOT NULL DEFAULT 'Stage 1'")
 
 
 def _limit():
@@ -205,40 +250,89 @@ def _team_counts(team_name: str):
     return int(total), int(initiated)
 
 
-def _all_reservations():
+def _all_reservations(stage_name=None):
     with _connect() as conn:
+        if stage_name is None:
+            return conn.execute("""
+                SELECT id, reserving_team, opposing_team, stage_name, created_by_id, created_at
+                FROM reservations ORDER BY id
+            """).fetchall()
         return conn.execute("""
-            SELECT id, reserving_team, opposing_team, created_by_id, created_at
-            FROM reservations ORDER BY id
-        """).fetchall()
+            SELECT id, reserving_team, opposing_team, stage_name, created_by_id, created_at
+            FROM reservations WHERE LOWER(stage_name)=LOWER(?) ORDER BY id
+        """, (stage_name,)).fetchall()
 
 
-def _schedule_exists():
+def _schedule_exists(stage_name=None):
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT is_generated FROM schedule_state WHERE id = 1"
-        ).fetchone()
-        return bool(row["is_generated"])
+        if stage_name is None:
+            row = conn.execute("SELECT is_generated FROM schedule_state WHERE id=1").fetchone()
+        else:
+            row = conn.execute("SELECT is_generated FROM reserve_stage_schedule_state WHERE stage_name=? COLLATE NOCASE",
+                               (stage_name,)).fetchone()
+        return bool(row and row["is_generated"])
 
 
-def _clear_schedule_state():
+def _clear_schedule_state(stage_name=None):
     with _connect() as conn:
-        conn.execute("DELETE FROM generated_schedule")
-        conn.execute("""
-            UPDATE schedule_state
-            SET is_generated = 0, channel_id = NULL, message_ids = NULL
-            WHERE id = 1
-        """)
+        if stage_name is None:
+            conn.execute("DELETE FROM generated_schedule")
+            conn.execute("UPDATE schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL WHERE id=1")
+        else:
+            ids = [row["id"] for row in conn.execute(
+                "SELECT id FROM reservations WHERE stage_name=? COLLATE NOCASE", (stage_name,)
+            ).fetchall()]
+            if ids:
+                conn.executemany("DELETE FROM generated_schedule WHERE reservation_id=?", [(item,) for item in ids])
+            conn.execute("UPDATE reserve_stage_schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL WHERE stage_name=? COLLATE NOCASE",
+                         (stage_name,))
 
+def _reserve_match_details(guild_id: int, guild, stage_name=None):
+    """Resolve reserving team as host, its home stadium, and both team roles."""
+    groups_db = Path(__file__).resolve().parent.parent / "groups_schedule.db"
+    stadiums = {}
+    if groups_db.is_file():
+        conn = sqlite3.connect(f"file:{groups_db.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute("SELECT team_name, channel_id FROM team_home_stadiums WHERE guild_id = ?", (guild_id,)).fetchall()
+            stadiums = {_normalize_team_name(name): int(channel_id) for name, channel_id in rows}
+        except sqlite3.Error:
+            stadiums = {}
+        finally:
+            conn.close()
+    roles = {}
+    if TEAM_DB_PATH.is_file():
+        conn = sqlite3.connect(f"file:{TEAM_DB_PATH.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute("SELECT t.name, s.role_id FROM registered_teams t JOIN team_role_settings s ON s.team_id = t.id WHERE t.guild_id = ? AND LOWER(t.status) = 'approved'", (guild_id,)).fetchall()
+            roles = {_normalize_team_name(name): int(role_id) for name, role_id in rows}
+        except sqlite3.Error:
+            roles = {}
+        finally:
+            conn.close()
+    details, missing = {}, []
+    for row in _all_reservations(stage_name):
+        host, opponent = row["reserving_team"].strip(), row["opposing_team"].strip()
+        channel_id = stadiums.get(_normalize_team_name(host))
+        host_role_id = roles.get(_normalize_team_name(host))
+        opponent_role_id = roles.get(_normalize_team_name(opponent))
+        channel = guild.get_channel(channel_id) if channel_id else None
+        host_role = guild.get_role(host_role_id) if host_role_id else None
+        opponent_role = guild.get_role(opponent_role_id) if opponent_role_id else None
+        if not isinstance(channel, discord.TextChannel): missing.append(f"{host} (home stadium)")
+        if host_role is None: missing.append(f"{host} (Discord role)")
+        if opponent_role is None: missing.append(f"{opponent} (Discord role)")
+        details[int(row["id"])] = (channel, host_role, opponent_role)
+    return details, sorted(set(missing))
 
-def _schedule_days(max_days: int):
+def _schedule_days(max_days: int, stage_name=None):
     """
     Backtracking edge-colouring scheduler. Each reservation is an edge between
     two teams; edges assigned to the same day cannot share a team. It searches
     from the theoretical minimum number of days (maximum team degree) upwards,
     stopping at max_days. This avoids wasting days when matches can be grouped.
     """
-    rows = _all_reservations()
+    rows = _all_reservations(stage_name)
     if not rows:
         return []
 
@@ -395,7 +489,7 @@ class ReserveListView(discord.ui.View):
         lines = [f"**Reserved Matches ({len(self.rows)})**"]
         for index, row in enumerate(self.rows[start:start + PAGE_SIZE], start=start + 1):
             lines.append(
-                f"**{index}.** {row['reserving_team']} vs {row['opposing_team']}"
+                f"**{index}.** {row['reserving_team']} vs {row['opposing_team']} · *{row['stage_name']}*"
             )
         lines.append(f"Page {self.page + 1}/{self.pages}")
         return "\n".join(lines)
@@ -461,15 +555,15 @@ class Reserves(commands.Cog):
 
         with _connect() as conn:
             current_counts = conn.execute("""
-                SELECT team_name, COUNT(*) AS n
+                SELECT stage_name, team_name, COUNT(*) AS n
                 FROM (
-                    SELECT reserving_team AS team_name FROM reservations
+                    SELECT stage_name, reserving_team AS team_name FROM reservations
                     UNION ALL
-                    SELECT opposing_team AS team_name FROM reservations
+                    SELECT stage_name, opposing_team AS team_name FROM reservations
                 )
-                GROUP BY team_name COLLATE NOCASE
+                GROUP BY stage_name COLLATE NOCASE, team_name COLLATE NOCASE
             """).fetchall()
-            over = [r["team_name"] for r in current_counts if int(r["n"]) > total]
+            over = [f"{r['stage_name']}: {r['team_name']}" for r in current_counts if int(r["n"]) > total]
             if over:
                 await ctx.reply(
                     f"Cannot set the limit to {total}: these teams already exceed it: "
@@ -477,20 +571,25 @@ class Reserves(commands.Cog):
                     mention_author=False,
                 )
                 return
-            conn.execute(
-                "UPDATE reserve_settings SET total_limit = ? WHERE id = 1", (total,)
+            conn.execute(                "UPDATE reserve_settings SET total_limit = ? WHERE id = 1", (total,)
             )
 
         await ctx.send(
             f"Reserve limit set to **{total} matches per team**.\n"
-            f"Each team may initiate **{total // 2}** reservations total across the server.\n"
-            "Each team's total involvement (as reserving or opposing team) cannot exceed "
+            f"Each team may initiate **{total // 2}** reservations per stage.\n"
+            "Each team's total involvement within a stage (as reserving or opposing team) cannot exceed "
             f"**{total}**."
         )
 
     @commands.command(name="reservematch")
-    async def reservematch(self, ctx):
+    async def reservematch(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
+            return
+        if not stage_name:
+            await ctx.send("Usage: `+reservematch <stage name>`")
+            return
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist. Create it with `+createnewstage {stage_name}`.")
             return
         limit = _limit()
         if limit <= 0:
@@ -530,7 +629,7 @@ class Reserves(commands.Cog):
             await ctx.send("A team cannot reserve a match against itself.")
             return
 
-        existing = _all_reservations()
+        existing = _all_reservations(stage_name)
         total_a = sum(
             1 for r in existing
             if reserving.casefold() in (
@@ -566,9 +665,9 @@ class Reserves(commands.Cog):
 
         with _connect() as conn:
             cur = conn.execute("""
-                INSERT INTO reservations (reserving_team, opposing_team, created_by_id)
-                VALUES (?, ?, ?)
-            """, (reserving, opposing, ctx.author.id))
+                INSERT INTO reservations (reserving_team, opposing_team, stage_name, created_by_id)
+                VALUES (?, ?, ?, ?)
+            """, (reserving, opposing, stage_name.strip(), ctx.author.id))
             reserve_id = cur.lastrowid
 
         total_a += 1
@@ -578,6 +677,7 @@ class Reserves(commands.Cog):
             title="Reservation Added",
             description=(
                 f"**ID:** `{int(reserve_id)}`\n"
+                f"**Stage:** {stage_name.strip()}\n"
                 f"**Match:** {reserving} vs {opposing}\n"
                 f"**Team limits:** {total_a}/{limit} · {total_b}/{limit}\n"
                 f"**Initiated by {reserving}:** {initiated_a}/{initiation_quota}"
@@ -587,7 +687,117 @@ class Reserves(commands.Cog):
         await ctx.send(embed=embed)
 
         # A new reservation invalidates the stored schedule.
-        _clear_schedule_state()
+        _clear_schedule_state(stage_name)
+
+    @commands.command(name="forcereserve")
+    async def forcereserve(self, ctx, *, stage_name: str = None):
+        """Create a reserve even if the initiating team's normal initiation quota is used."""
+        if not await self.owner_only(ctx):
+            return
+        if not stage_name:
+            await ctx.send("Usage: `+forcereserve <stage name>`")
+            return
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
+            return
+
+        limit = _limit()
+        if limit <= 0:
+            await ctx.send("Set the reserve limit first with `+setreserves <number>`.")
+            return
+
+        if ctx.guild is None:
+            await ctx.send("This command can only be used inside the server where teams are approved.")
+            return
+
+        initiating_input = await self.ask_team(ctx, "Enter the **initiating team name**:")
+        if not initiating_input:
+            return
+        opposing_input = await self.ask_team(ctx, "Enter the **opposing team name**:")
+        if not opposing_input:
+            return
+
+        initiating, status_a, suggestions_a = _resolve_approved_team(
+            ctx.guild.id, initiating_input
+        )
+        if status_a != "ok":
+            await ctx.send(_approved_team_error(initiating_input, status_a, suggestions_a))
+            return
+
+        opposing, status_b, suggestions_b = _resolve_approved_team(
+            ctx.guild.id, opposing_input
+        )
+        if status_b != "ok":
+            await ctx.send(_approved_team_error(opposing_input, status_b, suggestions_b))
+            return
+
+        if initiating.casefold() == opposing.casefold():
+            await ctx.send("A team cannot force-reserve a match against itself.")
+            return
+
+        existing = _all_reservations(stage_name)
+        total_a = sum(
+            1 for row in existing
+            if initiating.casefold() in (
+                row["reserving_team"].casefold(), row["opposing_team"].casefold()
+            )
+        )
+        total_b = sum(
+            1 for row in existing
+            if opposing.casefold() in (
+                row["reserving_team"].casefold(), row["opposing_team"].casefold()
+            )
+        )
+
+        # Force reserve bypasses only the normal initiation quota. Both teams
+        # must still have one available slot under the configured total limit.
+        problems = []
+        if total_a >= limit:
+            problems.append(
+                f"**{initiating}** has no reserve slots left ({total_a}/{limit})."
+            )
+        if total_b >= limit:
+            problems.append(
+                f"**{opposing}** has no reserve slots left ({total_b}/{limit})."
+            )
+        if problems:
+            await ctx.send(
+                "❌ **Force reserve cannot be created.**\n" + "\n".join(problems)
+            )
+            return
+
+        with _connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO reservations (reserving_team, opposing_team, stage_name, created_by_id) "
+                "VALUES (?, ?, ?, ?)",
+                (initiating, opposing, stage_name.strip(), ctx.author.id),
+            )
+            reserve_id = int(cur.lastrowid)
+
+        total_a += 1
+        total_b += 1
+        _clear_schedule_state(stage_name)
+
+        embed = discord.Embed(
+            title="⚡ FORCE RESERVE ADDED",
+            description=(
+                f"**Reserve ID:** `{reserve_id}`\n"
+                f"**Stage:** {stage_name.strip()}\n"
+                f"**Initiating team:** {discord.utils.escape_markdown(initiating)}\n"
+                f"**Opponent:** {discord.utils.escape_markdown(opposing)}"
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="Team reserve usage",
+            value=(
+                f"**{discord.utils.escape_markdown(initiating)}:** {total_a}/{limit}\n"
+                f"**{discord.utils.escape_markdown(opposing)}:** {total_b}/{limit}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Force reserve bypasses initiation quota, not team capacity.")
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="reservelist")
     async def reservelist(self, ctx):
@@ -619,6 +829,7 @@ class Reserves(commands.Cog):
             title="Delete this reservation?",
             description=(
                 f"**ID:** `{int(reserve_id)}`\n"
+                f"**Stage:** {row['stage_name']}\n"
                 f"**Match:** {row['reserving_team']} vs {row['opposing_team']}\n\n"
                 "Confirm to delete it."
             ),
@@ -634,10 +845,10 @@ class Reserves(commands.Cog):
                 conn.execute(
                     "DELETE FROM generated_schedule WHERE reservation_id = ?", (reserve_id,)
                 )
-            _clear_schedule_state()
+            _clear_schedule_state(row["stage_name"])
             await ctx.send(
-                f"✅ Reserve ID **{reserve_id}** deleted. Team counts have been recalculated. "
-                "The generated schedule has been invalidated; run `+creatematchups` again."
+                f"✅ Reserve ID **{reserve_id}** deleted from **{row['stage_name']}**. "
+                "That stage's generated schedule has been invalidated."
             )
         elif view.choice is False:
             await ctx.send(f"Deletion cancelled. Reserve ID **{reserve_id}** was not changed.")
@@ -648,101 +859,170 @@ class Reserves(commands.Cog):
 
     @commands.command(name="reservestatus")
     async def reservestatus(self, ctx, *, team_name: str):
-        limit = _limit()
-        total, initiated = _team_counts(team_name)
-        rows = [
-            r for r in _all_reservations()
-            if team_name.casefold() in (
-                r["reserving_team"].casefold(), r["opposing_team"].casefold()
+        # Reject mentions before looking up or echoing user input. This prevents
+        # @everyone, @here and role mentions from being pinged by this command.
+        if (
+            "@" in team_name
+            or ctx.message.mention_everyone
+            or bool(ctx.message.role_mentions)
+            or bool(ctx.message.mentions)
+        ):
+            await ctx.reply(
+                "❌ Invalid argument. Enter a registered team name, not a user, role, or everyone mention.",
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
-        ]
-        if not rows:
-            await ctx.send(f"No reservations found for **{team_name}**.")
             return
 
-        lines = [
-            f"**{team_name} — Reserve Status**",
-            f"Total matches: **{total}/{limit}**",
-            f"Initiated: **{initiated}/{limit // 2}**",
-            f"Remaining: **{max(0, limit - total)}**",
-            "**Reservations:**",
+        if ctx.guild is None:
+            await ctx.reply("This command can only be used inside a server.", mention_author=False)
+            return
+
+        canonical, status, suggestions = _resolve_approved_team(ctx.guild.id, team_name)
+        if status != "ok":
+            if status == "multiple":
+                safe_names = [discord.utils.escape_markdown(name) for name in suggestions]
+                message = (
+                    f"❌ **`{discord.utils.escape_markdown(team_name)}` matches multiple teams:**\n"
+                    + "\n".join(f"• {name}" for name in safe_names)
+                    + "\nPlease enter a more specific part of the team name."
+                )
+            else:
+                message = _approved_team_error(team_name, status, suggestions)
+            await ctx.reply(
+                message,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        limit = _limit()
+        total, initiated = _team_counts(canonical)
+        rows = [
+            row for row in _all_reservations()
+            if canonical.casefold() in (
+                row["reserving_team"].casefold(), row["opposing_team"].casefold()
+            )
         ]
-        lines.extend(
-            f"`{r['id']}` {r['reserving_team']} vs {r['opposing_team']}"
-            for r in rows[:25]
+
+        embed = discord.Embed(
+            title="✦ RESERVE STATUS",
+            description=f"**{discord.utils.escape_markdown(canonical)}**",
+            color=discord.Color.from_rgb(35, 63, 110),
         )
-        await ctx.send("\n".join(lines))
+        embed.add_field(name="Total Matches", value=f"**{total}/{limit}**", inline=True)
+        embed.add_field(name="Initiated", value=f"**{initiated}/{limit // 2}**", inline=True)
+        embed.add_field(name="Remaining", value=f"**{max(0, limit - total)}**", inline=True)
+
+        if rows:
+            lines = [
+                f"`{row['id']}` **{discord.utils.escape_markdown(row['reserving_team'])}** vs "
+                f"**{discord.utils.escape_markdown(row['opposing_team'])}**"
+                for row in rows[:20]
+            ]
+            if len(rows) > 20:
+                lines.append(f"…and **{len(rows) - 20}** more reservation(s).")
+            embed.add_field(
+                name=f"Reservations ({len(rows)})",
+                value="\n".join(lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Reservations",
+                value="No reservations found for this team yet.",
+                inline=False,
+            )
+
+        embed.set_footer(text="GOOGLI MANAGER • RESERVE SYSTEM")
+        await ctx.reply(
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @commands.command(name="creatematchups")
-    async def creatematchups(self, ctx):
+    async def creatematchups(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
             return
-        if _schedule_exists():
-            await ctx.send(
-                "A schedule is already marked as generated. Use `+resetmatchups` first, "
-                "then run `+creatematchups` to create a new one."
-            )
+        if not stage_name:
+            await ctx.send("Usage: `+creatematchups <stage name>`")
             return
-
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
+            return
+        if _schedule_exists(stage_name):
+            await ctx.send(f"A reserve schedule already exists for **{stage_name}**. Use `+resetmatchups {stage_name}` first, then `+creatematchups {stage_name}`.")
+            return
         limit = _limit()
         if limit <= 0:
             await ctx.send("Set the limit first with `+setreserves <number>`.")
             return
-        rows = _all_reservations()
+        rows = _all_reservations(stage_name)
         if not rows:
             await ctx.send("There are no reserved matches to schedule.")
             return
-
         try:
-            days = await asyncio.to_thread(_schedule_days, limit)
+            days = await asyncio.to_thread(_schedule_days, limit, stage_name)
         except ValueError as exc:
             await ctx.send(f"❌ Could not create the schedule: {exc}")
             return
-
+        # Reserving team is always the host; validate stadiums and roles before saving/posting.
+        match_details, missing_details = _reserve_match_details(ctx.guild.id, ctx.guild, stage_name)
+        if missing_details:
+            await ctx.send(
+                "Cannot post the reserve schedule yet. Configure these first:\n"
+                + "\n".join(f"• {item}" for item in missing_details)
+                + "\nSet stadiums with `+sethomestadium <team name> <#channel>` and ensure each approved team has a Discord role."
+            )
+            return
         # Save schedule before posting so it can be inspected after a restart.
         with _connect() as conn:
-            conn.execute("DELETE FROM generated_schedule")
+            conn.executemany("DELETE FROM generated_schedule WHERE reservation_id=?", [(row["id"],) for row in rows])
             for day, matches in days:
                 for match in matches:
                     conn.execute(
                         "INSERT INTO generated_schedule (reservation_id, day_number) VALUES (?, ?)",
                         (match["id"], day),
                     )
-            conn.execute("""
-                UPDATE schedule_state
-                SET is_generated = 1, channel_id = ?, message_ids = ''
-                WHERE id = 1
-            """, (ctx.channel.id,))
-
+            conn.execute("INSERT INTO reserve_stage_schedule_state (stage_name, is_generated, channel_id, message_ids) VALUES (?, 1, ?, '') "
+                         "ON CONFLICT(stage_name) DO UPDATE SET is_generated=1, channel_id=excluded.channel_id, message_ids=''",
+                         (stage_name.strip(), ctx.channel.id))
         intro = discord.Embed(
-            title="✦ OFFICIAL RESERVE MATCH SCHEDULE",
+            title=f"✦ {stage_name.upper()} — RESERVE MATCH SCHEDULE",
             color=discord.Color.from_rgb(35, 63, 110),
             description=(
                 f"**Total reserved matches:** {len(rows)}\n"
                 f"**Days required:** {len(days)}\n"
-                "**Rule:** Each team plays at most once per day."
+                "**Rule:** Each team plays at most once per day. The reserving team is the host."
             ),
         )
-        sent = []
-        sent.append(await ctx.send(embed=intro))
+        sent = [await ctx.send(embed=intro)]
         for day, matches in days:
-            lines = [
-                f"`ID {m['id']}` **{m['a']} vs {m['b']}**"
-                for m in matches
-            ]
+            lines = []
+            ping_roles = []
+            for match in matches:
+                channel, host_role, opponent_role = match_details[int(match["id"])]
+                lines.append(
+                    f"`ID {match['id']}` **{discord.utils.escape_markdown(match['a'])}** vs **{discord.utils.escape_markdown(match['b'])}**\n"
+                    f"🏟️ **Host:** {discord.utils.escape_markdown(match['a'])} — {channel.mention}\n"
+                    f"👥 {host_role.mention} vs {opponent_role.mention}"
+                )
+                ping_roles.extend((host_role, opponent_role))
             embed = discord.Embed(
                 title=f"◆ MATCHDAY {day:02d}",
                 color=discord.Color.from_rgb(35, 63, 110),
-                description="\n".join(lines) if lines else "No matches",
+                description="\n\n".join(lines) if lines else "No matches",
             )
-            sent.append(await ctx.send(embed=embed))
-
-        ids = ",".join(str(m.id) for m in sent)
+            sent.append(await ctx.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles, replied_user=False),
+            ))
+        ids = ",".join(str(message.id) for message in sent)
         with _connect() as conn:
-            conn.execute(
-                "UPDATE schedule_state SET message_ids = ? WHERE id = 1", (ids,)
-            )
-        await ctx.send("✅ Complete schedule posted successfully.")
+            conn.execute("UPDATE reserve_stage_schedule_state SET message_ids=? WHERE stage_name=? COLLATE NOCASE",
+                         (ids, stage_name.strip()))
+        await ctx.send("✅ Complete reserve schedule posted successfully.")
 
     @commands.command(name="deleteallreserves")
     async def deleteallreserves(self, ctx):
@@ -761,6 +1041,7 @@ class Reserves(commands.Cog):
                     SET is_generated = 0, channel_id = NULL, message_ids = NULL
                     WHERE id = 1
                 """)
+                conn.execute("UPDATE reserve_stage_schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL")
             await ctx.send("There are no reserved matches. Match numbering is reset and will start at **1**.")
             return
 
@@ -788,6 +1069,7 @@ class Reserves(commands.Cog):
                         SET is_generated = 0, channel_id = NULL, message_ids = NULL
                         WHERE id = 1
                     """)
+                    conn.execute("UPDATE reserve_stage_schedule_state SET is_generated=0, channel_id=NULL, message_ids=NULL")
             except sqlite3.Error as exc:
                 await ctx.send(f"❌ Could not delete all reservations: `{type(exc).__name__}`. No success was reported; check the bot console/database.")
                 return
@@ -800,15 +1082,18 @@ class Reserves(commands.Cog):
             await ctx.send("Confirmation timed out. Nothing was deleted.")
 
     @commands.command(name="resetmatchups")
-    async def resetmatchups(self, ctx):
+    async def resetmatchups(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
             return
-        if not _schedule_exists():
-            await ctx.send("There is no generated schedule to reset.")
+        if not stage_name:
+            await ctx.send("Usage: `+resetmatchups <stage name>`")
+            return
+        if not _schedule_exists(stage_name):
+            await ctx.send(f"There is no generated reserve schedule for **{stage_name}**.")
             return
         view = OwnerConfirmView(ctx.author.id)
         embed = discord.Embed(
-            title="Reset Generated Schedule?",
+            title=f"Reset {stage_name} Reserve Schedule?",
             description=(
                 "This clears the saved schedule data but does not delete reservations "
                 "or remove old schedule messages from Discord. Continue?"
@@ -818,40 +1103,52 @@ class Reserves(commands.Cog):
         view.message = await ctx.send(embed=embed, view=view)
         await view.wait()
         if view.choice is True:
-            _clear_schedule_state()
-            await ctx.send("✅ Saved schedule cleared. Reservations are unchanged.")
+            _clear_schedule_state(stage_name)
+            await ctx.send(f"✅ Saved reserve schedule for **{stage_name}** cleared. Reservations are unchanged.")
         elif view.choice is False:
             await ctx.send("Reset cancelled. The saved schedule is unchanged.")
         else:
             await ctx.send("Confirmation timed out. Nothing was reset.")
 
     @commands.command(name="reserveaudit")
-    async def reserveaudit(self, ctx):
+    async def reserveaudit(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
             return
+        if stage_name and not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.send(f"Stage **{stage_name}** does not exist.")
+            return
         limit = _limit()
-        rows = _all_reservations()
+        rows = _all_reservations(stage_name)
         counts = {}
         initiated = {}
+        labels = {}
         issues = []
         for r in rows:
+            stage = r["stage_name"].strip()
+            stage_key = stage.casefold()
             a = r["reserving_team"].strip()
             b = r["opposing_team"].strip()
             if a.casefold() == b.casefold():
-                issues.append(f"ID {r['id']}: a team is matched against itself.")
+                issues.append(f"{stage} — ID {r['id']}: a team is matched against itself.")
             for team in (a, b):
-                counts[team.casefold()] = counts.get(team.casefold(), 0) + 1
-            initiated[a.casefold()] = initiated.get(a.casefold(), 0) + 1
+                key = (stage_key, team.casefold())
+                labels[key] = (stage, team)
+                counts[key] = counts.get(key, 0) + 1
+            key = (stage_key, a.casefold())
+            labels[key] = (stage, a)
+            initiated[key] = initiated.get(key, 0) + 1
 
-        for team_key, count in counts.items():
+        for key, count in counts.items():
+            stage, team = labels[key]
             if count > limit:
-                issues.append(f"{team_key}: total involvement {count}/{limit}.")
+                issues.append(f"{stage} — {team}: total involvement {count}/{limit}.")
         quota = limit // 2
-        for team_key, count in initiated.items():
+        for key, count in initiated.items():
+            stage, team = labels[key]
             if count > quota:
-                issues.append(f"{team_key}: initiated {count}/{quota}.")
+                issues.append(f"{stage} — {team}: initiated {count}/{quota}.")
 
-        embed = discord.Embed(title="Reserve Audit", color=discord.Color.green() if not issues else discord.Color.red())
+        embed = discord.Embed(title=f"Reserve Audit — {stage_name}" if stage_name else "Reserve Audit — All Stages", color=discord.Color.green() if not issues else discord.Color.red())
         embed.add_field(name="Total reservations", value=str(len(rows)), inline=True)
         embed.add_field(name="Per-team limit", value=str(limit), inline=True)
         embed.add_field(name="Initiation quota", value=str(quota), inline=True)
