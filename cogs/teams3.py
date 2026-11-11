@@ -197,8 +197,7 @@ class TeamCommandsB:
         await ctx.reply(f"Team approval channel set to {channel.mention}.", mention_author=False)
 
     @commands.command(name="createteam")
-    @commands.guild_only()
-    async def create_team(self, ctx):
+    @commands.guild_only()    async def create_team(self, ctx):
         if await self._feature_blocked(ctx, "createteam"):
             return
         if self._membership(ctx.guild.id, ctx.author.id):
@@ -397,8 +396,7 @@ class TeamCommandsB:
                 f"I can't assign **{discord.utils.escape_markdown(role.name)}**. Give me Manage Roles and move my highest role above the team role. No players were added.",
                 mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none()
-            )
-            return
+            )            return
 
         try:
             squad_message = await ctx.channel.fetch_message(source.message_id)
@@ -597,8 +595,7 @@ class TeamCommandsB:
         await ctx.reply(f"Team chat sent to **{sent}** team member(s)." + (f" Could not DM **{failed}** member(s)." if failed else ""), mention_author=False)
 
     @commands.command(name="leaveteam")
-    @commands.guild_only()
-    async def leave_team(self, ctx):
+    @commands.guild_only()    async def leave_team(self, ctx):
         if await self._feature_blocked(ctx, "leaveteam"):
             return
         team = self._membership(ctx.guild.id, ctx.author.id)
@@ -775,27 +772,73 @@ class TeamCommandsB:
         if not await self._command_allowed(ctx, "kickplayer"):
             await ctx.reply("You are not allowed to use this command.", mention_author=False)
             return
-        member = await self._get_member(ctx.guild, target)
-        if member is None:
-            await ctx.reply("I couldn't find that server member. Use a mention, username, or ID.", mention_author=False)
-            return
+
+        # A departed member cannot be resolved as a Guild Member. Accept a
+        # mention/ID directly, then verify that ID against this team's roster.
+        id_match = re.fullmatch(r"<@!?(\\d+)>|@(\\d+)|(\\d+)", target.strip())
+        member = None
+        user_id = None
+        if id_match:
+            user_id = int(next(group for group in id_match.groups() if group))
+            member = ctx.guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await ctx.guild.fetch_member(user_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    # NotFound means they left; Forbidden/HTTPException should
+                    # not block an ID-based roster removal either.
+                    member = None
+        else:
+            member = await self._get_member(ctx.guild, target)
+            if member is None:
+                await ctx.reply(
+                    "I couldn't find that server member. For someone who has left, use their numeric Discord user ID.",
+                    mention_author=False
+                )
+                return
+            user_id = member.id
+
         team = self._team(ctx.guild.id, team_name)
         if not team or team["status"] != "approved":
             await ctx.reply("I couldn't find an approved team.", mention_author=False)
             return
-        if member.id == team["captain_id"]:
+        if user_id == int(team["captain_id"]):
             await ctx.reply("You can't kick the team captain. Change the captain first.", mention_author=False)
             return
-        cur = self.db.execute("DELETE FROM team_players WHERE team_id=? AND user_id=?", (team["id"], member.id))
+
+        cur = self.db.execute(
+            "DELETE FROM team_players WHERE team_id=? AND user_id=?",
+            (team["id"], user_id)
+        )
         if cur.rowcount == 0:
-            await ctx.reply(f"{member.name} isn't listed in **{team['name']}**.", mention_author=False)
+            await ctx.reply(f"User ID `{user_id}` isn't listed in **{team['name']}**.", mention_author=False)
             return
-        if team["vice_captain_id"] == member.id:
+
+        if team["vice_captain_id"] is not None and int(team["vice_captain_id"]) == user_id:
             self.db.execute("UPDATE registered_teams SET vice_captain_id=NULL WHERE id=?", (team["id"],))
         self.db.commit()
-        await self._remove_team_role(ctx.guild, team["id"], member)
-        await self._sync_base_role_member(ctx.guild, member)
-        await ctx.reply(f"Removed {member.name} from **{team['name']}**.", mention_author=False)
-        await self._dm(member, f"An administrator has removed you from **{team['name']}**.")
-        await self._dm_captain(ctx.guild, team, f"An administrator removed **{member.name}** from your team **{team['name']}**.")
 
+        # Discord role operations require a current Guild Member. Database
+        # removal still succeeds for departed users.
+        if member is not None:
+            await self._remove_team_role(ctx.guild, team["id"], member)
+            await self._sync_base_role_member(ctx.guild, member)
+
+        user = member or self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                user = None
+        player_name = user.name if user is not None else str(user_id)
+
+        await ctx.reply(
+            f"Removed **{discord.utils.escape_markdown(player_name)}** (`{user_id}`) from **{team['name']}**.",
+            mention_author=False
+        )
+        if user is not None:
+            await self._dm(user, f"An administrator has removed you from **{team['name']}**.")
+        await self._dm_captain(
+            ctx.guild, team,
+            f"An administrator removed **{discord.utils.escape_markdown(player_name)}** from your team **{team['name']}**."
+        )
