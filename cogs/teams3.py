@@ -197,7 +197,8 @@ class TeamCommandsB:
         await ctx.reply(f"Team approval channel set to {channel.mention}.", mention_author=False)
 
     @commands.command(name="createteam")
-    @commands.guild_only()    async def create_team(self, ctx):
+    @commands.guild_only()
+    async def create_team(self, ctx):
         if await self._feature_blocked(ctx, "createteam"):
             return
         if self._membership(ctx.guild.id, ctx.author.id):
