@@ -596,7 +596,8 @@ class TeamCommandsB:
         await ctx.reply(f"Team chat sent to **{sent}** team member(s)." + (f" Could not DM **{failed}** member(s)." if failed else ""), mention_author=False)
 
     @commands.command(name="leaveteam")
-    @commands.guild_only()    async def leave_team(self, ctx):
+    @commands.guild_only()
+    async def leave_team(self, ctx):
         if await self._feature_blocked(ctx, "leaveteam"):
             return
         team = self._membership(ctx.guild.id, ctx.author.id)
