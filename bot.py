@@ -39,6 +39,8 @@ class GoogIManagerBot(commands.Bot):
             "cogs.custom_image_commands",
             "cogs.mvp",
             "cogs.results",
+            "cogs.matchnumbers",
+            "cogs.autoresults",
             "cogs.dm",
             "cogs.noteam",
             "cogs.reserves",
