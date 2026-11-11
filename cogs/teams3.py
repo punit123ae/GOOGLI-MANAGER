@@ -778,7 +778,7 @@ class TeamCommandsB:
 
         # A departed member cannot be resolved as a Guild Member. Accept a
         # mention/ID directly, then verify that ID against this team's roster.
-        id_match = re.fullmatch(r"<@!?(\\d+)>|@(\\d+)|(\\d+)", target.strip())
+        id_match = re.fullmatch(r"<@!?(\d+)>|@(\d+)|(\d+)", target.strip())
         member = None
         user_id = None
         if id_match:
