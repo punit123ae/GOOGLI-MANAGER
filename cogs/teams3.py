@@ -397,7 +397,8 @@ class TeamCommandsB:
                 f"I can't assign **{discord.utils.escape_markdown(role.name)}**. Give me Manage Roles and move my highest role above the team role. No players were added.",
                 mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none()
-            )            return
+            )
+            return
 
         try:
             squad_message = await ctx.channel.fetch_message(source.message_id)
