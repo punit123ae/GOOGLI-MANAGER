@@ -53,6 +53,8 @@ class GoogIManagerBot(commands.Bot):
             "cogs.fielderlines",
             "cogs.team_emojis",
             "cogs.h2h",
+            "cogs.betting",
+            "cogs.reservenumbering",
         ):
             await self.load_extension(extension)
 
