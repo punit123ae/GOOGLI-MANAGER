@@ -533,6 +533,11 @@ class MatchDay(commands.Cog):
                 results.append(f"⚠️ **{label}** — one or both team roles were not found.")
                 continue
 
+            # Stop any existing captain-time negotiation in this stadium.
+            # This removes the channel from self.active, so further captain
+            # messages cannot trigger the time-confirmation embed.
+            self._supersede_open(channel.id)
+
             match_id = uuid.uuid4().hex[:8].upper()
             current = channel.overwrites_for(ctx.guild.default_role).send_messages
             original_send = None if current is None else int(current)
@@ -597,7 +602,27 @@ class MatchDay(commands.Cog):
                     f"**Match ID:** `{match_id}`",
                 )
 
-                # Force-announced matches bypass all captain prompts and negotiation tracking.
+                # Keep the regular captain DM opt-in prompts for force-announced matches.
+                try:
+                    prompt_count, prompt_errors = await scheduling.send_captain_prompts(
+                        ctx.guild,
+                        channel,
+                        {
+                            "id": match_id,
+                            "team_a_id": team_a.id,
+                            "team_b_id": team_b.id,
+                            "channel_id": channel.id,
+                            "start_time": start_time,
+                        },
+                    )
+                    results.append(
+                        f"✉️ **Captain DM options:** {prompt_count}/2 prompt(s) sent."
+                    )
+                    results.extend(f"⚠️ {error}" for error in prompt_errors)
+                except Exception as prompt_exc:
+                    results.append(
+                        f"⚠️ Match announced, but captain DM prompts could not be created: {prompt_exc}"
+                    )
 
             except discord.HTTPException as exc:
                 self.db.execute(
