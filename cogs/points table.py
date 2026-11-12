@@ -99,15 +99,106 @@ def connect_points_db():
             PRIMARY KEY (guild_id, match_no)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS points_settings (
+            guild_id INTEGER PRIMARY KEY,
+            stage_key TEXT NOT NULL
+        )
+    """)
     conn.commit()
     return conn
 
 
-def points_storage_key(conn, guild_id, team_name_key):
-    """Use the existing legacy key when stage migration prefixed the team key."""
+def _stage_list(guild_id):
+    """[(stage_key, stage_name)] of this server, oldest first."""
+    if not Path(GROUP_DB).is_file():
+        return []
+    conn = sqlite3.connect(GROUP_DB)
+    try:
+        rows = [(r[0], r[1]) for r in conn.execute(
+            "SELECT stage_key, stage_name FROM tournament_stages WHERE guild_id=? ORDER BY created_at, rowid",
+            (guild_id,))]
+        if not rows:    # stages table empty: fall back to the stage prefixes of the saved groups
+            seen = []
+            for (group_key,) in conn.execute(
+                    "SELECT group_key FROM group_styles WHERE guild_id=? ORDER BY position", (guild_id,)):
+                prefix = str(group_key).split("::", 1)[0] if "::" in str(group_key) else "stage 1"
+                if prefix not in seen:
+                    seen.append(prefix)
+            rows = [(k, k.title()) for k in seen]
+        return rows
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def first_stage_key(guild_id):
+    stages = _stage_list(guild_id)
+    return stages[0][0] if stages else None
+
+
+def find_stage(guild_id, text):
+    """(stage_key, stage_name) for what the owner typed (name or key, any case), else None."""
+    wanted = norm(text)
+    return next(((k, n) for k, n in _stage_list(guild_id) if norm(k) == wanted or norm(n) == wanted), None)
+
+
+def get_active_stage(guild_id):
+    """(stage_key, stage_name) that +points shows and +setpt / +addresult / +syncresult record into:
+    the one chosen with +pointsstage, otherwise the newest stage that already has teams assigned."""
+    stages = _stage_list(guild_id)
+    if not stages:
+        return None
+    conn = connect_points_db()
+    try:
+        row = conn.execute("SELECT stage_key FROM points_settings WHERE guild_id=?", (guild_id,)).fetchone()
+    finally:
+        conn.close()
+    if row:
+        chosen = next((s for s in stages if s[0] == row["stage_key"]), None)
+        if chosen:
+            return chosen
+    with_teams = set()
+    gconn = sqlite3.connect(GROUP_DB)
+    try:
+        for (group_key,) in gconn.execute("SELECT DISTINCT group_key FROM team_groups WHERE guild_id=?", (guild_id,)):
+            with_teams.add(str(group_key).split("::", 1)[0])
+    except sqlite3.Error:
+        pass
+    finally:
+        gconn.close()
+    for stage in reversed(stages):
+        if stage[0] in with_teams:
+            return stage
+    return stages[0]
+
+
+def set_active_stage(guild_id, stage_key):
+    conn = connect_points_db()
+    try:
+        conn.execute(
+            "INSERT INTO points_settings (guild_id, stage_key) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET stage_key=excluded.stage_key",
+            (guild_id, stage_key))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def points_storage_key(conn, guild_id, team_name_key, legacy_ok=None):
+    """Key a team's W/L is stored under.
+
+    Only the FIRST stage may reuse the old un-prefixed key (that is where the points from before
+    stages existed live). Every other stage has its own key, so a team that plays in Stage 1 and
+    Stage 2 has separate points in each."""
     candidates = [team_name_key]
     if "::" in team_name_key:
-        candidates.append(team_name_key.split("::", 1)[1])
+        prefix, rest = team_name_key.split("::", 1)
+        if legacy_ok is None:
+            legacy_ok = prefix == first_stage_key(guild_id)
+        if legacy_ok:
+            candidates.append(rest)
 
     for candidate in candidates:
         found = conn.execute(
@@ -293,10 +384,11 @@ def cache_file(guild_id, group_key):
 class PointsPagesView(discord.ui.View):
     """Prev / Next buttons that flip between the saved group images."""
 
-    def __init__(self, owner_id, pages):
+    def __init__(self, owner_id, pages, stage_name=""):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         self.pages = pages          # list of (group_name, png_bytes)
+        self.stage_name = stage_name
         self.index = 0
         self.message = None
 
@@ -306,7 +398,8 @@ class PointsPagesView(discord.ui.View):
         return discord.File(io.BytesIO(data), filename=f"points_{safe}.png")
 
     def content(self):
-        return f"Page {self.index + 1}/{len(self.pages)}"
+        head = f"**{self.stage_name}** · " if self.stage_name else ""
+        return f"{head}Page {self.index + 1}/{len(self.pages)}"
 
     async def interaction_check(self, interaction):
         if interaction.user.id == self.owner_id:
@@ -449,8 +542,9 @@ class PointsTable(commands.Cog):
                 histories.setdefault(history_row["team_name_key"], []).append(
                     history_row["result"]
                 )
+            legacy_ok = str(group_key).split("::", 1)[0] == first_stage_key(guild_id)
             storage_keys = {
-                team["team_name_key"]: points_storage_key(points_conn, guild_id, team["team_name_key"])
+                team["team_name_key"]: points_storage_key(points_conn, guild_id, team["team_name_key"], legacy_ok)
                 for team in teams
             }
         finally:
@@ -490,18 +584,30 @@ class PointsTable(commands.Cog):
 
         return group["group_name"], rows
 
-    def _configured_groups(self, guild_id):
+    def _configured_groups(self, guild_id, stage_key=None):
+        """Groups of the server (one stage when stage_key is given), in group order."""
         group_conn = sqlite3.connect(GROUP_DB)
         group_conn.row_factory = sqlite3.Row
         try:
+            if stage_key is None:
+                return group_conn.execute(
+                    """
+                    SELECT group_key, group_name
+                    FROM group_styles
+                    WHERE guild_id=?
+                    ORDER BY position
+                    """,
+                    (guild_id,),
+                ).fetchall()
+            prefix = stage_key + "::"
             return group_conn.execute(
                 """
                 SELECT group_key, group_name
                 FROM group_styles
-                WHERE guild_id=?
+                WHERE guild_id=? AND substr(group_key, 1, ?) = ?
                 ORDER BY position
                 """,
-                (guild_id,),
+                (guild_id, len(prefix), prefix),
             ).fetchall()
         finally:
             group_conn.close()
@@ -549,42 +655,14 @@ class PointsTable(commands.Cog):
             )
             return
 
-        group_conn = sqlite3.connect(GROUP_DB)
-        group_conn.row_factory = sqlite3.Row
-        try:
-            team = group_conn.execute(
-                """
-                SELECT team_name, team_name_key, group_key
-                FROM team_groups
-                WHERE guild_id=? AND team_name_key=?
-                """,
-                (ctx.guild.id, norm(team_name)),
-            ).fetchone()
-
-            if team is None:
-                candidates = group_conn.execute(
-                    """
-                    SELECT team_name, team_name_key, group_key
-                    FROM team_groups
-                    WHERE guild_id=?
-                    """,
-                    (ctx.guild.id,),
-                ).fetchall()
-
-                team = next(
-                    (
-                        item for item in candidates
-                        if norm(item["team_name"]) == norm(team_name)
-                    ),
-                    None,
-                )
-        finally:
-            group_conn.close()
+        stage = get_active_stage(ctx.guild.id)
+        stage_label = stage[1] if stage else "?"
+        team = self._find_team(ctx.guild.id, team_name)
 
         if team is None:
             await ctx.reply(
-                "I couldn't find that team in `+setteamgroups`. "
-                "Check the exact team name and try again.",
+                f"I couldn't find that team in **{stage_label}** (`+setteamgroups {stage_label}`). "
+                "Check the exact team name, or pick another stage with `+pointsstage`.",
                 mention_author=False,
             )
             return
@@ -647,7 +725,7 @@ class PointsTable(commands.Cog):
         await self._sync_points_images(ctx.guild.id)
 
         await ctx.reply(
-            f"✅ Updated **{team['team_name']}** in Group **{group_name}**.\n"
+            f"✅ Updated **{team['team_name']}** in **{stage_label}** · Group **{group_name}**.\n"
             f"Wins: **{wins}** | Losses: **{losses}** | "
             f"Points: **{wins * POINTS_PER_WIN}** (2 per win).",
             mention_author=False,
@@ -695,9 +773,13 @@ class PointsTable(commands.Cog):
             return None, "The winner listed in the result doesn't match either team."
         return (match_no, team_a, team_b, winner), None
 
-    def _find_team(self, guild_id, name):
-        """Look a team up in +setteamgroups by name or key."""
+    def _find_team(self, guild_id, name, stage_key=None):
+        """Look a team up in +setteamgroups by name or key - inside the points stage only
+        (the one from +pointsstage), so the same team in two stages never gets mixed up."""
         key = norm(name)
+        if stage_key is None:
+            stage = get_active_stage(guild_id)
+            stage_key = stage[0] if stage else None
         conn = sqlite3.connect(GROUP_DB)
         conn.row_factory = sqlite3.Row
         try:
@@ -707,6 +789,9 @@ class PointsTable(commands.Cog):
             ).fetchall()
         finally:
             conn.close()
+        if stage_key is not None:
+            prefix = stage_key + "::"
+            rows = [r for r in rows if str(r["group_key"]).startswith(prefix)]
         return next(
             (r for r in rows if norm(r["team_name"]) == key or norm(r["team_name_key"]) == key),
             None,
@@ -854,8 +939,11 @@ class PointsTable(commands.Cog):
         loser = self._find_team(guild_id, loser_name)
         if winner is None or loser is None:
             missing = winner_name if winner is None else loser_name
+            stage = get_active_stage(guild_id)
+            where = f" in **{stage[1]}**" if stage else ""
             return ("error", match_no, winner_name, loser_name,
-                    f"team **{missing}** isn't assigned with `+setteamgroups`")
+                    f"team **{missing}** isn't assigned with `+setteamgroups`{where} "
+                    "(another stage? `+pointsstage <stage name>`)")
         if winner["team_name_key"] == loser["team_name_key"]:
             return "error", match_no, winner_name, loser_name, "both teams resolved to the same team"
 
@@ -1366,20 +1454,46 @@ class PointsTable(commands.Cog):
             lines.append(f"• ...and {len(missing) - len(shown)} more")
         await ctx.reply("\n".join(lines)[:1900], mention_author=False)
 
+    def _stage_storage_keys(self, guild_id, stage_key, conn):
+        """Storage keys of every team assigned in one stage."""
+        prefix = stage_key + "::"
+        gconn = sqlite3.connect(GROUP_DB)
+        try:
+            rows = gconn.execute(
+                "SELECT team_name_key FROM team_groups WHERE guild_id=? AND substr(group_key, 1, ?) = ?",
+                (guild_id, len(prefix), prefix)).fetchall()
+        finally:
+            gconn.close()
+        legacy_ok = stage_key == first_stage_key(guild_id)
+        return {points_storage_key(conn, guild_id, r[0], legacy_ok) for r in rows}
+
     @commands.command(name="resetpt", aliases=["resetpoints"])
     @commands.guild_only()
-    async def reset_points(self, ctx):
-        """Wipe the whole points table (W/L, form, imported matches)."""
+    async def reset_points(self, ctx, *, scope: str = None):
+        """Reset points: +resetpt (the current points stage), +resetpt <stage name>, +resetpt all."""
         if not await self._allowed(ctx):
             return
 
+        text = (scope or "").strip()
+        if text.casefold() == "all":
+            stage = None
+        elif text:
+            stage = find_stage(ctx.guild.id, text)
+            if stage is None:
+                names = ", ".join(n for _, n in _stage_list(ctx.guild.id)) or "none"
+                await ctx.reply(f"I couldn't find a stage called **{text}**. Stages: {names}", mention_author=False)
+                return
+        else:
+            stage = get_active_stage(ctx.guild.id)
+
+        if stage is None:
+            warning = ("⚠️ This will reset **every team's** W/L/points and form, and forget all "
+                       "imported matches for this server. This can't be undone.")
+        else:
+            warning = (f"⚠️ This will reset the W/L/points and form of every team in **{stage[1]}** and forget "
+                       f"its imported matches. Other stages are not touched. This can't be undone.")
         view = ConfirmResetView(ctx.author.id)
-        view.message = await ctx.reply(
-            "⚠️ This will reset **every team's** W/L/points and form, and forget all "
-            "imported matches for this server. This can't be undone.",
-            view=view,
-            mention_author=False,
-        )
+        view.message = await ctx.reply(warning, view=view, mention_author=False)
         await view.wait()
 
         if view.confirmed is not True:
@@ -1392,24 +1506,39 @@ class PointsTable(commands.Cog):
 
         conn = connect_points_db()
         try:
-            for table in ("team_points", "team_match_history", "imported_match_results"):
-                conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (ctx.guild.id,))
+            if stage is None:
+                for table in ("team_points", "team_match_history", "imported_match_results"):
+                    conn.execute(f"DELETE FROM {table} WHERE guild_id=?", (ctx.guild.id,))
+            else:
+                for key in self._stage_storage_keys(ctx.guild.id, stage[0], conn):
+                    conn.execute("DELETE FROM team_points WHERE guild_id=? AND team_name_key=?",
+                                 (ctx.guild.id, key))
+                    conn.execute("DELETE FROM team_match_history WHERE guild_id=? AND team_name_key=?",
+                                 (ctx.guild.id, key))
+                    conn.execute("DELETE FROM imported_match_results WHERE guild_id=? "
+                                 "AND (winner_team_key=? OR loser_team_key=?)", (ctx.guild.id, key, key))
             conn.commit()
         finally:
             conn.close()
 
         if CACHE_DIR.exists():
-            for old in CACHE_DIR.glob(f"points_{ctx.guild.id}_*.png"):
+            if stage is None:
+                old_files = list(CACHE_DIR.glob(f"points_{ctx.guild.id}_*.png"))
+            else:
+                old_files = [cache_file(ctx.guild.id, g["group_key"])
+                             for g in self._configured_groups(ctx.guild.id, stage[0])]
+            for old in old_files:
                 try:
                     old.unlink()
                 except OSError:
                     pass
         await self._sync_points_images(ctx.guild.id)
 
+        done = "✅ Points table reset" + (f" for **{stage[1]}**" if stage else "") + ". Everyone is back to 0."
         try:
-            await view.message.edit(content="✅ Points table reset. Everyone is back to 0.", view=None)
+            await view.message.edit(content=done, view=None)
         except discord.HTTPException:
-            await ctx.send("✅ Points table reset. Everyone is back to 0.")
+            await ctx.send(done)
 
     @commands.command(name="addresult")
     @commands.guild_only()
@@ -1434,7 +1563,10 @@ class PointsTable(commands.Cog):
 
         team = self._find_team(ctx.guild.id, parts[0])
         if team is None:
-            await ctx.reply("I couldn't find that team in `+setteamgroups`.", mention_author=False)
+            stage = get_active_stage(ctx.guild.id)
+            where = f" **{stage[1]}**" if stage else ""
+            await ctx.reply(f"I couldn't find that team in{where} (`+setteamgroups`). "
+                            "Another stage? Use `+pointsstage <stage name>`.", mention_author=False)
             return
 
         conn = connect_points_db()
@@ -1464,27 +1596,73 @@ class PointsTable(commands.Cog):
             mention_author=False,
         )
 
+    @commands.command(name="pointsstage", aliases=["setpointsstage", "ptstage"])
+    @commands.guild_only()
+    async def points_stage(self, ctx, *, stage_name: str = None):
+        """Show or choose the stage that +setpt / +addresult / +syncresult record into (and +points shows)."""
+        stages = _stage_list(ctx.guild.id)
+        if not stages:
+            await ctx.reply("No stages exist yet. Create one with `+createnewstage <name>`.", mention_author=False)
+            return
+        active = get_active_stage(ctx.guild.id)
+        if not stage_name or not stage_name.strip():
+            listing = " · ".join(f"**{n}**" if k == active[0] else n for k, n in stages)
+            await ctx.reply(f"Points stage: **{active[1]}**\nStages: {listing}\n"
+                            "Change it with `+pointsstage <stage name>`. "
+                            "(`+points <stage name>` shows any stage without changing it.)",
+                            mention_author=False)
+            return
+        if not await self._allowed(ctx):
+            return
+        stage = find_stage(ctx.guild.id, stage_name)
+        if stage is None:
+            await ctx.reply(f"I couldn't find a stage called **{stage_name.strip()}**. "
+                            f"Stages: {', '.join(n for _, n in stages)}", mention_author=False)
+            return
+        set_active_stage(ctx.guild.id, stage[0])
+        await ctx.reply(f"✅ Points stage is now **{stage[1]}**. `+points`, `+setpt`, `+addresult` and "
+                        "`+syncresult` use it.", mention_author=False)
+
     @commands.command(name="points")
     @commands.guild_only()
-    async def points(self, ctx):
-        """Show the points table: one page per group (A, B, C), flip with the buttons."""
-        configured = self._configured_groups(ctx.guild.id)
+    async def points(self, ctx, *, stage_name: str = None):
+        """Show a stage's points table: +points [stage name]. One page per group (A, B, C)."""
+        stages = _stage_list(ctx.guild.id)
+        if stage_name and stage_name.strip():
+            stage = find_stage(ctx.guild.id, stage_name)
+            if stage is None:
+                names = ", ".join(n for _, n in stages) or "none"
+                await ctx.reply(f"I couldn't find a stage called **{stage_name.strip()}**. Stages: {names}",
+                                mention_author=False)
+                return
+        else:
+            stage = get_active_stage(ctx.guild.id)
+        if stage is None:
+            await ctx.reply("No stages or groups are configured. Run `+groupstyle` and "
+                            "`+setteamgroups` first.", mention_author=False)
+            return
+        stage_key, stage_label = stage
+        configured = self._configured_groups(ctx.guild.id, stage_key)
 
         if not configured:
             await ctx.reply(
-                "No groups are configured. Run `+groupstyle` and "
-                "`+setteamgroups` first.",
+                f"No groups are configured for **{stage_label}**. Run `+groupstyle {stage_label}` and "
+                f"`+setteamgroups {stage_label}` first.",
                 mention_author=False,
             )
             return
 
         pages = []
         try:
+            # Images are re-drawn only when something changed: results (+addresult / +setpt ...) or the
+            # groups / teams (+setteamgroups etc. touch the groups database, so a newer database = redraw).
+            groups_changed = Path(GROUP_DB).stat().st_mtime
+            redrawn = False
             for group in configured:
                 path = cache_file(ctx.guild.id, group["group_key"])
-                if not path.exists():
-                    # First use only: draw the tables if their cached images are missing.
+                if not redrawn and (not path.exists() or path.stat().st_mtime < groups_changed):
                     await self._sync_points_images(ctx.guild.id)
+                    redrawn = True
                 if path.exists():
                     pages.append((group["group_name"], path.read_bytes()))
         except (OSError, sqlite3.Error) as exc:
@@ -1496,17 +1674,18 @@ class PointsTable(commands.Cog):
 
         if not pages:
             await ctx.reply(
-                "No group has assigned teams yet. Run `+setteamgroups` first.",
+                f"No group in **{stage_label}** has assigned teams yet. Run `+setteamgroups {stage_label}` first.",
                 mention_author=False,
             )
             return
 
         if len(pages) == 1:
             name, data = pages[0]
-            await ctx.send(file=discord.File(io.BytesIO(data), filename="points_table.png"))
+            await ctx.send(content=f"**{stage_label}**",
+                           file=discord.File(io.BytesIO(data), filename="points_table.png"))
             return
 
-        view = PointsPagesView(ctx.author.id, pages)
+        view = PointsPagesView(ctx.author.id, pages, stage_label)
         view.message = await ctx.send(
             content=view.content(), file=view._file(), view=view
         )
