@@ -34,7 +34,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.stats",
             "cogs.lb",
             "cogs.teams1",
-            "cogs.teamleaders"
+            "cogs.teamleaders",
             "cogs.predictions",
             "cogs.draws",
             "cogs.custom_image_commands",
