@@ -597,29 +597,7 @@ class MatchDay(commands.Cog):
                     f"**Match ID:** `{match_id}`",
                 )
 
-
-                # Give both registered team captains the same opt-in DM choice
-                # used by regular scheduled matches.
-                try:
-                    prompt_count, prompt_errors = await scheduling.send_captain_prompts(
-                        ctx.guild,
-                        channel,
-                        {
-                            "id": match_id,
-                            "team_a_id": team_a.id,
-                            "team_b_id": team_b.id,
-                            "channel_id": channel.id,
-                            "start_time": start_time,
-                        },
-                    )
-                    results.append(
-                        f"✉️ **Captain DM options:** {prompt_count}/2 prompt(s) sent."
-                    )
-                    results.extend(f"⚠️ {error}" for error in prompt_errors)
-                except Exception as prompt_exc:
-                    results.append(
-                        f"⚠️ Match announced, but captain DM prompts could not be created: {prompt_exc}"
-                    )
+                # Force-announced matches bypass all captain prompts and negotiation tracking.
 
             except discord.HTTPException as exc:
                 self.db.execute(
