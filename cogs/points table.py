@@ -1375,6 +1375,125 @@ class PointsTable(commands.Cog):
             mention_author=False,
         )
 
+    @commands.command(name="editmatchno", aliases=["fixmatchno"])
+    @commands.guild_only()
+    async def edit_match_number(self, ctx, new_number: str = ""):
+        """Change the match number of a result post: reply to the bot's post, +editmatchno 34.
+
+        Rewrites `Match 33` to `Match 34` in the post and, if that post was already in the
+        points table, moves its row and form history to the new number. Stops without changing
+        anything if the new number is already in the table.
+        """
+        if not await self._allowed(ctx):
+            return
+
+        new_no = new_number.strip().lstrip("#")
+        replied = await self._get_replied_message(ctx)
+        if replied is None or not re.fullmatch(r"\w{1,10}", new_no):
+            await ctx.reply("Reply to the bot's result post, then run `+editmatchno <new number>`.\n"
+                            "Example: `+editmatchno 34`", mention_author=False)
+            return
+        if replied.guild is None or replied.guild.id != ctx.guild.id:
+            await ctx.reply("The result message must be from this server.", mention_author=False)
+            return
+        if replied.author.id != self.bot.user.id:
+            await ctx.reply("I can only edit my own messages.", mention_author=False)
+            return
+
+        content = replied.content or ""
+        parsed, error = self._parse_result(content)
+        header = HEADER_RE.search(content)
+        if parsed is None or header is None:
+            await ctx.reply(f"{error or 'No result found.'}\nI can only edit result posts that are plain message text.",
+                            mention_author=False)
+            return
+        old_no, team_a, team_b, winner_name = parsed
+        if norm(old_no) == norm(new_no):
+            await ctx.reply(f"That post is already Match **{new_no}**.", mention_author=False)
+            return
+        loser_name = team_b if norm(winner_name) == norm(team_a) else team_a
+        winner = self._find_team(ctx.guild.id, winner_name)
+        loser = self._find_team(ctx.guild.id, loser_name)
+        gid = ctx.guild.id
+
+        table_note = "Points table: this post wasn't in it, so nothing to move."
+        moved = False
+        old_still_in_table = False
+        conn = connect_points_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM imported_match_results WHERE guild_id=? AND match_no=?",
+                            (gid, new_no)).fetchone():
+                conn.rollback()
+                await ctx.reply(f"Match **{new_no}** already exists in the points table, so I stopped. "
+                                "Nothing was changed.", mention_author=False)
+                return
+            old = conn.execute("SELECT winner_team_key, loser_team_key FROM imported_match_results "
+                               "WHERE guild_id=? AND match_no=?", (gid, old_no)).fetchone()
+            if old and (winner is None or loser is None):
+                old_still_in_table = True
+                table_note = ("⚠️ I couldn't match the teams in this post with `+setteamgroups` "
+                              "(another stage? `+pointsstage <stage name>`), so I left the table alone.")
+            elif old:
+                w_key = points_storage_key(conn, gid, winner["team_name_key"])
+                l_key = points_storage_key(conn, gid, loser["team_name_key"])
+                if old["winner_team_key"] == w_key and old["loser_team_key"] == l_key:
+                    conn.execute("UPDATE imported_match_results SET match_no=? WHERE guild_id=? AND match_no=?",
+                                 (new_no, gid, old_no))
+                    conn.execute("UPDATE team_match_history SET match_no=? WHERE guild_id=? AND match_no=? "
+                                 "AND team_name_key IN (?, ?)", (new_no, gid, old_no, w_key, l_key))
+                    moved = True
+                    table_note = f"Points table moved from match {old_no} to {new_no}."
+                else:
+                    old_still_in_table = True
+                    table_note = (f"⚠️ Match {old_no} in the points table belongs to different teams, "
+                                  "so I left the table alone.")
+            conn.commit()
+        except sqlite3.Error:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        # Keep the +result duplicate guard in step. The old number is only released when the
+        # points table no longer has a different match under it.
+        results_cog = self.bot.get_cog("ResultsCog")
+        if results_cog is not None:
+            results_cog._published_results.add((gid, str(new_no)))
+            if not old_still_in_table:
+                results_cog._published_results.discard((gid, str(old_no)))
+
+        # Tell +autoresult the new number is already posted so it doesn't post it a second time.
+        # (The old number's marker is left alone: a +result post never sets it, so a marker
+        # under the old number belongs to a different post.)
+        if new_no.isdigit():
+            try:
+                ac = sqlite3.connect("auto_results.db")
+                try:
+                    ac.execute("INSERT OR IGNORE INTO auto_posted (guild_id, match_no) VALUES (?, ?)",
+                               (gid, int(new_no)))
+                    ac.commit()
+                finally:
+                    ac.close()
+            except sqlite3.Error:
+                pass
+
+        new_content = content[:header.start(1)] + new_no + content[header.end(1):]
+        edit_ok = True
+        try:
+            await replied.edit(content=new_content)
+        except discord.HTTPException:
+            edit_ok = False
+        if moved:
+            await self._sync_points_images(gid)
+
+        await ctx.reply(
+            f"✅ Match **{old_no}** → **{new_no}**. "
+            + ("Result post edited. " if edit_ok else "⚠️ I couldn't edit the message (missing permission?). ")
+            + table_note,
+            mention_author=False,
+        )
+
     @commands.command(name="missingresults", aliases=["missing"])
     @commands.guild_only()
     async def missing_results(self, ctx, total: int = 0):
