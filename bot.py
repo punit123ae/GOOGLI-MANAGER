@@ -56,6 +56,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.h2h",
             "cogs.betting",
             "cogs.reservenumbering",
+            "cogs.batcatches",
         ):
             await self.load_extension(extension)
 
