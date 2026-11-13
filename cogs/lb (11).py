@@ -23,9 +23,9 @@ from .lb_card import render_card
 
 BLUE = discord.Colour.from_rgb(20, 117, 255)
 
-# Batter-impact metrics live in the Batting category but come from batfds' table.
-# Value = index into (runs_after_drops, runs_without_drops, catches_dropped).
-BATTER_IMPACT_KEYS = {"bi_after": 0, "bi_without": 1, "bi_drops": 2}
+# Batter-side catch metrics live in the Batting category but come from batcatches' table.
+# Value = index into (catches_dropped, catches_taken) as a batter.
+BATTER_IMPACT_KEYS = {"bc_dropped": 0, "bc_taken": 1}
 # Stats imports less than this far apart belong to the same matchday. An import
 # made after a longer gap starts a new matchday, and the movement arrows then
 # show how the latest matchday changed the standings.
@@ -44,14 +44,14 @@ METRICS = {
         ("highest", "Highest Runs"),
         ("lowest_strike_rate", "Lowest Strike Rate (minimum 50 runs)"),
         ("strike_rate", "Highest Strike Rate (minimum 50 runs)"),
-        ("bi_after", "Most Runs After Catch Drops"),
-        ("bi_without", "Most Runs Without Catch Drops"),
-        ("bi_drops", "Most Catches Dropped (as Batter)"),
+        ("bc_dropped", "Most Catches Dropped (as Batter)"),
+        ("bc_taken", "Most Catches Taken (as Batter)"),
     ],
     "Bowling": [
         ("wickets", "Wickets"),
-        ("bowl_avg", "Average"),
-        ("economy", "Economy"),
+        ("bowl_avg", "Average (minimum 10 wickets)"),
+        ("bowl_sr", "Strike Rate (minimum 10 wickets)"),
+        ("economy", "Economy (minimum 10 overs)"),
         ("best_figures", "Bowling Figures"),
         ("overs", "Most Overs Bowled"),
         ("runs_leaked", "Most Runs Leaked"),
@@ -218,7 +218,11 @@ def _eligible(key: str, rows: list[dict]) -> bool:
         if key == "ducks":
             return any(r["runs"] == 0 and not r["not_out"] for r in rows)
         return t["runs"] > 0
-    if key in ("wickets", "bowl_avg", "economy", "best_figures", "bowl_sr", "overs", "runs_leaked"):
+    if key in ("bowl_avg", "bowl_sr"):
+        return t["wickets"] >= 10
+    if key == "economy":
+        return t["balls_bowled"] >= 60  # 10 overs
+    if key in ("wickets", "best_figures", "overs", "runs_leaked"):
         return t["balls_bowled"] > 0 or t["wickets"] > 0
     return bool(rows)
 
@@ -351,7 +355,7 @@ def _sort_key(key: str, value: Any):
         return (-value[0], -value[2])
     if key == "lowest_strike_rate":
         return (value,)
-    if key in ("bowl_avg", "economy"):
+    if key in ("bowl_avg", "bowl_sr", "economy"):
         return (value == 0, value)
     if key == "best_figures":
         return (-value[0], value[1])
@@ -492,7 +496,7 @@ class LeaderboardView(discord.ui.View):
         return embed
 
     def _generic_ranking(self, rows_by_user: dict[int, list[dict]]) -> list[tuple[int, Any]]:
-        """Ranking for the metrics that come from imported match rows (everything except fielding/batter-impact)."""
+        """Ranking for the metrics that come from imported match rows (everything except fielding/batter-catches)."""
         computed = []
         for uid, rows in rows_by_user.items():
             if not _eligible(self.metric_key, rows):
@@ -556,7 +560,7 @@ class LeaderboardView(discord.ui.View):
 
         * Match-based statistics are rebuilt from the match history: rank before
           the latest matchday vs rank now.
-        * Batter-impact statistics have no match history, so their ranks are
+        * Batter-catch statistics have no match history, so their ranks are
           saved and the arrows refreshed the first time +lb is opened after a
           new matchday starts.
         """
@@ -660,7 +664,7 @@ class LeaderboardView(discord.ui.View):
 
         # All image leaderboard metrics use saved rank snapshots. Match-based
         # metrics bootstrap their first snapshot from the standings before the
-        # latest import session; batter-impact metrics start with a neutral baseline.
+        # latest import session; batter-catch metrics start with a neutral baseline.
         rank_deltas = self._rank_deltas(computed)
         total = len(computed)
         pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -743,7 +747,7 @@ class LeaderboardCog(commands.Cog):
         self.bot = bot
         self.rows_by_user: dict[int, list[dict]] = {}
         self.fielding_by_user: dict[int, tuple[int, int]] = {}
-        self.batter_impact_by_user: dict[int, tuple[int, int, int]] = {}
+        self.batter_impact_by_user: dict[int, tuple[int, int]] = {}
         self._avatar_cache: dict[str, bytes | None] = {}
         self.latest_match_id: int | None = None
 
@@ -769,24 +773,21 @@ class LeaderboardCog(commands.Cog):
         """Fetch the server icon for the card's top-left corner."""
         return await self._asset_bytes(guild.icon if guild is not None else None)
 
-    def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int, int]]:
-        """Return {user_id: (runs_affected, runs_without_drops, drops)} for this server."""
+    def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
+        """{user_id: (catches_dropped, catches_taken)} as a batter, from batter_catch_events."""
         db = getattr(self.bot, "db", None)
         if db is None:
             return {}
         try:
             rows = db.execute(
-                "SELECT user_id, runs_affected, runs_without_drops, drops "
-                "FROM batter_drop_lb WHERE guild_id = ?",
+                "SELECT user_id, SUM(result='dropped'), SUM(result='taken') "
+                "FROM batter_catch_events WHERE guild_id = ? GROUP BY user_id",
                 (guild_id,),
             ).fetchall()
         except Exception:
-            # batfds may not have been loaded yet; keep the rest of +lb usable.
+            # batcatches may not have been loaded yet; keep the rest of +lb usable.
             return {}
-        return {
-            int(row["user_id"]): (int(row["runs_affected"]), int(row["runs_without_drops"]), int(row["drops"]))
-            for row in rows
-        }
+        return {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
 
     def _fielding_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
         """Persistent fielding totals for this server only: {user_id: (caught, dropped)}."""
@@ -825,7 +826,7 @@ class LeaderboardCog(commands.Cog):
                 (guild_id, time.time()),
             )
 
-            # Batter-impact stats keep saved ranks: seed them with the current
+            # Batter-catch stats keep saved ranks: seed them with the current
             # positions and zero movement for the current matchday.
             day_token = LeaderboardView(self, ctx)._checkpoints(db, guild_id)[0]
             seeded = 0

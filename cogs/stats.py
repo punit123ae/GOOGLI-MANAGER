@@ -1,4 +1,3 @@
-
 import asyncio
 import io
 import re
@@ -1294,11 +1293,24 @@ class Stats(commands.Cog):
             return 0
         return int(row[0]) if row else 0
 
+    def get_batter_catches(self, guild_id, user_id):
+        """(catches_dropped, catches_taken) as a batter, from batter_catch_events."""
+        try:
+            row = self.db.execute(
+                "SELECT SUM(result='dropped'), SUM(result='taken') FROM batter_catch_events "
+                "WHERE guild_id=? AND user_id=?",
+                (int(guild_id), int(user_id)),
+            ).fetchone()
+        except Exception:
+            # batcatches may not have created its table yet.
+            return 0, 0
+        return (int(row[0] or 0), int(row[1] or 0)) if row else (0, 0)
+
     def get_batter_impact(self, guild_id, user_id):
         """Return (runs_after_catch_drops, runs_without_catch_drops) for this server/player.
 
-        Same table and columns the +lb "Batter Impact" category reads
-        (batter_drop_lb.runs_affected / runs_without_drops).
+        Same table and columns the +lb "Batter Impact" category used to read
+        (batter_drop_lb.runs_affected / runs_without_drops). No longer shown in +stats.
         """
         try:
             row = self.db.execute(
@@ -1923,8 +1935,7 @@ class Stats(commands.Cog):
         catches_caught, catches_dropped, fielding_points = self.get_fielding_stats(
             ctx.guild.id, member.id
         )
-        runs_after_drops, runs_without_drops = self.get_batter_impact(ctx.guild.id, member.id)
-        batter_drops = self.get_batter_drops(ctx.guild.id, member.id)
+        batter_drops, batter_taken = self.get_batter_catches(ctx.guild.id, member.id)
 
         try:
             if design == 2:
@@ -2104,9 +2115,8 @@ class Stats(commands.Cog):
             value=(
                 f"**Innings:** `{t['matches']}`\n"
                 f"**Runs:** `{t['runs']}`\n"
-                f"**Runs without catch drops:** `{runs_without_drops}`\n"
-                f"**Runs after catch drops:** `{runs_after_drops}`\n"
                 f"**Catches dropped (as batter):** `{batter_drops}`\n"
+                f"**Catches taken (as batter):** `{batter_taken}`\n"
                 f"**Balls played:** `{t['balls_faced']}`\n"
                 f"**Strike rate:** `{t['strike_rate']:.2f}`\n"
                 f"**Average:** `{t['bat_avg']:.2f}`\n"
@@ -2125,6 +2135,7 @@ class Stats(commands.Cog):
                 f"**Wickets:** `{t['wickets']}`\n"
                 f"**Balls bowled:** `{t['balls_bowled']}`\n"
                 f"**Average:** `{t['bowl_avg']:.2f}`\n"
+                f"**Strike rate:** `{t['bowl_sr']:.2f}`\n"
                 f"**Economy:** `{t['economy']:.2f}`\n"
                 f"**3W hauls:** `{sum(3 <= r['wickets'] < 5 for r in rows)}`\n"
                 f"**5W hauls:** `{sum(5 <= r['wickets'] < 7 for r in rows)}`\n"
