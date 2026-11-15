@@ -483,28 +483,70 @@ class Groups(commands.Cog):
         except (FileNotFoundError, sqlite3.Error) as exc:
             await ctx.send(f"Database error: {exc}")
             return
-        if not teams:
-            await ctx.send("There are no approved teams.")
-            return
-        await ctx.send("**Approved teams available for " + stage_name + ":**\n" +
-                       "\n".join(f"`{i}`. {name}" for i, (name, _) in enumerate(teams, 1)))
-        msg = await ask_owner(ctx, "Enter only the team numbers to include, separated by commas (example: 1, 3, 5). Type cancel to stop.")
+        if teams:
+            await ctx.send("**Approved teams available for " + stage_name + ":**\n" +
+                           "\n".join(f"`{i}`. {name}" for i, (name, _) in enumerate(teams, 1)))
+            msg = await ask_owner(
+                ctx,
+                "Enter only the team numbers to include, separated by commas (example: 1, 3, 5). "
+                "Type `none` to use no registered teams. Type cancel to stop.",
+            )
+            if msg is None or norm(msg.content) == "cancel":
+                await ctx.send("Cancelled. No assignments changed.")
+                return
+            if norm(msg.content) == "none":
+                indexes = []
+            else:
+                try:
+                    indexes = [int(x.strip()) for x in msg.content.split(",") if x.strip()]
+                    if not indexes or len(indexes) != len(set(indexes)) or any(i < 1 or i > len(teams) for i in indexes):
+                        raise ValueError
+                except ValueError:
+                    await ctx.send("Invalid selection. Use unique team numbers separated by commas, or `none`.")
+                    return
+        else:
+            await ctx.send("There are no approved teams, so only unregistered teams can be added.")
+            indexes = []
+        selected = [(teams[i - 1][0], teams[i - 1][1], False) for i in indexes]
+
+        # Unregistered teams: name-only entries, any number of them.
+        msg = await ask_owner(
+            ctx,
+            "Do you want to add **unregistered teams** too? Send their names separated by commas "
+            "(example: Team Alpha, Team Beta), or type `none`. Type cancel to stop.",
+        )
         if msg is None or norm(msg.content) == "cancel":
             await ctx.send("Cancelled. No assignments changed.")
             return
-        try:
-            indexes = [int(x.strip()) for x in msg.content.split(",") if x.strip()]
-            if not indexes or len(indexes) != len(set(indexes)) or any(i < 1 or i > len(teams) for i in indexes):
-                raise ValueError
-        except ValueError:
-            await ctx.send("Invalid selection. Use unique team numbers separated by commas.")
+        if norm(msg.content) != "none":
+            taken = {norm(name) for name, _ in teams} | {norm(key) for _, key in teams}
+            seen, extra = set(), []
+            for raw in msg.content.replace("\n", ",").split(","):
+                name = " ".join(raw.split())
+                if not name:
+                    continue
+                if len(name) > 50 or "::" in name:
+                    await ctx.send(f"Invalid unregistered team name `{name[:60]}` (max 50 characters, no `::`). No assignments saved.")
+                    return
+                if norm(name) in taken:
+                    await ctx.send(f"**{name}** matches a registered team. Pick it by number instead. No assignments saved.")
+                    return
+                if norm(name) in seen:
+                    await ctx.send(f"**{name}** was listed twice. No assignments saved.")
+                    return
+                seen.add(norm(name))
+                extra.append((name, norm(name), True))
+            selected.extend(extra)
+        if not selected:
+            await ctx.send("No teams selected. No assignments changed.")
             return
-        selected = [teams[i - 1] for i in indexes]
+
         assignments = []
         group_names = [row["group_name"] for row in groups]
         await ctx.send("Assigning only your selected teams. Groups: " + ", ".join(group_names))
-        for index, (team_name, team_db_key) in enumerate(selected, 1):
-            msg = await ask_owner(ctx, f"**{index}/{len(selected)} — {team_name}**\nEnter its group name:")
+        for index, (team_name, team_db_key, unregistered) in enumerate(selected, 1):
+            label = f"{team_name} (unregistered)" if unregistered else team_name
+            msg = await ask_owner(ctx, f"**{index}/{len(selected)} — {label}**\nEnter its group name:")
             if msg is None or norm(msg.content) == "cancel":
                 await ctx.send("Cancelled. No assignments saved.")
                 return
@@ -535,7 +577,11 @@ class Groups(commands.Cog):
             conn.commit()
         finally:
             conn.close()
-        await ctx.send(f"Saved **{len(assignments)}** selected team assignments in **{stage_name}**. Other stages were not changed.")
+        extra_count = sum(1 for _, _, unregistered in selected if unregistered)
+        await ctx.send(
+            f"Saved **{len(assignments)}** team assignments in **{stage_name}** "
+            f"({len(assignments) - extra_count} registered, {extra_count} unregistered). Other stages were not changed."
+        )
 
 
     @commands.command(name="audittgroup")
@@ -774,6 +820,10 @@ class Groups(commands.Cog):
         finally:
             team_conn.close()
         role_by_team = {norm(name): int(role_id) for name, role_id in role_rows}
+        try:
+            registered_names = {norm(name) for name, _ in get_approved_teams(ctx.guild.id)}
+        except (FileNotFoundError, sqlite3.Error):
+            registered_names = set(role_by_team)
         stadium_by_team = {norm(row["team_name"]): int(row["channel_id"]) for row in home_stadiums}
         lines = [f"# KASHMIR TITANS — {stage_name.upper()}", f"## ROUND {round_no}", f"# GROUP {group['group_name']}"]
         ping_roles = []
@@ -781,26 +831,30 @@ class Groups(commands.Cog):
         for index, fixture in enumerate(fixtures, 1):
             a, b = fixture["team_one"], fixture["team_two"]
             playing.update((norm(a), norm(b)))
+            # Unregistered teams have no role or home stadium: show them by name only.
+            a_registered, b_registered = norm(a) in registered_names, norm(b) in registered_names
             role_a = ctx.guild.get_role(role_by_team.get(norm(a), 0))
             role_b = ctx.guild.get_role(role_by_team.get(norm(b), 0))
-            if role_a is None or role_b is None:
+            if (a_registered and role_a is None) or (b_registered and role_b is None):
                 await ctx.send(f"Missing configured role for {a} or {b}.")
                 return
             channel_id = stadium_by_team.get(norm(a))
-            if not channel_id or ctx.guild.get_channel(channel_id) is None:
+            if a_registered and (not channel_id or ctx.guild.get_channel(channel_id) is None):
                 await ctx.send(f"Set a home stadium for host **{a}** with `+sethomestadium {a} #channel`.")
                 return
-            ping_roles.extend((role_a, role_b))
-            lines.extend(["", f"**Match {offset + index}**", f"- {role_a.mention} vs {role_b.mention} in <#{channel_id}>"])
+            label_a = role_a.mention if role_a else f"**{a}**"
+            label_b = role_b.mention if role_b else f"**{b}**"
+            ping_roles.extend(role for role in (role_a, role_b) if role)
+            venue = f" in <#{channel_id}>" if channel_id and ctx.guild.get_channel(channel_id) else ""
+            lines.extend(["", f"**Match {offset + index}**", f"- {label_a} vs {label_b}{venue}"])
         rest = []
         for row in assigned:
             if norm(row["team_name"]) not in playing:
                 role = ctx.guild.get_role(role_by_team.get(norm(row["team_name"]), 0))
-                if role:
-                    rest.append(role)
+                rest.append(role if role else f"**{row['team_name']}**")
         if rest:
-            lines.append("**Rest:** " + ", ".join(role.mention for role in rest))
-            ping_roles.extend(rest)
+            lines.append("**Rest:** " + ", ".join(item if isinstance(item, str) else item.mention for item in rest))
+            ping_roles.extend(item for item in rest if not isinstance(item, str))
         await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=ping_roles, replied_user=False))
 
 
