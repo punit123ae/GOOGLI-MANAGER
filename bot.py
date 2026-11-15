@@ -57,6 +57,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.betting",
             "cogs.reservenumbering",
             "cogs.batcatches",
+            "cogs.moderation",
         ):
             await self.load_extension(extension)
 
