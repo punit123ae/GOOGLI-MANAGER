@@ -13,6 +13,8 @@ import discord
 from discord.ext import commands
 
 from .matchnumbers import regular_offset
+
+VS_EMOJI = "<:VS128:1559620966709993472>"
 from .utility import owner_or_whitelisted
 
 TEAM_DB = "team_registration.db"
@@ -825,7 +827,7 @@ class Groups(commands.Cog):
         except (FileNotFoundError, sqlite3.Error):
             registered_names = set(role_by_team)
         stadium_by_team = {norm(row["team_name"]): int(row["channel_id"]) for row in home_stadiums}
-        lines = [f"# KASHMIR TITANS — {stage_name.upper()}", f"## ROUND {round_no}", f"# GROUP {group['group_name']}"]
+        lines = [f"# KASHMIR TITANS — {stage_name.upper()}", f"## ROUND {round_no}", f"## __GROUP {group['group_name']}__"]
         ping_roles = []
         playing = set()
         for index, fixture in enumerate(fixtures, 1):
@@ -846,7 +848,7 @@ class Groups(commands.Cog):
             label_b = role_b.mention if role_b else f"**{b}**"
             ping_roles.extend(role for role in (role_a, role_b) if role)
             venue = f" in <#{channel_id}>" if channel_id and ctx.guild.get_channel(channel_id) else ""
-            lines.extend(["", f"**Match {offset + index}**", f"- {label_a} vs {label_b}{venue}"])
+            lines.extend(["", f"**Match {offset + index}**", f"- {label_a} {VS_EMOJI} {label_b}{venue}"])
         rest = []
         for row in assigned:
             if norm(row["team_name"]) not in playing:

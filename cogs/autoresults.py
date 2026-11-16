@@ -44,12 +44,13 @@ MAX_OCR_PER_MATCH = 8     # scorecards OCR'd per match before giving up
 HISTORY_LIMIT = 5000      # results-channel messages read by +rebuildresults
 
 MATCH_RE = re.compile(
-    r"\*\*Match\s+(\d+)\*\*\s*\n\s*-\s*<@&(\d+)>\s+vs\s+<@&(\d+)>\s+in\s+<#(\d+)>",
+    # The separator is either the word "vs" or the custom VS emoji (<:VS128:id>).
+    r"\*\*Match\s+(\d+)\*\*\s*\n\s*-\s*<@&(\d+)>\s+(?:vs|<a?:\w+:\d+>)\s+<@&(\d+)>\s+in\s+<#(\d+)>",
     re.IGNORECASE,
 )
 # Reserve schedule line:  `ID 12` ... \n 🏟️ Host ... <#channel> \n 👥 <@&host> vs <@&opponent>
 RESERVE_RE = re.compile(
-    r"`ID\s+(\d+)`[^\n]*\n[^\n]*<#(\d+)>[^\n]*\n[^\n]*<@&(\d+)>\s+vs\s+<@&(\d+)>"
+    r"`ID\s+(\d+)`[^\n]*\n[^\n]*<#(\d+)>[^\n]*\n[^\n]*<@&(\d+)>\s+(?:vs|<a?:\w+:\d+>)\s+<@&(\d+)>"
 )
 WIN_RE = re.compile(
     r"won\s+the\s+(?:game|match)\s+by\s+(\d{1,3})\s+(runs?|wickets?)", re.IGNORECASE

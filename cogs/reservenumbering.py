@@ -320,10 +320,10 @@ def build_group_post(stage_name, day, group_name, group_matches, rest_teams, rol
     rest_teams: [team names] not playing that day
     role_text(name) / channel_text(host name): how a team / stadium is shown
     Returns a list of message strings (normally one)."""
-    head = [f"# {TITLE} — {stage_name.upper()}", f"## RESERVE DAY {day}", f"# GROUP {group_name}"]
+    head = [f"# {TITLE} — {stage_name.upper()}", f"## RESERVE DAY {day}", f"## __GROUP {group_name}__"]
     blocks = ["\n".join(head)]
     for m in group_matches:
-        blocks.append(f"\n**Match {m['number']}**\n- {role_text(m['host'])} vs {role_text(m['opp'])} "
+        blocks.append(f"\n**Match {m['number']}**\n- {role_text(m['host'])} <:VS128:1559620966709993472> {role_text(m['opp'])} "
                       f"in {channel_text(m['host'])}")
     if not group_matches:
         blocks.append("\n*No reserve matches in this group on this day.*")
