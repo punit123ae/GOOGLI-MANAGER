@@ -5,12 +5,12 @@ Place at cogs/matchnumbers.py and add "cogs.matchnumbers" to bot.py.
 One running number across the whole tournament, stage by stage (stages in the order
 they were created):
 
-    Stage block = regular fixtures first (round by round, group by group)
-                  then that stage's reserved matches (in reserve ID order)
+    Stage block = regular fixtures (round by round, group by group)
 
 Example (3 groups x 5 matches per round):
     Round 1 -> 1-15, Round 2 -> 16-30, Round 3 -> 31-45 ...
-    then the stage's reserved matches continue the numbers, then the next stage starts.
+    the next stage continues straight after the last regular match (reserved matches do
+    not use up any stage numbers). Reserved matches are listed after all regular matches.
 
 Used by: +schedule (groups.py), +creatematchups (reserves.py), +autoresult and
 +rebuildresults (autoresults.py), and the +reservenumbers command below.
@@ -65,7 +65,9 @@ def stage_blocks(conn, guild_id):
         ).fetchone()[0]
         reserve_ids = reserves.get(_norm(row["stage_name"]), [])
         blocks.append((row["stage_key"], row["stage_name"], start, regular, reserve_ids))
-        start += regular + len(reserve_ids)
+        # Reserved matches do NOT use up stage numbers: the next stage continues straight
+        # after this stage's last regular match.
+        start += regular
     return blocks
 
 
@@ -91,10 +93,15 @@ def regular_offset(conn, guild_id, stage_name, group_key, round_no):
 
 def reserve_numbers(conn, guild_id):
     """{reservation id: match number}"""
+    # Reserved matches are numbered after the last regular match of the whole tournament,
+    # so they never collide with a later stage's regular numbers.
+    blocks = stage_blocks(conn, guild_id)
+    next_number = 1 + sum(block[3] for block in blocks)
     out = {}
-    for _key, _name, start, regular, reserve_ids in stage_blocks(conn, guild_id):
-        for index, reserve_id in enumerate(reserve_ids):
-            out[reserve_id] = start + regular + index
+    for _key, _name, _start, _regular, reserve_ids in blocks:
+        for reserve_id in reserve_ids:
+            out[reserve_id] = next_number
+            next_number += 1
     return out
 
 
