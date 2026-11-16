@@ -196,6 +196,8 @@ CURATED = {
                        "+setuplivedraws", WHITELIST),
     "startlivedraw": ("Draws", "Run a live draw one team at a time using a saved setting.",
                       "+startlivedraw <setting name>", WHITELIST),
+    "deletelivedraw": ("Draws", "Delete one saved live-draw setup and its secret assignments.",
+                       "+deletelivedraw <setting name>", WHITELIST),
     # ---------------------------------------------------------------- MVP
     "setmvp": ("MVP", "Create an MVP image. The bot asks for the player name, stats and avatar.",
                "+setmvp", WHITELIST),

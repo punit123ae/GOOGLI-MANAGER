@@ -49,6 +49,10 @@ class LiveDraws(commands.Cog):
                 PRIMARY KEY (guild_id, setting_key, team_key)
             )"""
         )
+        # Unregistered (name-only) teams added during setup. Older databases get the column on startup.
+        columns = [row[1] for row in self.db.execute("PRAGMA table_info(live_draw_settings)").fetchall()]
+        if "unregistered_json" not in columns:
+            self.db.execute("ALTER TABLE live_draw_settings ADD COLUMN unregistered_json TEXT NOT NULL DEFAULT '[]'")
         self.db.commit()
         self.active_guilds = set()
         self.cancel_events = {}
@@ -125,7 +129,7 @@ class LiveDraws(commands.Cog):
             await ctx.send("There are no approved teams in this server's team database.")
             return
 
-        await ctx.send("**1/3 — Verify teams**\nI detected the approved teams below. Is this list correct? Reply `yes` to continue or `no` to cancel.")
+        await ctx.send("**1/4 — Verify teams**\nI detected the approved teams below. Is this list correct? Reply `yes` to continue or `no` to cancel.")
         await self._send_team_list(ctx, teams)
         try:
             answer = (await self._wait_for_reply(ctx)).content.strip().casefold()
@@ -136,7 +140,42 @@ class LiveDraws(commands.Cog):
             await ctx.send("Setup cancelled. Nothing was saved.")
             return
 
-        await ctx.send(f"**2/3 — Number of groups**\nThere are **{len(teams)} approved teams**. How many groups do you want? Reply with a whole number from 1 to {len(teams)}.")
+        await ctx.send(
+            "**2/4 — Unregistered teams**\nDo you want to add teams that are **not registered**? "
+            "Send their names separated by commas (example: `Team Alpha, Team Beta`), or reply `none`. "
+            "You can add as many as you like."
+        )
+        try:
+            extra_raw = (await self._wait_for_reply(ctx)).content.strip()
+        except asyncio.TimeoutError:
+            await ctx.send("Live-draw setup timed out. Nothing was saved.")
+            return
+        unregistered = []
+        if extra_raw.casefold() not in ("none", "no", "n", "skip"):
+            taken = {self._setting_key(name) for name in teams}
+            for raw in extra_raw.replace("\n", ",").split(","):
+                name = " ".join(raw.split())
+                if not name:
+                    continue
+                if len(name) > 50:
+                    await ctx.send(f"`{name[:60]}` is longer than 50 characters. Run `+setuplivedraws` again. Nothing was saved.")
+                    return
+                name_key = self._setting_key(name)
+                if name_key in taken:
+                    await ctx.send(
+                        f"**{discord.utils.escape_markdown(name)}** is already a registered team or was listed twice. "
+                        "Run `+setuplivedraws` again. Nothing was saved."
+                    )
+                    return
+                taken.add(name_key)
+                unregistered.append(name)
+        teams = teams + unregistered
+
+        await ctx.send(
+            f"**3/4 — Number of groups**\nThere are **{len(teams)} teams** "
+            f"({len(teams) - len(unregistered)} registered + {len(unregistered)} unregistered). "
+            f"How many groups do you want? Reply with a whole number from 1 to {len(teams)}."
+        )
         try:
             reply = await self._wait_for_reply(ctx)
             group_count = int(reply.content.strip())
@@ -150,7 +189,7 @@ class LiveDraws(commands.Cog):
             await ctx.send(f"Choose a number from 1 to {len(teams)}. Run `+setuplivedraws` again.")
             return
 
-        await ctx.send("**3/3 — Setting name**\nWhat should this live-draw setting be called? Example: `KASHMIR TITANS S1`.")
+        await ctx.send("**4/4 — Setting name**\nWhat should this live-draw setting be called? Example: `KASHMIR TITANS S1`.")
         try:
             setting_name = (await self._wait_for_reply(ctx)).content.strip()
         except asyncio.TimeoutError:
@@ -163,16 +202,18 @@ class LiveDraws(commands.Cog):
         import json
         key = self._setting_key(setting_name)
         self.db.execute(
-            "INSERT INTO live_draw_settings(guild_id, setting_key, setting_name, group_count, team_names_json, created_by) "
-            "VALUES(?,?,?,?,?,?) ON CONFLICT(guild_id, setting_key) DO UPDATE SET "
+            "INSERT INTO live_draw_settings(guild_id, setting_key, setting_name, group_count, team_names_json, created_by, unregistered_json) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(guild_id, setting_key) DO UPDATE SET "
             "setting_name=excluded.setting_name, group_count=excluded.group_count, "
-            "team_names_json=excluded.team_names_json, created_by=excluded.created_by",
-            (ctx.guild.id, key, setting_name, group_count, json.dumps(teams, ensure_ascii=False), ctx.author.id),
+            "team_names_json=excluded.team_names_json, created_by=excluded.created_by, "
+            "unregistered_json=excluded.unregistered_json",
+            (ctx.guild.id, key, setting_name, group_count, json.dumps(teams, ensure_ascii=False), ctx.author.id,
+             json.dumps(unregistered, ensure_ascii=False)),
         )
         self.db.commit()
         await ctx.send(
             f"Live-draw setting **{discord.utils.escape_markdown(setting_name)}** saved.\n"
-            f"Teams: **{len(teams)}** | Groups: **{group_count}**\n"
+            f"Teams: **{len(teams)}** ({len(unregistered)} unregistered) | Groups: **{group_count}**\n"
             f"Start it with `+startgroupdraws {setting_name}`."
         )
 
@@ -406,6 +447,67 @@ class LiveDraws(commands.Cog):
             "and all associated secret assignments for this server."
         )
 
+    @commands.command(name="deletelivedraw", aliases=["deletedrawsetup", "removelivedraw", "deletedraw"])
+    @commands.guild_only()
+    async def delete_live_draw(self, ctx, *, setting_name: str = None):
+        """Delete one saved live-draw setup (and its secret assignments) by name."""
+        if not self._is_bot_owner(ctx):
+            await ctx.send("Only the bot owner can delete a saved draw setup.")
+            return
+
+        existing = self.db.execute(
+            "SELECT setting_name FROM live_draw_settings WHERE guild_id=? ORDER BY setting_name COLLATE NOCASE",
+            (ctx.guild.id,),
+        ).fetchall()
+        available = ", ".join(f"`{row['setting_name']}`" for row in existing) or "none"
+        if not setting_name:
+            await ctx.send(f"Usage: `+deletelivedraw <setting name>`\nSaved setups: {available}")
+            return
+
+        key = self._setting_key(setting_name)
+        setting = self.db.execute(
+            "SELECT * FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        ).fetchone()
+        if not setting:
+            await ctx.send(
+                f"I couldn't find the draw setup **{discord.utils.escape_markdown(setting_name)}**.\nSaved setups: {available}"
+            )
+            return
+        if ctx.guild.id in self.active_guilds:
+            await ctx.send("A live draw is running in this server. Stop it with `+cancel` before deleting a setup.")
+            return
+
+        secret_count = self.db.execute(
+            "SELECT COUNT(*) FROM secret_draw_groups WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        ).fetchone()[0]
+        display = discord.utils.escape_markdown(setting["setting_name"])
+        await ctx.send(
+            f"⚠️ **Delete the draw setup {display}?**\n"
+            f"This removes the setup and its **{secret_count}** secret team-to-group assignment(s). "
+            "Other setups are not touched. Reply `yes` to confirm or `no` to cancel."
+        )
+        try:
+            reply = await self._wait_for_reply(ctx, timeout=30)
+        except asyncio.TimeoutError:
+            await ctx.send("Deletion cancelled because no confirmation was received.")
+            return
+        if reply.content.strip().casefold() not in {"yes", "y"}:
+            await ctx.send("Deletion cancelled. Nothing was changed.")
+            return
+
+        self.db.execute(
+            "DELETE FROM secret_draw_groups WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        )
+        self.db.execute(
+            "DELETE FROM live_draw_settings WHERE guild_id=? AND setting_key=?",
+            (ctx.guild.id, key),
+        )
+        self.db.commit()
+        await ctx.send(f"🗑️ Deleted the draw setup **{display}** and its secret assignments.")
+
     @commands.command(name="cancel", aliases=["canceldraw", "stopdraw"])
     @commands.guild_only()
     async def cancel_live_draw(self, ctx):
@@ -449,6 +551,7 @@ class LiveDraws(commands.Cog):
             await ctx.send(f"Couldn't read the team database: {exc}")
             return
         saved_teams = json.loads(setting["team_names_json"])
+        unregistered = json.loads(setting["unregistered_json"] or "[]")
         # Teams removed from approved status are automatically excluded. Newly
         # approved teams require a fresh setup so they cannot enter unnoticed.
         saved_lookup = {self._setting_key(name) for name in saved_teams}
@@ -460,7 +563,8 @@ class LiveDraws(commands.Cog):
                 + ". Run `+setuplivedraws` again if they should be included."
             )
             return
-        current_lookup = {self._setting_key(name) for name in current_teams}
+        # Unregistered teams are never in the registration database, so they always stay.
+        current_lookup = {self._setting_key(name) for name in current_teams} | {self._setting_key(name) for name in unregistered}
         saved_teams = [name for name in saved_teams if self._setting_key(name) in current_lookup]
         if len(saved_teams) < 2:
             await ctx.send("Fewer than 2 teams from this setup are still approved. No draw can be started.")
