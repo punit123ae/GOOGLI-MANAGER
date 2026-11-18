@@ -768,7 +768,8 @@ class TeamCommandsB:
                           p.balls_bowled, p.wickets, p.not_out
                    FROM player_match_stats p
                    JOIN stats_imports i ON i.source_message_id = p.source_message_id
-                   WHERE i.guild_id = ?""",
+                   WHERE i.guild_id = ?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT') = 'MAIN TOURNAMENT'""",
                 (int(guild_id),),
             ).fetchall()
         except Exception:
