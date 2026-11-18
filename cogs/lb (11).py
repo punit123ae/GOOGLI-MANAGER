@@ -711,7 +711,7 @@ class LeaderboardView(discord.ui.View):
         elif self.metric_key in BATTER_IMPACT_KEYS:
             # Re-read the database on every render so owner edits/resets appear
             # when the leaderboard is refreshed, not only after a bot restart.
-            active_competition = "THE LAST GATE" if self.category == "THE LAST GATE" else "MAIN TOURNAMENT"
+            active_competition = COMPETITION_LABELS[self.competition]
             self.cog.batter_impact_by_user = self.cog._batter_impact_rows(guild.id, active_competition)
             index = BATTER_IMPACT_KEYS[self.metric_key]
             for uid, rec in self.cog.batter_impact_by_user.items():
@@ -721,7 +721,7 @@ class LeaderboardView(discord.ui.View):
         else:
             if self.metric_key == "fantasy":
                 # Re-read the fielding totals for the active competition.
-                active_competition = "THE LAST GATE" if self.category == "THE LAST GATE" else "MAIN TOURNAMENT"
+                active_competition = COMPETITION_LABELS[self.competition]
                 self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
             computed = self._generic_ranking(rows_by_user)
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
@@ -905,12 +905,18 @@ class LeaderboardCog(commands.Cog):
             # positions and zero movement for the current matchday.
             day_token = LeaderboardView(self, ctx)._checkpoints(db, guild_id)[0]
             seeded = 0
-            for category, metrics in METRICS.items():
-                if category in EMBED_CATEGORIES:
-                    continue
-                active_competition = "THE LAST GATE" if category == "THE LAST GATE" else "MAIN TOURNAMENT"
-                self.batter_impact_by_user = self._batter_impact_rows(guild_id, active_competition)
-                for metric_key, _label in metrics:
+            reset_scopes = [
+                ("KASHMIR TITANS S1", METRICS),
+                ("THE LAST GATE", LAST_GATE_METRICS),
+            ]
+            for competition_label, metric_groups in reset_scopes:
+                for category, metrics in metric_groups.items():
+                    if category in EMBED_CATEGORIES:
+                        continue
+                    self.batter_impact_by_user = self._batter_impact_rows(
+                        guild_id, COMPETITION_LABELS[competition_label]
+                    )
+                    for metric_key, _label in metrics:
                     seeded += 1
                     if metric_key not in BATTER_IMPACT_KEYS:
                         continue
