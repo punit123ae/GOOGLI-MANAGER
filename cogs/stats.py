@@ -2265,12 +2265,8 @@ class Stats(commands.Cog):
                 exclude_team_names=([saved_team] if saved_team else []),
             )
             versus = f"vs **{discord.utils.escape_markdown(opponent)}**\n　" if opponent else ""
-            team_label = (
-                f"**{discord.utils.escape_markdown(team_name)}** • "
-                if team_name else ""
-            )
             recent_lines.append(
-                f"**{index}.** {team_label}{versus}<:cricketbat:1561294474951393360> `{batting_text}`  ·  "
+                f"**{index}.** {versus}<:cricketbat:1561294474951393360> `{batting_text}`  ·  "
                 f"<:cricketball:1561294577392951338> `{bowling_text}`  ·  {fielding_text}"
             )
         recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
