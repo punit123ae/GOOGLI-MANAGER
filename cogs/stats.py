@@ -2135,6 +2135,12 @@ class Stats(commands.Cog):
         t = totals(rows)
         batting_points, bowling_points, total_points = fantasy_raw_points(rows, t)
         total_points += fielding_points
+        transfers = self.get_player_transfers(ctx.guild.id, member.id)
+        last_gate_rows = self.get_player_rows(ctx.guild.id, member.id, "THE LAST GATE")
+        last_gate_team_name = (
+            str(transfers[0]["old_team_name"])
+            if transfers and last_gate_rows else None
+        )
         fifties = sum(50 <= r["runs"] < 100 for r in rows)
         hundreds = sum(r["runs"] >= 100 for r in rows)
         ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
@@ -2212,17 +2218,10 @@ class Stats(commands.Cog):
         )
         recent_rows = list(reversed(rows[-5:]))
         recent_lines = []
-        transfers = self.get_player_transfers(ctx.guild.id, member.id)
-        latest_transfer = transfers[-1] if transfers else None
         recent_team_names = [
             self._team_for_performance(row, member.id, competition, transfers)
             for row in recent_rows
         ]
-        last_gate_rows = self.get_player_rows(ctx.guild.id, member.id, "THE LAST GATE")
-        last_gate_team_name = (
-            str(transfers[0]["old_team_name"])
-            if transfers and last_gate_rows else None
-        )
         # Recent rows are newest-first. A divider is shown only at a real
         # team change between adjacent saved match snapshots, not merely because
         # a team appears anywhere in the player's transfer history.
