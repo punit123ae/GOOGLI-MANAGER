@@ -1326,15 +1326,27 @@ class Stats(commands.Cog):
         ).fetchone()
         return int(row[0]) if row else 1
 
-    def get_fielding_stats(self, guild_id, user_id):
-        """Return persistent catch totals and fielding fantasy points for this server/player."""
+    def get_fielding_stats(self, guild_id, user_id, competition="MAIN TOURNAMENT"):
+        """Return fielding totals for the selected competition."""
+        if competition == "THE LAST GATE":
+            try:
+                row = self.db.execute(
+                    """SELECT SUM(f.catches_taken), SUM(f.catches_dropped)
+                       FROM player_match_fielding f
+                       JOIN stats_imports i ON i.source_message_id=f.source_message_id
+                       WHERE i.guild_id=? AND i.competition=? AND f.user_id=?""",
+                    (int(guild_id), competition, int(user_id)),
+                ).fetchone()
+            except Exception:
+                return 0, 0, 0
+            caught, dropped = (int(row[0] or 0), int(row[1] or 0)) if row else (0, 0)
+            return caught, dropped, caught * 5 - dropped * 10
         try:
             row = self.db.execute(
                 "SELECT catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=? AND user_id=?",
                 (int(guild_id), int(user_id)),
             ).fetchone()
         except Exception:
-            # Fielding tracker may not have created its table yet.
             return 0, 0, 0
         caught, dropped = (int(row[0]), int(row[1])) if row else (0, 0)
         return caught, dropped, caught * 5 - dropped * 10
@@ -1925,6 +1937,16 @@ class Stats(commands.Cog):
 
     @commands.command(name="stats")
     async def player_stats(self, ctx, *, user_id: str = None):
+        # Optional suffix: +stats @user | THE LAST GATE
+        competition = "MAIN TOURNAMENT"
+        if user_id and "|" in user_id:
+            user_id, requested_competition = user_id.rsplit("|", 1)
+            requested_competition = requested_competition.strip().upper()
+            if requested_competition in ("LAST GATE", "THE LAST GATE"):
+                competition = "THE LAST GATE"
+            elif requested_competition not in ("MAIN", "MAIN TOURNAMENT"):
+                await ctx.reply("Use MAIN TOURNAMENT or THE LAST GATE after the |.", mention_author=False)
+                return
         # Accept a server member, a mention, a numeric Discord user ID,
         # or a username / display name / nickname.
         if not user_id:
@@ -1975,7 +1997,7 @@ class Stats(commands.Cog):
                         guild=ctx.guild,
                     )
 
-        rows = self.get_player_rows(ctx.guild.id, member.id)
+        rows = self.get_player_rows(ctx.guild.id, member.id, competition)
         if not rows:
             await ctx.reply(
                 f"No imported stats found for {member.mention} yet. "
@@ -2004,7 +2026,7 @@ class Stats(commands.Cog):
 
         design = self.get_selected_design(ctx.guild.id)
         catches_caught, catches_dropped, fielding_points = self.get_fielding_stats(
-            ctx.guild.id, member.id
+            ctx.guild.id, member.id, competition
         )
         batter_drops, batter_taken = self.get_batter_catches(ctx.guild.id, member.id)
 
@@ -2065,7 +2087,7 @@ class Stats(commands.Cog):
         )
         overview_best_bowling = f"{_best_bowl['wickets']}/{_best_bowl['runs_conceded']}" if _best_bowl else "0/0"
         embed = discord.Embed(
-            title=f"{member.display_name} stats for `KASHMIR TITANS S1`",
+            title=f"{member.display_name} stats for `KASHMIR TITANS S1` • {competition}",
             description=f"**MATCHES RECORDED:** `{t['matches']}`",
             colour=discord.Colour.blurple(),
         )
@@ -2143,8 +2165,11 @@ class Stats(commands.Cog):
                 )
             status = "*" if row["not_out"] else ""
             fielding_row = self.db.execute(
-                "SELECT opportunities, catches_taken, catches_dropped FROM player_match_fielding WHERE source_message_id=? AND user_id=?",
-                (row["source_message_id"], member.id),
+                """SELECT f.opportunities, f.catches_taken, f.catches_dropped
+                   FROM player_match_fielding f
+                   JOIN stats_imports i ON i.source_message_id=f.source_message_id
+                   WHERE f.source_message_id=? AND f.user_id=? AND i.competition=?""",
+                (row["source_message_id"], member.id, competition),
             ).fetchone()
             if fielding_row and int(fielding_row[0]) > 0:
                 fielding_text = f"<:gloves_ios:1564891803067613245> `{fielding_row[1]}/{fielding_row[2]}`"
@@ -2195,7 +2220,7 @@ class Stats(commands.Cog):
             if best_bowling else "0/0"
         )
         deep_embed = discord.Embed(
-            title=f"{member.display_name} stats for `KASHMIR TITANS S1` — Deep Stats",
+            title=f"{member.display_name} stats for `KASHMIR TITANS S1` • {competition} — Deep Stats",
             description=(
                 f"**MATCHES RECORDED:** `{t['matches']}`\n\n"
                 f"<:recent:1561311937843957801>  **__RECENT 5 MATCH SCORES__**\n{recent_text}"
