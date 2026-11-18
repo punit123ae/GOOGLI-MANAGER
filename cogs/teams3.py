@@ -319,6 +319,95 @@ class TeamCommandsB:
         await ctx.reply(f"{member.name} is now vice-captain of **{team['name']}**.", mention_author=False)
         await self._dm(member, f"You have been appointed vice-captain of **{team['name']}**.")
 
+    @commands.command(name="stealplayer")
+    @commands.guild_only()
+    async def steal_player(self, ctx, target: str, *, teams: str = None):
+        """Move a rostered player while retaining both Discord team roles and transfer history.
+
+        Syntax: +stealplayer @player Old Team | New Team
+        """
+        if not await self._command_allowed(ctx, "stealplayer"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
+        if not teams or "|" not in teams:
+            await ctx.reply(
+                "Usage: `+stealplayer @player Old Team | New Team`",
+                mention_author=False,
+            )
+            return
+        old_name, new_name = (part.strip() for part in teams.split("|", 1))
+        if not old_name or not new_name:
+            await ctx.reply("Provide both the old team and the new team, separated by `|`.", mention_author=False)
+            return
+
+        member = await self._get_member(ctx.guild, target)
+        if member is None:
+            await ctx.reply("I couldn't find that server member. Use a mention or numeric user ID.", mention_author=False)
+            return
+        old_team = self._team(ctx.guild.id, old_name)
+        new_team = self._team(ctx.guild.id, new_name)
+        if not old_team or old_team["status"] != "approved":
+            await ctx.reply("I couldn't find an approved old team.", mention_author=False)
+            return
+        if not new_team or new_team["status"] != "approved":
+            await ctx.reply("I couldn't find an approved new team.", mention_author=False)
+            return
+        if int(old_team["id"]) == int(new_team["id"]):
+            await ctx.reply("The old team and new team cannot be the same.", mention_author=False)
+            return
+        if member.id in (old_team["captain_id"], old_team["vice_captain_id"]):
+            await ctx.reply("A team captain or vice-captain cannot be stolen with this command.", mention_author=False)
+            return
+        rostered = self.db.execute(
+            "SELECT 1 FROM team_players WHERE team_id=? AND user_id=?",
+            (old_team["id"], member.id),
+        ).fetchone()
+        if not rostered:
+            await ctx.reply(f"{member.mention} is not on **{old_team['name']}**'s player roster.", mention_author=False)
+            return
+        if self.db.execute(
+            "SELECT 1 FROM team_players WHERE team_id=? AND user_id=?",
+            (new_team["id"], member.id),
+        ).fetchone():
+            await ctx.reply(f"{member.mention} is already listed on **{new_team['name']}**.", mention_author=False)
+            return
+        if self._team_player_count(new_team["id"]) >= self._max_players(ctx.guild.id):
+            await ctx.reply(f"**{new_team['name']}** has reached its maximum roster size.", mention_author=False)
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self.db:
+                self.db.execute(
+                    "DELETE FROM team_players WHERE team_id=? AND user_id=?",
+                    (old_team["id"], member.id),
+                )
+                self.db.execute(
+                    "INSERT INTO team_players(team_id,user_id,added_by,added_at) VALUES(?,?,?,?)",
+                    (new_team["id"], member.id, ctx.author.id, now),
+                )
+                self.db.execute(
+                    "INSERT INTO player_team_transfers "
+                    "(guild_id,user_id,old_team_id,old_team_name,new_team_id,new_team_name,transferred_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (ctx.guild.id, member.id, old_team["id"], old_team["name"],
+                     new_team["id"], new_team["name"], now),
+                )
+        except sqlite3.Error as exc:
+            await ctx.reply(f"Transfer failed; the roster was not changed. Error: `{type(exc).__name__}`.", mention_author=False)
+            return
+
+        # Keep the old role and also assign the new team's role.
+        await self._assign_team_role(ctx.guild, old_team["id"], member)
+        await self._assign_team_role(ctx.guild, new_team["id"], member)
+        await self._sync_base_role_member(ctx.guild, member)
+        await ctx.reply(
+            f"✅ **{member.display_name}** has been transferred: **{old_team['name']} → {new_team['name']}**.\n"
+            f"Both team roles have been retained/assigned, and previous match records remain unchanged.",
+            mention_author=False,
+        )
+        await self._dm(member, f"You have been transferred from **{old_team['name']}** to **{new_team['name']}**. Both team roles are retained.")
+
     @commands.command(name="addplayer")
     @commands.guild_only()
     async def add_player(self, ctx, target: str, *, team_name: str):
