@@ -2080,21 +2080,20 @@ class Stats(commands.Cog):
             self._saved_player_team(row["source_message_id"], member.id)
             for row in recent_rows
         ]
-        # The recent list is newest-first. Put the divider immediately before
-        # the first match from the new team in chronological order.
-        new_team_boundary = None
-        if latest_transfer:
-            new_name = latest_transfer["new_team_name"]
-            new_team_positions = [
-                pos for pos, team_name in enumerate(recent_team_names)
-                if (team_name or "").casefold() == new_name.casefold()
-            ]
-            # The greatest index is the oldest (first chronological) new-team
-            # performance in this newest-first list.
-            new_team_boundary = max(new_team_positions) if new_team_positions else None
+        # The recent list is newest-first. Add a divider at the beginning of
+        # every transferred-to team segment represented in these recent matches.
+        transferred_to = {
+            str(item["new_team_name"]).casefold(): str(item["new_team_name"])
+            for item in transfers
+        }
         for index, row in enumerate(recent_rows, start=1):
-            if new_team_boundary is not None and index - 1 == new_team_boundary:
-                recent_lines.append(f"**-- {discord.utils.escape_markdown(latest_transfer['new_team_name'])} --**")
+            team_name = recent_team_names[index - 1]
+            previous_newer_team = recent_team_names[index - 2] if index > 1 else None
+            if (team_name and team_name.casefold() in transferred_to
+                    and (previous_newer_team or "").casefold() != team_name.casefold()):
+                recent_lines.append(
+                    f"**-- {discord.utils.escape_markdown(transferred_to[team_name.casefold()])} --**"
+                )
             status = "*" if row["not_out"] else ""
             fielding_row = self.db.execute(
                 "SELECT opportunities, catches_taken, catches_dropped FROM player_match_fielding WHERE source_message_id=? AND user_id=?",
@@ -2114,8 +2113,12 @@ class Stats(commands.Cog):
             )
             opponent = self._saved_opponent(row["source_message_id"], member.id)
             versus = f"vs **{discord.utils.escape_markdown(opponent)}**\n　" if opponent else ""
+            team_label = (
+                f"**{discord.utils.escape_markdown(team_name)}** • "
+                if team_name else ""
+            )
             recent_lines.append(
-                f"**{index}.** {versus}<:cricketbat:1561294474951393360> `{batting_text}`  ·  "
+                f"**{index}.** {team_label}{versus}<:cricketbat:1561294474951393360> `{batting_text}`  ·  "
                 f"<:cricketball:1561294577392951338> `{bowling_text}`  ·  {fielding_text}"
             )
         recent_text = "\n".join(recent_lines) if recent_lines else "No recent match records."
