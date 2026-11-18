@@ -364,8 +364,10 @@ class TeamCommandsB:
         # The command's explicit Old Team | New Team arguments are the transfer
         # declaration; do not reject it just because the old row was removed.
         memberships = self.db.execute(
-            "SELECT team_id FROM team_players WHERE user_id=?",
-            (member.id,),
+            """SELECT p.team_id FROM team_players p
+               JOIN registered_teams t ON t.id=p.team_id
+               WHERE t.guild_id=? AND t.status='approved' AND p.user_id=?""",
+            (ctx.guild.id, member.id),
         ).fetchall()
         membership_ids = {int(row[0]) for row in memberships}
         unexpected = membership_ids - {int(old_team["id"]), int(new_team["id"])}
