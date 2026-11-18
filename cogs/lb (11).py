@@ -902,34 +902,38 @@ class LeaderboardCog(commands.Cog):
             )
 
             # Batter-catch stats keep saved ranks: seed them with the current
-            # positions and zero movement for the current matchday.
-            day_token = LeaderboardView(self, ctx)._checkpoints(db, guild_id)[0]
+            # positions and zero movement for both competitions independently.
             seeded = 0
             reset_scopes = [
                 ("KASHMIR TITANS S1", METRICS),
                 ("THE LAST GATE", LAST_GATE_METRICS),
             ]
             for competition_label, metric_groups in reset_scopes:
+                competition_rows = self._batter_impact_rows(
+                    guild_id, COMPETITION_LABELS[competition_label]
+                )
                 for category, metrics in metric_groups.items():
                     if category in EMBED_CATEGORIES:
                         continue
-                    self.batter_impact_by_user = self._batter_impact_rows(
-                        guild_id, COMPETITION_LABELS[competition_label]
-                    )
                     for metric_key, _label in metrics:
-                    seeded += 1
-                    if metric_key not in BATTER_IMPACT_KEYS:
-                        continue
-                    index = BATTER_IMPACT_KEYS[metric_key]
-                    computed = [
-                        (uid, int(rec[index]))
-                        for uid, rec in self.batter_impact_by_user.items()
-                        if int(rec[index]) > 0
-                    ]
-                    computed.sort(key=lambda item: (_sort_key(metric_key, item[1]), item[0]))
-                    ranks = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
-                    _save_rank_state(db, (guild_id, category, metric_key), day_token,
-                                     ranks, {uid: 0 for uid in ranks})
+                        seeded += 1
+                        if metric_key not in BATTER_IMPACT_KEYS:
+                            continue
+                        index = BATTER_IMPACT_KEYS[metric_key]
+                        computed = [
+                            (uid, int(rec[index]))
+                            for uid, rec in competition_rows.items()
+                            if int(rec[index]) > 0
+                        ]
+                        computed.sort(key=lambda item: (_sort_key(metric_key, item[1]), item[0]))
+                        ranks = {int(uid): rank for rank, (uid, _) in enumerate(computed, start=1)}
+                        _save_rank_state(
+                            db,
+                            (guild_id, f"{competition_label}:{category}", metric_key),
+                            day_token,
+                            ranks,
+                            {uid: 0 for uid in ranks},
+                        )
 
             db.commit()
             await ctx.reply(
