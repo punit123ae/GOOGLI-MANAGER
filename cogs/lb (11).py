@@ -69,26 +69,34 @@ METRICS = {
         ("team_dropped", "Most Catch Drops as a Team"),
         ("team_opps", "Most Catch Opportunities as a Team"),
     ],
-    "THE LAST GATE": [
-        ("runs", "Runs"),
-        ("bat_avg", "Batting Average"),
-        ("fifties", "Most 50s"),
-        ("hundreds", "Most 100s"),
-        ("ducks", "Ducks"),
-        ("highest", "Highest Runs"),
-        ("wickets", "Wickets"),
-        ("bowl_avg", "Bowling Average"),
-        ("bowl_sr", "Bowling Strike Rate"),
-        ("economy", "Economy"),
-        ("best_figures", "Bowling Figures"),
-        ("overs", "Most Overs Bowled"),
+}
+
+# The first menu selects the competition; the next two menus select the
+# statistical category and the individual metric within that competition.
+LAST_GATE_METRICS = {
+    "Batting": [
+        ("runs", "Runs"), ("bat_avg", "Batting Average"),
+        ("fifties", "Most 50s"), ("hundreds", "Most 100s"),
+        ("ducks", "Ducks"), ("highest", "Highest Runs"),
+        ("bc_dropped", "Most Catches Dropped (as Batter)"),
+        ("bc_taken", "Most Catches Taken (as Batter)"),
+    ],
+    "Bowling": [
+        ("wickets", "Wickets"), ("bowl_avg", "Bowling Average"),
+        ("bowl_sr", "Bowling Strike Rate"), ("economy", "Economy"),
+        ("best_figures", "Bowling Figures"), ("overs", "Most Overs Bowled"),
+        ("runs_leaked", "Most Runs Leaked"),
+    ],
+    "Fielding": [
         ("fld_caught", "Most Catches Caught"),
         ("fld_dropped", "Most Catches Dropped"),
         ("fld_eff", "Highest Catch Efficiency"),
-        ("bc_dropped", "Most Catches Dropped (as Batter)"),
-        ("bc_taken", "Most Catches Taken (as Batter)"),
-        ("fantasy", "Fantasy Points"),
     ],
+    "Fantasy Points": [("fantasy", "Total Fantasy Points")],
+}
+COMPETITION_LABELS = {
+    "KASHMIR TITANS S1": "MAIN TOURNAMENT",
+    "THE LAST GATE": "THE LAST GATE",
 }
 
 
@@ -399,6 +407,34 @@ def _display_plain(key: str, value: Any) -> str:
     return _display(key, value)
 
 
+class CompetitionSelect(discord.ui.Select):
+    def __init__(self, view: "LeaderboardView"):
+        self.parent_view = view
+        options = [
+            discord.SelectOption(label="KASHMIR TITANS S1", value="KASHMIR TITANS S1",
+                                 description="Main league statistics",
+                                 default=view.competition == "KASHMIR TITANS S1"),
+            discord.SelectOption(label="THE LAST GATE", value="THE LAST GATE",
+                                 description="Separate Last Gate competition statistics",
+                                 default=view.competition == "THE LAST GATE"),
+        ]
+        super().__init__(placeholder="Choose competition", min_values=1, max_values=1,
+                         options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.parent_view
+        view.competition = self.values[0]
+        view.metrics = LAST_GATE_METRICS if view.competition == "THE LAST GATE" else METRICS
+        view.category = "Batting"
+        view.metric_key, view.metric_label = view.metrics[view.category][0]
+        db_competition = COMPETITION_LABELS[view.competition]
+        view.cog.rows_by_user = view.cog._rows(view.ctx.guild.id, db_competition)
+        view.cog.fielding_by_user = view.cog._fielding_rows(view.ctx.guild.id, db_competition)
+        view.cog.batter_impact_by_user = view.cog._batter_impact_rows(view.ctx.guild.id, db_competition)
+        view.page = 0
+        await view.refresh(interaction)
+
+
 class CategorySelect(discord.ui.Select):
     def __init__(self, view: "LeaderboardView"):
         self.parent_view = view
@@ -408,42 +444,33 @@ class CategorySelect(discord.ui.Select):
             "Fantasy Points": "<:Crown:1561296003104243803>",
             "Fielding": "🧤",
             "Team Fielding": "🛡️",
-            "THE LAST GATE": "🚪",
         }
-        options = [discord.SelectOption(label=name, emoji=category_emojis[name], default=name == view.category)
-                   for name in METRICS]
+        options = [discord.SelectOption(label=name, emoji=category_emojis[name],
+                                        default=name == view.category)
+                   for name in view.metrics]
         super().__init__(placeholder="Choose category", min_values=1, max_values=1,
-                         options=options, row=0)
+                         options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction):
-        self.parent_view.category = self.values[0]
-        self.parent_view.metric_key, self.parent_view.metric_label = METRICS[self.values[0]][0]
-        competition = "THE LAST GATE" if self.values[0] == "THE LAST GATE" else "MAIN TOURNAMENT"
-        self.parent_view.cog.rows_by_user = self.parent_view.cog._rows(
-            self.parent_view.ctx.guild.id, competition
-        )
-        self.parent_view.cog.fielding_by_user = self.parent_view.cog._fielding_rows(
-            self.parent_view.ctx.guild.id, competition
-        )
-        self.parent_view.cog.batter_impact_by_user = self.parent_view.cog._batter_impact_rows(
-            self.parent_view.ctx.guild.id, competition
-        )
-        self.parent_view.page = 0
-        await self.parent_view.refresh(interaction)
+        view = self.parent_view
+        view.category = self.values[0]
+        view.metric_key, view.metric_label = view.metrics[view.category][0]
+        view.page = 0
+        await view.refresh(interaction)
 
 
 class MetricSelect(discord.ui.Select):
     def __init__(self, view: "LeaderboardView"):
         self.parent_view = view
         options = [discord.SelectOption(label=label, value=key, default=key == view.metric_key)
-                   for key, label in METRICS[view.category]]
+                   for key, label in view.metrics[view.category]]
         super().__init__(placeholder="Choose statistic", min_values=1, max_values=1,
                          options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction):
         self.parent_view.metric_key = self.values[0]
         self.parent_view.metric_label = next(
-            label for key, label in METRICS[self.parent_view.category]
+            label for key, label in self.parent_view.metrics[self.parent_view.category]
             if key == self.parent_view.metric_key
         )
         self.parent_view.page = 0
@@ -455,7 +482,7 @@ class PageButton(discord.ui.Button):
 
     def __init__(self, kind: str):
         self.kind = kind
-        super().__init__(label=self.LABELS[kind], style=discord.ButtonStyle.secondary, row=2)
+        super().__init__(label=self.LABELS[kind], style=discord.ButtonStyle.secondary, row=3)
 
     async def callback(self, interaction: discord.Interaction):
         view: LeaderboardView = self.view  # type: ignore[assignment]
@@ -476,15 +503,18 @@ class LeaderboardView(discord.ui.View):
         self.cog = cog
         self.ctx = ctx
         self.owner_id = ctx.author.id
+        self.competition = "KASHMIR TITANS S1"
+        self.metrics = METRICS
         self.category = "Batting"
-        self.metric_key, self.metric_label = METRICS[self.category][0]
+        self.metric_key, self.metric_label = self.metrics[self.category][0]
         self.page = 0
         self.team_names: dict[int, str] = {}
-        self._rank_delta_cache: dict[tuple[str, str], dict[int, int | None]] = {}
+        self._rank_delta_cache: dict[tuple[str, str, str], dict[int, int | None]] = {}
         self._rebuild_items()
 
     def _rebuild_items(self):
         self.clear_items()
+        self.add_item(CompetitionSelect(self))
         self.add_item(CategorySelect(self))
         self.add_item(MetricSelect(self))
         for kind in ("first", "prev", "next", "last"):
@@ -507,7 +537,7 @@ class LeaderboardView(discord.ui.View):
 
         noun = "teams" if self.category == "Team Fielding" else "players"
         embed = discord.Embed(
-            title="# **`KASHMIR TITANS S1`**",
+            title=f"# **`{self.competition}`**",
             description=f"**{self.category.upper()} LEADERBOARD — {self.metric_label.upper()}**\n"
                         f"**{total} {noun} in this category**\n\n",
             colour=BLUE,
@@ -521,7 +551,7 @@ class LeaderboardView(discord.ui.View):
                 username = member.name if member else f"Unknown player ({str(uid)[-4:]})"
             lines.append(f"`{index}.` **{discord.utils.escape_markdown(username)}** → `{_display(self.metric_key, value)}`")
         embed.description += "\n".join(lines) if lines else "No players qualify for this statistic yet."
-        embed.set_footer(text=f"Kashmir Titans S1 • Page {self.page + 1}/{pages} • {EMBED_PAGE_SIZE} {noun} per page")
+        embed.set_footer(text=f"{self.competition} • Page {self.page + 1}/{pages} • {EMBED_PAGE_SIZE} {noun} per page")
         for child in self.children:
             if isinstance(child, PageButton):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
@@ -596,7 +626,7 @@ class LeaderboardView(discord.ui.View):
           saved and the arrows refreshed the first time +lb is opened after a
           new matchday starts.
         """
-        cache_key = (self.category, self.metric_key)
+        cache_key = (self.competition, self.category, self.metric_key)
         if cache_key in self._rank_delta_cache:
             return self._rank_delta_cache[cache_key]
 
@@ -626,7 +656,7 @@ class LeaderboardView(discord.ui.View):
                         for uid in neutral
                     }
             else:
-                scope = (guild_id, self.category, self.metric_key)
+                scope = (guild_id, f"{self.competition}:{self.category}", self.metric_key)
                 state_row = db.execute(
                     "SELECT fingerprint FROM lb_rank_state "
                     "WHERE guild_id = ? AND category = ? AND metric_key = ?", scope
@@ -661,11 +691,9 @@ class LeaderboardView(discord.ui.View):
         guild = self.ctx.guild
         rows_by_user = self.cog.rows_by_user
         computed = []
-        if self.category == "Fielding" or (
-            self.category == "THE LAST GATE" and self.metric_key in {"fld_caught", "fld_dropped", "fld_eff"}
-        ):
+        if self.category == "Fielding":
             # Fielding data is loaded from the active competition's own records.
-            active_competition = "THE LAST GATE" if self.category == "THE LAST GATE" else "MAIN TOURNAMENT"
+            active_competition = COMPETITION_LABELS[self.competition]
             self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
             for uid, rec in self.cog.fielding_by_user.items():
                 if not _fielding_eligible(self.metric_key, rec):
@@ -673,7 +701,7 @@ class LeaderboardView(discord.ui.View):
                 computed.append((uid, _fielding_value(self.metric_key, rec)))
         elif self.category == "Team Fielding":
             # Re-read both databases on every render so new catches and roster changes show up.
-            self.cog.fielding_by_user = self.cog._fielding_rows(guild.id)
+            self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, COMPETITION_LABELS[self.competition])
             teams = _team_fielding(guild.id, self.cog.fielding_by_user)
             self.team_names = {team_id: t["name"] for team_id, t in teams.items()}
             for team_id, t in teams.items():
@@ -766,7 +794,7 @@ class LeaderboardView(discord.ui.View):
         page_text = f"PAGE {self.page + 1}/{pages}"
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(
-            None, lambda: render_card(self.category, self.metric_label, top, rows, you, page_text,
+            None, lambda: render_card(f"{self.competition} • {self.category}", self.metric_label, top, rows, you, page_text,
                                       guild_icon, watch_name))
         for child in self.children:
             if isinstance(child, PageButton):
@@ -942,9 +970,9 @@ class LeaderboardCog(commands.Cog):
     @commands.guild_only()
     async def leaderboard(self, ctx: commands.Context):
         try:
-            self.rows_by_user = self._rows(ctx.guild.id)
-            self.fielding_by_user = self._fielding_rows(ctx.guild.id)
-            self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id)
+            self.rows_by_user = self._rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.fielding_by_user = self._fielding_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id, "MAIN TOURNAMENT")
             view = LeaderboardView(self, ctx)
             async with ctx.typing():
                 embed, card = await view.make_payload()
