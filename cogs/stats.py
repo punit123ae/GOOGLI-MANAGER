@@ -2029,9 +2029,14 @@ class Stats(commands.Cog):
                     )
 
         rows = self.get_player_rows(ctx.guild.id, member.id, competition)
+        if not rows and competition == "MAIN TOURNAMENT":
+            last_gate_rows = self.get_player_rows(ctx.guild.id, member.id, "THE LAST GATE")
+            if last_gate_rows:
+                competition = "THE LAST GATE"
+                rows = last_gate_rows
         if not rows:
             await ctx.reply(
-                f"No imported stats found for {member.mention} yet. "
+                f"No imported stats found for {member.mention} in **{competition}** yet. "
                 "Import a match with `+as` first.",
                 mention_author=False,
             )
