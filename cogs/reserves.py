@@ -598,10 +598,20 @@ class Reserves(commands.Cog):
         )
 
     @commands.command(name="reservelimit")
-    async def set_stage_reserve_limit(self, ctx, stage_name: str, total: int):
-        """Set a reserve limit override for one tournament stage."""
+    async def set_stage_reserve_limit(self, ctx, *, arguments: str):
+        """Set a reserve limit override for one tournament stage.
+
+        The final token is the numeric limit; the preceding text is the full stage name,
+        so names containing spaces work without requiring quotation marks.
+        """
         if not await self.owner_only(ctx):
             return
+        parts = arguments.rsplit(maxsplit=1)
+        if len(parts) != 2 or not parts[1].isdigit():
+            await ctx.reply('Usage: `+reservelimit <stage name> <limit>`', mention_author=False)
+            return
+        stage_name, total_text = parts
+        total = int(total_text)
         if total < 1 or total > 100:
             await ctx.reply("Choose a stage reserve limit from 1 to 100.", mention_author=False)
             return
@@ -758,9 +768,9 @@ class Reserves(commands.Cog):
             await ctx.send(f"Stage **{stage_name}** does not exist.")
             return
 
-        limit = _limit()
+        limit = _limit(stage_name)
         if limit <= 0:
-            await ctx.send("Set the reserve limit first with `+setreserves <number>`.")
+            await ctx.send("Set the global default with `+setreserves <number>` or configure this stage with `+reservelimit <stage name> <limit>`.")
             return
 
         if ctx.guild is None:
@@ -1011,9 +1021,9 @@ class Reserves(commands.Cog):
         if _schedule_exists(stage_name):
             await ctx.send(f"A reserve schedule already exists for **{stage_name}**. Use `+resetmatchups {stage_name}` first, then `+creatematchups {stage_name}`.")
             return
-        limit = _limit()
+        limit = _limit(stage_name)
         if limit <= 0:
-            await ctx.send("Set the limit first with `+setreserves <number>`.")
+            await ctx.send("Set the global default with `+setreserves <number>` or configure this stage with `+reservelimit <stage name> <limit>`.")
             return
         rows = _all_reservations(stage_name)
         if not rows:
@@ -1174,7 +1184,7 @@ class Reserves(commands.Cog):
         if stage_name and not _stage_exists(ctx.guild.id, stage_name):
             await ctx.send(f"Stage **{stage_name}** does not exist.")
             return
-        limit = _limit()
+        limit = _limit(stage_name) if stage_name else _limit()
         rows = _all_reservations(stage_name)
         counts = {}
         initiated = {}
