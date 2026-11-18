@@ -2260,11 +2260,10 @@ class Stats(commands.Cog):
                 if int(row["balls_bowled"]) > 0 else "DNB"
             )
             saved_team = self._saved_player_team(row["source_message_id"], member.id)
-            transferred_to = [item["new_team_name"] for item in transfers]
             opponent = self._saved_opponent(
                 row["source_message_id"], member.id,
                 expected_team_name=team_name,
-                exclude_team_names=([saved_team] if saved_team else []) + transferred_to,
+                exclude_team_names=([saved_team] if saved_team else []),
             )
             versus = f"vs **{discord.utils.escape_markdown(opponent)}**\n　" if opponent else ""
             team_label = (
