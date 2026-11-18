@@ -184,6 +184,12 @@ def _init_db():
             VALUES (1, 0)
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS reserve_stage_limits (
+                stage_name TEXT PRIMARY KEY COLLATE NOCASE,
+                total_limit INTEGER NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS reservations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 reserving_team TEXT NOT NULL COLLATE NOCASE,
@@ -228,8 +234,18 @@ def _init_db():
             conn.execute("ALTER TABLE reservations ADD COLUMN stage_name TEXT NOT NULL DEFAULT 'Stage 1'")
 
 
-def _limit():
+def _limit(stage_name=None):
     with _connect() as conn:
+        if stage_name:
+            try:
+                row = conn.execute(
+                    "SELECT total_limit FROM reserve_stage_limits WHERE stage_name=? COLLATE NOCASE",
+                    (stage_name,),
+                ).fetchone()
+                if row:
+                    return int(row["total_limit"])
+            except sqlite3.OperationalError:
+                pass
         row = conn.execute(
             "SELECT total_limit FROM reserve_settings WHERE id = 1"
         ).fetchone()
@@ -581,6 +597,47 @@ class Reserves(commands.Cog):
             f"**{total}**."
         )
 
+    @commands.command(name="reservelimit")
+    async def set_stage_reserve_limit(self, ctx, stage_name: str, total: int):
+        """Set a reserve limit override for one tournament stage."""
+        if not await self.owner_only(ctx):
+            return
+        if total < 1 or total > 100:
+            await ctx.reply("Choose a stage reserve limit from 1 to 100.", mention_author=False)
+            return
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.reply(
+                f"Stage **{stage_name}** does not exist. Create it before setting its reserve limit.",
+                mention_author=False,
+            )
+            return
+        with _connect() as conn:
+            current_counts = conn.execute(
+                "SELECT team_name, COUNT(*) AS n FROM ("
+                "SELECT reserving_team AS team_name FROM reservations WHERE LOWER(stage_name)=LOWER(?) "
+                "UNION ALL SELECT opposing_team AS team_name FROM reservations WHERE LOWER(stage_name)=LOWER(?)"
+                ") GROUP BY team_name COLLATE NOCASE",
+                (stage_name, stage_name),
+            ).fetchall()
+            over = [row["team_name"] for row in current_counts if int(row["n"]) > total]
+            if over:
+                await ctx.reply(
+                    f"Cannot set **{stage_name}** to **{total}**: these teams already exceed it: "
+                    + ", ".join(f"**{name}**" for name in over[:20]),
+                    mention_author=False,
+                )
+                return
+            conn.execute(
+                "INSERT INTO reserve_stage_limits(stage_name,total_limit) VALUES(?,?) "
+                "ON CONFLICT(stage_name) DO UPDATE SET total_limit=excluded.total_limit",
+                (stage_name, total),
+            )
+        await ctx.reply(
+            f"Reserve limit for **{stage_name}** set to **{total}** matches per team. "
+            "Stages without an override continue using the global setreserves limit.",
+            mention_author=False,
+        )
+
     @commands.command(name="reservematch")
     async def reservematch(self, ctx, *, stage_name: str = None):
         if not await self.owner_only(ctx):
@@ -591,7 +648,7 @@ class Reserves(commands.Cog):
         if not _stage_exists(ctx.guild.id, stage_name):
             await ctx.send(f"Stage **{stage_name}** does not exist. Create it with `+createnewstage {stage_name}`.")
             return
-        limit = _limit()
+        limit = _limit(stage_name)
         if limit <= 0:
             await ctx.send("Set the limit first with `+setreserves <number>`.")
             return
