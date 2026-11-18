@@ -268,9 +268,17 @@ class SyncConfirmView(discord.ui.View):
                 embed=None, view=self,
             )
             return
+        competition_row = self.cog.bot.db.execute(
+            "SELECT competition FROM stats_imports WHERE source_message_id=? AND guild_id=?",
+            (int(self.match_id), int(self.ctx.guild.id)),
+        ).fetchone()
+        competition = str(competition_row[0]) if competition_row else "MAIN TOURNAMENT"
         text = (
-            f"✅ Added this match's catches to the fielding totals ({len(self.rows)} player(s))."
-            if ok else "This match was already added earlier. Nothing changed."
+            (f"✅ Recorded this match's fielding sync for **{competition}**. "
+             "Last Gate totals remain separate from main fielding totals.")
+            if ok and competition == "THE LAST GATE" else
+            (f"✅ Added this match's catches to the main fielding totals ({len(self.rows)} player(s))."
+             if ok else "This match was already added earlier. Nothing changed.")
         )
         await interaction.response.edit_message(content=text, embed=None, view=self)
 
@@ -384,7 +392,19 @@ class CatchTracker(commands.Cog):
         )
         self.bot.db.commit()
 
-    def _increment(self, guild_id, user_id, result):
+    def _increment(self, guild_id, user_id, result, channel_id=None):
+        # Live aggregate fielding totals remain MAIN-only. Last Gate fielding is
+        # calculated from the competition-tagged match imports instead.
+        if channel_id is not None:
+            try:
+                scope = self.bot.db.execute(
+                    "SELECT competition FROM batter_catch_channel_competition WHERE guild_id=? AND channel_id=?",
+                    (int(guild_id), int(channel_id)),
+                ).fetchone()
+                if scope and str(scope[0]) == "THE LAST GATE":
+                    return
+            except sqlite3.Error:
+                pass
         caught = 1 if result == "taken" else 0
         dropped = 1 if result == "dropped" else 0
         self.bot.db.execute(
@@ -445,16 +465,22 @@ class CatchTracker(commands.Cog):
                     "VALUES (?, ?, ?)",
                     (int(match_id), int(guild_id), time.time()),
                 )
-                db.executemany(
-                    """
-                    INSERT INTO fielding_stats (guild_id, user_id, catches_caught, catches_dropped)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                        catches_caught=catches_caught + excluded.catches_caught,
-                        catches_dropped=catches_dropped + excluded.catches_dropped
-                    """,
-                    [(int(guild_id), uid, c, d) for uid, c, d in rows],
-                )
+                competition_row = db.execute(
+                    "SELECT competition FROM stats_imports WHERE source_message_id=? AND guild_id=?",
+                    (int(match_id), int(guild_id)),
+                ).fetchone()
+                competition = str(competition_row[0]) if competition_row else "MAIN TOURNAMENT"
+                if competition != "THE LAST GATE":
+                    db.executemany(
+                        """
+                        INSERT INTO fielding_stats (guild_id, user_id, catches_caught, catches_dropped)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                            catches_caught=catches_caught + excluded.catches_caught,
+                            catches_dropped=catches_dropped + excluded.catches_dropped
+                        """,
+                        [(int(guild_id), uid, c, d) for uid, c, d in rows],
+                    )
         except Exception as exc:
             if "UNIQUE" in str(exc) or "PRIMARY KEY" in str(exc):
                 return False
@@ -514,7 +540,7 @@ class CatchTracker(commands.Cog):
                        f.source_message_id
                 FROM player_match_fielding f
                 JOIN stats_imports i ON i.source_message_id = f.source_message_id
-                WHERE i.guild_id = ? AND f.user_id = ?
+                WHERE i.guild_id = ? AND f.user_id = ? AND i.competition='MAIN TOURNAMENT'
                   AND i.imported_at > COALESCE(
                       (SELECT reset_at FROM fielding_reset_marks WHERE guild_id = ?), 0)
                 ORDER BY i.imported_at DESC, f.source_message_id DESC
@@ -1058,7 +1084,7 @@ class CatchTracker(commands.Cog):
                 SELECT f.user_id, SUM(f.catches_taken), SUM(f.catches_dropped)
                 FROM player_match_fielding f
                 JOIN stats_imports i ON i.source_message_id = f.source_message_id
-                WHERE i.guild_id = ?
+                WHERE i.guild_id = ? AND i.competition='MAIN TOURNAMENT'
                   AND i.imported_at > COALESCE(
                       (SELECT reset_at FROM fielding_reset_marks WHERE guild_id = ?), 0)
                 GROUP BY f.user_id
@@ -1190,7 +1216,7 @@ class CatchTracker(commands.Cog):
         if time.monotonic() - pending["created"] > PENDING_TTL_SECONDS:
             return
 
-        self._increment(message.guild.id, pending["fielder_id"], result)
+        self._increment(message.guild.id, pending["fielder_id"], result, channel_id)
 
         # Optional custom fielder line (fielderlines.py), sent right after the
         # Hand Cricket result message. Any failure here must never affect catch tracking.
