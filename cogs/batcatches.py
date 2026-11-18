@@ -84,7 +84,19 @@ class BatterCatches(commands.Cog):
                 channel_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 result TEXT NOT NULL CHECK (result IN ('taken', 'dropped')),
-                created_at REAL NOT NULL)
+                created_at REAL NOT NULL,
+                competition TEXT NOT NULL DEFAULT 'MAIN TOURNAMENT')
+        """)
+        event_columns = {row["name"] for row in bot.db.execute("PRAGMA table_info(batter_catch_events)")}
+        if "competition" not in event_columns:
+            bot.db.execute("ALTER TABLE batter_catch_events ADD COLUMN competition TEXT NOT NULL DEFAULT 'MAIN TOURNAMENT'")
+        bot.db.execute("""
+            CREATE TABLE IF NOT EXISTS batter_catch_channel_competition (
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                competition TEXT NOT NULL DEFAULT 'MAIN TOURNAMENT',
+                PRIMARY KEY (guild_id, channel_id)
+            )
         """)
         bot.db.execute(
             "CREATE INDEX IF NOT EXISTS batter_catch_events_guild_user "
@@ -108,20 +120,25 @@ class BatterCatches(commands.Cog):
         ).fetchone() is not None
 
     def _save(self, guild_id, channel_id, message_id, user_id, result, ts) -> bool:
+        scope = self.bot.db.execute(
+            "SELECT competition FROM batter_catch_channel_competition WHERE guild_id=? AND channel_id=?",
+            (int(guild_id), int(channel_id)),
+        ).fetchone()
+        competition = str(scope[0]) if scope else "MAIN TOURNAMENT"
         cur = self.bot.db.execute(
             "INSERT OR IGNORE INTO batter_catch_events "
-            "(message_id, guild_id, channel_id, user_id, result, created_at) VALUES (?,?,?,?,?,?)",
-            (int(message_id), int(guild_id), int(channel_id), int(user_id), result, float(ts)),
+            "(message_id, guild_id, channel_id, user_id, result, created_at, competition) VALUES (?,?,?,?,?,?,?)",
+            (int(message_id), int(guild_id), int(channel_id), int(user_id), result, float(ts), competition),
         )
         self.bot.db.commit()
         return cur.rowcount > 0
 
-    def totals(self, guild_id: int) -> dict[int, tuple[int, int]]:
-        """{user_id: (dropped, taken)} for this server."""
+    def totals(self, guild_id: int, competition: str = "MAIN TOURNAMENT") -> dict[int, tuple[int, int]]:
+        """{user_id: (dropped, taken)} for one competition."""
         rows = self.bot.db.execute(
             "SELECT user_id, SUM(result='dropped'), SUM(result='taken') "
-            "FROM batter_catch_events WHERE guild_id=? GROUP BY user_id",
-            (int(guild_id),),
+            "FROM batter_catch_events WHERE guild_id=? AND competition=? GROUP BY user_id",
+            (int(guild_id), competition),
         ).fetchall()
         return {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
 
@@ -187,7 +204,8 @@ class BatterCatches(commands.Cog):
     # ------------------------------------------------------------------ backfill
     @commands.command(name="scanbatcatches", aliases=["rescanbatcatches"])
     @commands.guild_only()
-    async def scan_batter_catches(self, ctx: commands.Context, hours: int = 72, mode: str = "preview"):
+    async def scan_batter_catches(self, ctx: commands.Context, hours: int = 72,
+                                  competition: str = "MAIN", mode: str = "preview"):
         """Rebuild batter-side catches (taken/dropped) from old Hand Cricket messages.
 
         Usage: +scanbatcatches [hours] [apply]
@@ -196,6 +214,15 @@ class BatterCatches(commands.Cog):
         """
         if ctx.author.id != BOT_OWNER_ID:
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        if competition.lower() in ("apply", "confirm", "preview"):
+            mode, competition = competition, "MAIN"
+        normalized_competition = competition.strip().upper().replace("_", " ")
+        if normalized_competition in ("MAIN", "MAIN TOURNAMENT"):
+            normalized_competition = "MAIN TOURNAMENT"
+        elif normalized_competition in ("LAST GATE", "THE LAST GATE"):
+            normalized_competition = "THE LAST GATE"
+        else:
+            return await ctx.reply("Competition must be MAIN or LAST GATE.", mention_author=False)
         apply = mode.lower() in ("apply", "confirm")
         hours = max(1, min(int(hours), 24 * 120))
         guild, db = ctx.guild, self.bot.db
@@ -292,8 +319,8 @@ class BatterCatches(commands.Cog):
         try:
             db.executemany(
                 "INSERT OR IGNORE INTO batter_catch_events "
-                "(message_id, guild_id, channel_id, user_id, result, created_at) VALUES (?,?,?,?,?,?)",
-                [(mid, guild.id, cid, uid, result, ts) for mid, cid, uid, result, ts in new],
+                "(message_id, guild_id, channel_id, user_id, result, created_at, competition) VALUES (?,?,?,?,?,?,?)",
+                [(mid, guild.id, cid, uid, result, ts, normalized_competition) for mid, cid, uid, result, ts in new],
             )
             db.commit()
         except Exception:
@@ -301,6 +328,31 @@ class BatterCatches(commands.Cog):
             raise
         summary.append("✅ Saved. Open `+lb` → Batting to see the new leaderboards.")
         await ctx.reply("\n".join(summary), file=file, mention_author=False)
+
+    @commands.command(name="setcatchcompetition")
+    @commands.guild_only()
+    async def set_catch_competition(self, ctx: commands.Context, channel: discord.TextChannel,
+                                    competition: str):
+        """Set the competition scope for batter-side catch events in a tracked channel."""
+        if ctx.author.id != BOT_OWNER_ID:
+            return await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        normalized = competition.strip().upper().replace("_", " ")
+        if normalized in ("MAIN", "MAIN TOURNAMENT"):
+            normalized = "MAIN TOURNAMENT"
+        elif normalized in ("LAST GATE", "THE LAST GATE"):
+            normalized = "THE LAST GATE"
+        else:
+            return await ctx.reply("Use MAIN or LAST GATE.", mention_author=False)
+        self.bot.db.execute(
+            "INSERT INTO batter_catch_channel_competition(guild_id,channel_id,competition) VALUES(?,?,?) "
+            "ON CONFLICT(guild_id,channel_id) DO UPDATE SET competition=excluded.competition",
+            (ctx.guild.id, channel.id, normalized),
+        )
+        self.bot.db.commit()
+        await ctx.reply(
+            f"✅ Batter catch events in {channel.mention} will be recorded under **{normalized}**.",
+            mention_author=False,
+        )
 
     # ------------------------------------------------------------------ small tools
     @commands.command(name="batcatches")
