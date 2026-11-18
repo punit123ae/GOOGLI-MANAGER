@@ -69,6 +69,11 @@ METRICS = {
         ("team_dropped", "Most Catch Drops as a Team"),
         ("team_opps", "Most Catch Opportunities as a Team"),
     ],
+    "THE LAST GATE": [
+        ("runs", "Runs"),
+        ("wickets", "Wickets"),
+        ("fantasy", "Fantasy Points"),
+    ],
 }
 
 
@@ -388,6 +393,7 @@ class CategorySelect(discord.ui.Select):
             "Fantasy Points": "<:Crown:1561296003104243803>",
             "Fielding": "🧤",
             "Team Fielding": "🛡️",
+            "THE LAST GATE": "🚪",
         }
         options = [discord.SelectOption(label=name, emoji=category_emojis[name], default=name == view.category)
                    for name in METRICS]
@@ -397,6 +403,18 @@ class CategorySelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         self.parent_view.category = self.values[0]
         self.parent_view.metric_key, self.parent_view.metric_label = METRICS[self.values[0]][0]
+        competition = "THE LAST GATE" if self.values[0] == "THE LAST GATE" else "MAIN TOURNAMENT"
+        self.parent_view.cog.rows_by_user = self.parent_view.cog._rows(
+            self.parent_view.ctx.guild.id, competition
+        )
+        self.parent_view.cog.fielding_by_user = self.parent_view.cog._fielding_rows(
+            self.parent_view.ctx.guild.id, competition
+        )
+        self.parent_view.cog.batter_impact_by_user = (
+            self.parent_view.cog._batter_impact_rows(self.parent_view.ctx.guild.id)
+            if competition == "MAIN TOURNAMENT" else {}
+        )
+        self.parent_view.page = 0
         await self.parent_view.refresh(interaction)
 
 
@@ -789,19 +807,28 @@ class LeaderboardCog(commands.Cog):
             return {}
         return {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
 
-    def _fielding_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
-        """Persistent fielding totals for this server only: {user_id: (caught, dropped)}."""
+    def _fielding_rows(self, guild_id: int, competition: str = "MAIN TOURNAMENT") -> dict[int, tuple[int, int]]:
+        """Fielding totals scoped to one competition."""
         db = getattr(self.bot, "db", None)
         if db is None:
             return {}
         try:
+            if competition == "THE LAST GATE":
+                rows = db.execute(
+                    """SELECT f.user_id, SUM(f.catches_taken), SUM(f.catches_dropped)
+                       FROM player_match_fielding f
+                       JOIN stats_imports i ON i.source_message_id=f.source_message_id
+                       WHERE i.guild_id=? AND i.competition=?
+                       GROUP BY f.user_id""",
+                    (guild_id, competition),
+                ).fetchall()
+                return {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
             rows = db.execute(
                 "SELECT user_id, catches_caught, catches_dropped "
                 "FROM fielding_stats WHERE guild_id = ?",
                 (guild_id,),
             ).fetchall()
         except Exception:
-            # Table not created yet (fielding cog not loaded): no fielding data.
             return {}
         return {int(r["user_id"]): (int(r["catches_caught"]), int(r["catches_dropped"])) for r in rows}
 
@@ -862,7 +889,7 @@ class LeaderboardCog(commands.Cog):
                 mention_author=False,
             )
 
-    def _rows(self, guild_id: int) -> dict[int, list[dict]]:
+    def _rows(self, guild_id: int, competition: str = "MAIN TOURNAMENT") -> dict[int, list[dict]]:
         db = getattr(self.bot, "db", None)
         if db is None:
             raise RuntimeError("The bot database connection is not available.")
@@ -871,10 +898,10 @@ class LeaderboardCog(commands.Cog):
                           p.balls_bowled, p.wickets, p.not_out, i.imported_at
                    FROM player_match_stats p
                    JOIN stats_imports i ON i.source_message_id = p.source_message_id
-                   WHERE i.guild_id = ?
+                   WHERE i.guild_id = ? AND i.competition = ?
                    ORDER BY i.imported_at ASC, p.source_message_id ASC"""
         latest_match = None
-        for row in db.execute(query, (guild_id,)).fetchall():
+        for row in db.execute(query, (guild_id, competition)).fetchall():
             latest_match = int(row["source_message_id"])   # rows are in import order, so the last one wins
             result[int(row["user_id"])].append({
                 "match": int(row["source_message_id"]),
