@@ -880,6 +880,8 @@ class LeaderboardCog(commands.Cog):
             for category, metrics in METRICS.items():
                 if category in EMBED_CATEGORIES:
                     continue
+                active_competition = "THE LAST GATE" if category == "THE LAST GATE" else "MAIN TOURNAMENT"
+                self.batter_impact_by_user = self._batter_impact_rows(guild_id, active_competition)
                 for metric_key, _label in metrics:
                     seeded += 1
                     if metric_key not in BATTER_IMPACT_KEYS:
