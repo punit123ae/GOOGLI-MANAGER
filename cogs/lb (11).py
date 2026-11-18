@@ -673,8 +673,9 @@ class LeaderboardView(discord.ui.View):
                     computed.append((uid, value))
         else:
             if self.metric_key == "fantasy":
-                # Re-read so catch totals edited elsewhere show up, like +stats does.
-                self.cog.fielding_by_user = self.cog._fielding_rows(guild.id)
+                # Re-read the fielding totals for the active competition.
+                active_competition = "THE LAST GATE" if self.category == "THE LAST GATE" else "MAIN TOURNAMENT"
+                self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
             computed = self._generic_ranking(rows_by_user)
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         if self.category in EMBED_CATEGORIES:
