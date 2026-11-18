@@ -1393,13 +1393,13 @@ class Stats(commands.Cog):
             return 0
         return int(row[0]) if row else 0
 
-    def get_batter_catches(self, guild_id, user_id):
-        """(catches_dropped, catches_taken) as a batter, from batter_catch_events."""
+    def get_batter_catches(self, guild_id, user_id, competition="MAIN TOURNAMENT"):
+        """(catches_dropped, catches_taken) as a batter, scoped to a competition."""
         try:
             row = self.db.execute(
                 "SELECT SUM(result='dropped'), SUM(result='taken') FROM batter_catch_events "
-                "WHERE guild_id=? AND user_id=?",
-                (int(guild_id), int(user_id)),
+                "WHERE guild_id=? AND user_id=? AND competition=?",
+                (int(guild_id), int(user_id), competition),
             ).fetchone()
         except Exception:
             # batcatches may not have created its table yet.
@@ -2059,7 +2059,7 @@ class Stats(commands.Cog):
         catches_caught, catches_dropped, fielding_points = self.get_fielding_stats(
             ctx.guild.id, member.id, competition
         )
-        batter_drops, batter_taken = self.get_batter_catches(ctx.guild.id, member.id)
+        batter_drops, batter_taken = self.get_batter_catches(ctx.guild.id, member.id, competition)
 
         try:
             if design == 2:
