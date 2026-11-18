@@ -121,6 +121,10 @@ def initialize_database():
         imported_at REAL NOT NULL
     )""")
 
+    stats_import_columns = {r["name"] for r in db.execute("PRAGMA table_info(stats_imports)")}
+    if "competition" not in stats_import_columns:
+        db.execute("ALTER TABLE stats_imports ADD COLUMN competition TEXT NOT NULL DEFAULT 'MAIN TOURNAMENT'")
+
     db.execute("""
     CREATE TABLE IF NOT EXISTS player_match_stats (
         source_message_id INTEGER NOT NULL,
