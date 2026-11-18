@@ -2094,7 +2094,7 @@ class Stats(commands.Cog):
             new_team_boundary = max(new_team_positions) if new_team_positions else None
         for index, row in enumerate(recent_rows, start=1):
             if new_team_boundary is not None and index - 1 == new_team_boundary:
-                recent_lines.append(f"**— {discord.utils.escape_markdown(latest_transfer['new_team_name'])} —**")
+                recent_lines.append(f"**-- {discord.utils.escape_markdown(latest_transfer['new_team_name'])} --**")
             status = "*" if row["not_out"] else ""
             fielding_row = self.db.execute(
                 "SELECT opportunities, catches_taken, catches_dropped FROM player_match_fielding WHERE source_message_id=? AND user_id=?",
