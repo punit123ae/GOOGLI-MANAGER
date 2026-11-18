@@ -121,7 +121,8 @@ class PlayerH2H(commands.Cog):
                           p.wickets, p.not_out
                    FROM player_match_stats p
                    JOIN stats_imports i ON i.source_message_id = p.source_message_id
-                   WHERE i.guild_id = ? AND p.user_id = ?""",
+                   WHERE i.guild_id = ? AND p.user_id = ?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT') = 'MAIN TOURNAMENT'""",
                 (int(guild_id), int(user_id)),
             ).fetchall()
         except Exception:
@@ -163,6 +164,7 @@ class PlayerH2H(commands.Cog):
                 JOIN player_match_stats b ON b.source_message_id = a.source_message_id
                 JOIN stats_imports i ON i.source_message_id = a.source_message_id
                 WHERE i.guild_id = ? AND a.user_id = ? AND b.user_id = ?
+                  AND COALESCE(i.competition, 'MAIN TOURNAMENT') = 'MAIN TOURNAMENT'
                 ORDER BY i.imported_at DESC, a.source_message_id DESC
                 """,
                 (int(guild_id), int(a_id), int(b_id)),
