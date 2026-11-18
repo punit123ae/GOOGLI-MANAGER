@@ -358,20 +358,31 @@ class TeamCommandsB:
         if member.id in (old_team["captain_id"], old_team["vice_captain_id"]):
             await ctx.reply("A team captain or vice-captain cannot be stolen with this command.", mention_author=False)
             return
-        rostered = self.db.execute(
-            "SELECT 1 FROM team_players WHERE team_id=? AND user_id=?",
-            (old_team["id"], member.id),
-        ).fetchone()
-        if not rostered:
-            await ctx.reply(f"{member.mention} is not on **{old_team['name']}**'s player roster.", mention_author=False)
+        # Older admin workflows often used +kickplayer on the old team and
+        # +addplayer on the new team before +stealplayer existed. In that case
+        # the old roster row is already gone and the new row may already exist.
+        # The command's explicit Old Team | New Team arguments are the transfer
+        # declaration; do not reject it just because the old row was removed.
+        memberships = self.db.execute(
+            "SELECT team_id FROM team_players WHERE user_id=?",
+            (member.id,),
+        ).fetchall()
+        membership_ids = {int(row[0]) for row in memberships}
+        unexpected = membership_ids - {int(old_team["id"]), int(new_team["id"])}
+        if unexpected:
+            other = self.db.execute(
+                "SELECT name FROM registered_teams WHERE id=?",
+                (next(iter(unexpected)),),
+            ).fetchone()
+            other_name = str(other[0]) if other else "another team"
+            await ctx.reply(
+                f"{member.mention} is currently listed on **{other_name}**. "
+                "Remove that roster entry first, or use that team as the old team.",
+                mention_author=False,
+            )
             return
-        if self.db.execute(
-            "SELECT 1 FROM team_players WHERE team_id=? AND user_id=?",
-            (new_team["id"], member.id),
-        ).fetchone():
-            await ctx.reply(f"{member.mention} is already listed on **{new_team['name']}**.", mention_author=False)
-            return
-        if self._team_player_count(new_team["id"]) >= self._max_players(ctx.guild.id):
+        already_new = int(new_team["id"]) in membership_ids
+        if not already_new and self._team_player_count(new_team["id"]) >= self._max_players(ctx.guild.id):
             await ctx.reply(f"**{new_team['name']}** has reached its maximum roster size.", mention_author=False)
             return
 
@@ -382,10 +393,11 @@ class TeamCommandsB:
                     "DELETE FROM team_players WHERE team_id=? AND user_id=?",
                     (old_team["id"], member.id),
                 )
-                self.db.execute(
-                    "INSERT INTO team_players(team_id,user_id,added_by,added_at) VALUES(?,?,?,?)",
-                    (new_team["id"], member.id, ctx.author.id, now),
-                )
+                if not already_new:
+                    self.db.execute(
+                        "INSERT INTO team_players(team_id,user_id,added_by,added_at) VALUES(?,?,?,?)",
+                        (new_team["id"], member.id, ctx.author.id, now),
+                    )
                 self.db.execute(
                     "INSERT INTO player_team_transfers "
                     "(guild_id,user_id,old_team_id,old_team_name,new_team_id,new_team_name,transferred_at) "
@@ -403,6 +415,7 @@ class TeamCommandsB:
         await self._sync_base_role_member(ctx.guild, member)
         await ctx.reply(
             f"✅ **{member.display_name}** has been transferred: **{old_team['name']} → {new_team['name']}**.\n"
+            f"Previous +addplayer/+kickplayer roster changes were handled automatically. "
             f"Both team roles have been retained/assigned, and previous match records remain unchanged.",
             mention_author=False,
         )
