@@ -928,15 +928,46 @@ class StatsSelect(discord.ui.Select):
         )
 
 
+class StatsCompetitionSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Switch competition stats...",
+            min_values=1, max_values=1,
+            options=[
+                discord.SelectOption(label="MAIN TOURNAMENT", value="MAIN TOURNAMENT"),
+                discord.SelectOption(label="THE LAST GATE", value="THE LAST GATE"),
+            ],
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if interaction.user.id != view.requester_id:
+            await interaction.response.send_message(
+                "This stats menu belongs to the person who requested it.", ephemeral=True
+            )
+            return
+        selected = self.values[0]
+        await interaction.response.defer()
+        await view.cog.player_stats.callback(
+            view.cog, view.ctx, user_id=f"{view.member_id} | {selected}"
+        )
+
+
 class StatsView(discord.ui.View):
-    def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed):
+    def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed,
+                 cog=None, ctx=None, has_last_gate=False):
         super().__init__(timeout=600)
         self.requester_id = requester_id
         self.member_id = member_id
         self.overall_image = overall_image
         self.overview_embed = overview_embed
         self.deep_embed = deep_embed
+        self.cog = cog
+        self.ctx = ctx
         self.add_item(StatsSelect())
+        if has_last_gate and cog is not None and ctx is not None:
+            self.add_item(StatsCompetitionSelect())
 
 
 # Existing leaderboard metric definitions.
@@ -2288,7 +2319,16 @@ class Stats(commands.Cog):
             embed.add_field(name="TEAM TRANSFER HISTORY", value=transfer_text, inline=False)
             deep_embed.add_field(name="TEAM TRANSFER HISTORY", value=transfer_text, inline=False)
 
-        view = StatsView(ctx.author.id, member.id, overall_image, embed, deep_embed)
+        has_last_gate = self.db.execute(
+            """SELECT 1 FROM stats_imports i
+               JOIN player_match_stats p ON p.source_message_id=i.source_message_id
+               WHERE i.guild_id=? AND i.competition='THE LAST GATE' AND p.user_id=? LIMIT 1""",
+            (ctx.guild.id, member.id),
+        ).fetchone() is not None
+        view = StatsView(
+            ctx.author.id, member.id, overall_image, embed, deep_embed,
+            cog=self, ctx=ctx, has_last_gate=has_last_gate,
+        )
 
         # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
         await ctx.send(
