@@ -465,7 +465,7 @@ class MetricSelect(discord.ui.Select):
         options = [discord.SelectOption(label=label, value=key, default=key == view.metric_key)
                    for key, label in view.metrics[view.category]]
         super().__init__(placeholder="Choose statistic", min_values=1, max_values=1,
-                         options=options, row=1)
+                         options=options, row=2)
 
     async def callback(self, interaction: discord.Interaction):
         self.parent_view.metric_key = self.values[0]
