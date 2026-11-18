@@ -1,6 +1,7 @@
 import asyncio
 import io
 import re
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1126,6 +1127,29 @@ class Stats(commands.Cog):
         )
         self.db.commit()
 
+    def get_player_transfers(self, guild_id, user_id):
+        """Return this player's recorded team transfers, oldest first."""
+        path = Path(__file__).resolve().parent.parent / "team_registration.db"
+        if not path.is_file():
+            return []
+        try:
+            with sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                return [dict(row) for row in conn.execute(
+                    "SELECT old_team_name, new_team_name, transferred_at "
+                    "FROM player_team_transfers WHERE guild_id=? AND user_id=? ORDER BY id",
+                    (int(guild_id), int(user_id)),
+                ).fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def _saved_player_team(self, match_id, user_id):
+        row = self.db.execute(
+            "SELECT team_name FROM match_teams WHERE source_message_id=? AND user_id=?",
+            (int(match_id), int(user_id)),
+        ).fetchone()
+        return str(row[0]) if row else None
+
     def _saved_opponent(self, match_id, user_id):
         """Opponent team of this player in one match, from the teams saved at import.
 
@@ -2050,7 +2074,25 @@ class Stats(commands.Cog):
         )
         recent_rows = list(reversed(rows[-5:]))
         recent_lines = []
+        transfers = self.get_player_transfers(ctx.guild.id, member.id)
+        latest_transfer = transfers[-1] if transfers else None
+        recent_team_names = [
+            self._saved_player_team(row["source_message_id"], member.id)
+            for row in recent_rows
+        ]
+        # The recent list is newest-first. Put the divider immediately before
+        # the first match from the new team in chronological order.
+        new_team_boundary = None
+        if latest_transfer:
+            new_name = latest_transfer["new_team_name"]
+            for pos in range(len(recent_team_names) - 1, -1, -1):
+                if (recent_team_names[pos] or "").casefold() == new_name.casefold():
+                    new_team_boundary = pos
+                elif new_team_boundary is not None:
+                    break
         for index, row in enumerate(recent_rows, start=1):
+            if new_team_boundary is not None and index - 1 == new_team_boundary:
+                recent_lines.append(f"**— {discord.utils.escape_markdown(latest_transfer['new_team_name'])} —**")
             status = "*" if row["not_out"] else ""
             fielding_row = self.db.execute(
                 "SELECT opportunities, catches_taken, catches_dropped FROM player_match_fielding WHERE source_message_id=? AND user_id=?",
@@ -2159,6 +2201,16 @@ class Stats(commands.Cog):
             value=f"**`{total_points:.2f}`**",
             inline=False,
         )
+        if transfers:
+            transfer_lines = [
+                f"**{discord.utils.escape_markdown(item['old_team_name'])} → "
+                f"{discord.utils.escape_markdown(item['new_team_name'])}**"
+                for item in transfers
+            ]
+            transfer_text = "\n".join(transfer_lines)
+            embed.add_field(name="TEAM TRANSFER HISTORY", value=transfer_text, inline=False)
+            deep_embed.add_field(name="TEAM TRANSFER HISTORY", value=transfer_text, inline=False)
+
         view = StatsView(ctx.author.id, member.id, overall_image, embed, deep_embed)
 
         # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
