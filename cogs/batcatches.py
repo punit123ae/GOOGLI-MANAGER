@@ -208,7 +208,7 @@ class BatterCatches(commands.Cog):
                                   competition: str = "MAIN", mode: str = "preview"):
         """Rebuild batter-side catches (taken/dropped) from old Hand Cricket messages.
 
-        Usage: +scanbatcatches [hours] [apply]
+        Usage: +scanbatcatches [hours] [MAIN|LAST_GATE] [apply]
         Reads every +starttracking channel for the last <hours> hours (max 2880).
         Without "apply" nothing is written. Safe to run repeatedly.
         """
@@ -332,7 +332,7 @@ class BatterCatches(commands.Cog):
     @commands.command(name="setcatchcompetition")
     @commands.guild_only()
     async def set_catch_competition(self, ctx: commands.Context, channel: discord.TextChannel,
-                                    competition: str):
+                                    *, competition: str):
         """Set the competition scope for batter-side catch events in a tracked channel."""
         if ctx.author.id != BOT_OWNER_ID:
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
@@ -342,7 +342,7 @@ class BatterCatches(commands.Cog):
         elif normalized in ("LAST GATE", "THE LAST GATE"):
             normalized = "THE LAST GATE"
         else:
-            return await ctx.reply("Use MAIN or LAST GATE.", mention_author=False)
+            return await ctx.reply("Usage: `+setcatchcompetition #channel MAIN` or `+setcatchcompetition #channel LAST_GATE`.", mention_author=False)
         self.bot.db.execute(
             "INSERT INTO batter_catch_channel_competition(guild_id,channel_id,competition) VALUES(?,?,?) "
             "ON CONFLICT(guild_id,channel_id) DO UPDATE SET competition=excluded.competition",
