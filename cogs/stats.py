@@ -1214,12 +1214,8 @@ class Stats(commands.Cog):
         ).fetchone()
         return str(row[0]) if row else None
 
-    def _saved_opponent(self, match_id, user_id):
-        """Opponent team of this player in one match, from the teams saved at import.
-
-        Returns None for matches imported before team names were saved, or when
-        the player or the other side has no saved team.
-        """
+    def _saved_opponent(self, match_id, user_id, expected_team_name=None, exclude_team_names=()):
+        """Find the opposing side without mistaking a transferred player's new team for its opponent."""
         try:
             rows = self.db.execute(
                 "SELECT user_id, team_name FROM match_teams WHERE source_message_id = ?",
@@ -1227,14 +1223,45 @@ class Stats(commands.Cog):
             ).fetchall()
         except Exception:
             return None
-        mine = next((r[1] for r in rows if int(r[0]) == int(user_id)), None)
-        if mine is None:
-            return None
+        saved_mine = next((str(r[1]) for r in rows if int(r[0]) == int(user_id)), None)
+        own_names = {str(name).casefold() for name in exclude_team_names if name}
+        if expected_team_name:
+            own_names.add(str(expected_team_name).casefold())
+        if saved_mine:
+            own_names.add(saved_mine.casefold())
         counts = {}
-        for _, team in rows:
-            if team != mine:
-                counts[team] = counts.get(team, 0) + 1
+        for row_user_id, team in rows:
+            team = str(team)
+            if int(row_user_id) == int(user_id) or team.casefold() in own_names:
+                continue
+            counts[team] = counts.get(team, 0) + 1
         return max(counts, key=lambda t: (counts[t], t)) if counts else None
+
+    @staticmethod
+    def _transfer_time(value):
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _team_for_performance(self, row, user_id, competition, transfers):
+        """Resolve the team at match time, preserving the Last Gate's pre-steal team."""
+        saved = self._saved_player_team(row["source_message_id"], user_id)
+        if not transfers:
+            return saved
+        if competition == "THE LAST GATE":
+            return str(transfers[0]["old_team_name"])
+        imported_at = float(row.get("imported_at", 0) or 0)
+        expected = str(transfers[0]["old_team_name"])
+        for transfer in transfers:
+            transferred_at = self._transfer_time(transfer.get("transferred_at"))
+            if transferred_at is None:
+                continue
+            if imported_at >= transferred_at:
+                expected = str(transfer["new_team_name"])
+            else:
+                break
+        return expected or saved
 
     def _match_team_snapshot(self, guild_id, user_ids):
         """{user_id: team name} from the current approved rosters, for players on a team.
@@ -2168,6 +2195,12 @@ class Stats(commands.Cog):
             inline=True,
         )
         embed.add_field(name="<:Crown:1561296003104243803> **__TOTAL FANTASY POINTS__**", value=f"**`{total_points:.2f}`**", inline=False)
+        if last_gate_team_name:
+            embed.add_field(
+                name="🚪 **__THE LAST GATE TEAM__**",
+                value=f"**{discord.utils.escape_markdown(last_gate_team_name)}** (team represented before the steal)",
+                inline=False,
+            )
 
         # Extended stats use the same recorded match rows and existing fantasy formula.
         best_batting = max(rows, key=lambda r: (r["runs"], r["balls_faced"]), default=None)
@@ -2182,9 +2215,14 @@ class Stats(commands.Cog):
         transfers = self.get_player_transfers(ctx.guild.id, member.id)
         latest_transfer = transfers[-1] if transfers else None
         recent_team_names = [
-            self._saved_player_team(row["source_message_id"], member.id)
+            self._team_for_performance(row, member.id, competition, transfers)
             for row in recent_rows
         ]
+        last_gate_rows = self.get_player_rows(ctx.guild.id, member.id, "THE LAST GATE")
+        last_gate_team_name = (
+            str(transfers[0]["old_team_name"])
+            if transfers and last_gate_rows else None
+        )
         # Recent rows are newest-first. A divider is shown only at a real
         # team change between adjacent saved match snapshots, not merely because
         # a team appears anywhere in the player's transfer history.
@@ -2221,7 +2259,13 @@ class Stats(commands.Cog):
                 f"{row['wickets']}/{row['runs_conceded']}"
                 if int(row["balls_bowled"]) > 0 else "DNB"
             )
-            opponent = self._saved_opponent(row["source_message_id"], member.id)
+            saved_team = self._saved_player_team(row["source_message_id"], member.id)
+            transferred_to = [item["new_team_name"] for item in transfers]
+            opponent = self._saved_opponent(
+                row["source_message_id"], member.id,
+                expected_team_name=team_name,
+                exclude_team_names=([saved_team] if saved_team else []) + transferred_to,
+            )
             versus = f"vs **{discord.utils.escape_markdown(opponent)}**\n　" if opponent else ""
             team_label = (
                 f"**{discord.utils.escape_markdown(team_name)}** • "
@@ -2260,8 +2304,9 @@ class Stats(commands.Cog):
         deep_embed = discord.Embed(
             title=f"{member.display_name} stats for `KASHMIR TITANS S1` • {competition} — Deep Stats",
             description=(
-                f"**MATCHES RECORDED:** `{t['matches']}`\n\n"
-                f"<:recent:1561311937843957801>  **__RECENT 5 MATCH SCORES__**\n{recent_text}"
+                f"**MATCHES RECORDED:** `{t['matches']}`\n"
+                + (f"🚪 **THE LAST GATE TEAM:** **{discord.utils.escape_markdown(last_gate_team_name)}**\n" if last_gate_team_name else "")
+                + f"\n<:recent:1561311937843957801>  **__RECENT 5 MATCH SCORES__**\n{recent_text}"
             ),
             colour=discord.Colour.blurple(),
         )
