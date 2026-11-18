@@ -78,6 +78,8 @@ LAST_GATE_METRICS = {
         ("runs", "Runs"), ("bat_avg", "Batting Average"),
         ("fifties", "Most 50s"), ("hundreds", "Most 100s"),
         ("ducks", "Ducks"), ("highest", "Highest Runs"),
+        ("lowest_strike_rate", "Lowest Strike Rate (minimum 50 runs)"),
+        ("strike_rate", "Highest Strike Rate (minimum 50 runs)"),
         ("bc_dropped", "Most Catches Dropped (as Batter)"),
         ("bc_taken", "Most Catches Taken (as Batter)"),
     ],
