@@ -263,6 +263,16 @@ class TeamCore:
             approval_channel_id INTEGER, approval_message_id INTEGER, created_at TEXT NOT NULL,
             decided_by INTEGER, UNIQUE(guild_id, name_key)
         );
+        CREATE TABLE IF NOT EXISTS player_team_transfers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            old_team_id INTEGER NOT NULL,
+            old_team_name TEXT NOT NULL,
+            new_team_id INTEGER NOT NULL,
+            new_team_name TEXT NOT NULL,
+            transferred_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS team_players (
             team_id INTEGER NOT NULL, user_id INTEGER NOT NULL, added_by INTEGER NOT NULL, added_at TEXT NOT NULL,
             PRIMARY KEY(team_id, user_id),
