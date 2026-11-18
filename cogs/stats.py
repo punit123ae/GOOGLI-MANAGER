@@ -1036,6 +1036,39 @@ class ResetServerStatsView(discord.ui.View):
 
 
 
+class CompetitionImportSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose which competition these stats belong to...",
+            min_values=1, max_values=1,
+            options=[
+                discord.SelectOption(label="MAIN TOURNAMENT", value="MAIN TOURNAMENT",
+                                     description="Import into the main tournament stats"),
+                discord.SelectOption(label="THE LAST GATE", value="THE LAST GATE",
+                                     description="Import only into The Last Gate stats"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if interaction.user.id != view.requester_id:
+            await interaction.response.send_message("Only the person who ran +as can choose this.", ephemeral=True)
+            return
+        view.choice = self.values[0]
+        await interaction.response.edit_message(
+            content=f"Competition selected: **{view.choice}**. Continuing stats import…", view=None
+        )
+        view.stop()
+
+
+class CompetitionImportView(discord.ui.View):
+    def __init__(self, requester_id):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.choice = None
+        self.add_item(CompetitionImportSelect())
+
+
 class CatchSyncView(discord.ui.View):
     """Ask whether +as should scan recent Hand Cricket catch messages."""
 
@@ -1419,7 +1452,7 @@ class Stats(commands.Cog):
         ):
             return None
 
-    def get_player_rows(self, guild_id, user_id):
+    def get_player_rows(self, guild_id, user_id, competition="MAIN TOURNAMENT"):
         records = self.db.execute(
             """
             SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
@@ -1427,10 +1460,10 @@ class Stats(commands.Cog):
             FROM player_match_stats p
             JOIN stats_imports i
               ON i.source_message_id = p.source_message_id
-            WHERE i.guild_id = ? AND p.user_id = ?
+            WHERE i.guild_id = ? AND p.user_id = ? AND i.competition = ?
             ORDER BY i.imported_at ASC, p.source_message_id ASC
             """,
-            (guild_id, user_id),
+            (guild_id, user_id, competition),
         ).fetchall()
         return [dict(row) for row in records]
 
@@ -1548,6 +1581,19 @@ class Stats(commands.Cog):
             await ctx.reply(f"❌ {exc}", mention_author=False)
             return
 
+        competition_view = CompetitionImportView(ctx.author.id)
+        competition_message = await ctx.reply(
+            "Choose the competition for this match's statistics:",
+            view=competition_view, mention_author=False,
+        )
+        await competition_view.wait()
+        if competition_view.choice is None:
+            await competition_message.edit(
+                content="⌛ Competition selection timed out. No stats were imported.", view=None
+            )
+            return
+        competition = competition_view.choice
+
         prompt = CatchSyncView(ctx.author.id)
         prompt_message = await ctx.reply(
             "<:gloves_ios:1564891803067613245> Do you want to sync catch stats from this channel before calculating fantasy points?",
@@ -1599,14 +1645,15 @@ class Stats(commands.Cog):
                 self.db.execute(
                     """
                     INSERT INTO stats_imports
-                        (source_message_id, guild_id, imported_by, imported_at)
-                    VALUES (?, ?, ?, ?)
+                        (source_message_id, guild_id, imported_by, imported_at, competition)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     (
                         source.id,
                         ctx.guild.id,
                         ctx.author.id,
                         datetime.now(timezone.utc).timestamp(),
+                        competition,
                     ),
                 )
                 self.db.executemany(
@@ -1692,7 +1739,7 @@ class Stats(commands.Cog):
                 f"`{dropped_total}` dropped (-{dropped_total * 10})."
             )
         await ctx.send(
-            f"✅ Imported statistics for **{len(rows)} players**.\n"
+            f"✅ Imported **{competition}** statistics for **{len(rows)} players**.\n"
             f"Match record: `{source.id}`\n"
             f"🏆 **Highest fantasy points:** {', '.join(top_names)}"
             f"{catch_summary}",
