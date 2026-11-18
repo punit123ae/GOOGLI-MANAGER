@@ -2085,11 +2085,13 @@ class Stats(commands.Cog):
         new_team_boundary = None
         if latest_transfer:
             new_name = latest_transfer["new_team_name"]
-            for pos in range(len(recent_team_names) - 1, -1, -1):
-                if (recent_team_names[pos] or "").casefold() == new_name.casefold():
-                    new_team_boundary = pos
-                elif new_team_boundary is not None:
-                    break
+            new_team_positions = [
+                pos for pos, team_name in enumerate(recent_team_names)
+                if (team_name or "").casefold() == new_name.casefold()
+            ]
+            # The greatest index is the oldest (first chronological) new-team
+            # performance in this newest-first list.
+            new_team_boundary = max(new_team_positions) if new_team_positions else None
         for index, row in enumerate(recent_rows, start=1):
             if new_team_boundary is not None and index - 1 == new_team_boundary:
                 recent_lines.append(f"**— {discord.utils.escape_markdown(latest_transfer['new_team_name'])} —**")
