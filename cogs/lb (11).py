@@ -71,7 +71,22 @@ METRICS = {
     ],
     "THE LAST GATE": [
         ("runs", "Runs"),
+        ("bat_avg", "Batting Average"),
+        ("fifties", "Most 50s"),
+        ("hundreds", "Most 100s"),
+        ("ducks", "Ducks"),
+        ("highest", "Highest Runs"),
         ("wickets", "Wickets"),
+        ("bowl_avg", "Bowling Average"),
+        ("bowl_sr", "Bowling Strike Rate"),
+        ("economy", "Economy"),
+        ("best_figures", "Bowling Figures"),
+        ("overs", "Most Overs Bowled"),
+        ("fld_caught", "Most Catches Caught"),
+        ("fld_dropped", "Most Catches Dropped"),
+        ("fld_eff", "Highest Catch Efficiency"),
+        ("bc_dropped", "Most Catches Dropped (as Batter)"),
+        ("bc_taken", "Most Catches Taken (as Batter)"),
         ("fantasy", "Fantasy Points"),
     ],
 }
@@ -410,9 +425,8 @@ class CategorySelect(discord.ui.Select):
         self.parent_view.cog.fielding_by_user = self.parent_view.cog._fielding_rows(
             self.parent_view.ctx.guild.id, competition
         )
-        self.parent_view.cog.batter_impact_by_user = (
-            self.parent_view.cog._batter_impact_rows(self.parent_view.ctx.guild.id)
-            if competition == "MAIN TOURNAMENT" else {}
+        self.parent_view.cog.batter_impact_by_user = self.parent_view.cog._batter_impact_rows(
+            self.parent_view.ctx.guild.id, competition
         )
         self.parent_view.page = 0
         await self.parent_view.refresh(interaction)
@@ -647,8 +661,12 @@ class LeaderboardView(discord.ui.View):
         guild = self.ctx.guild
         rows_by_user = self.cog.rows_by_user
         computed = []
-        if self.category == "Fielding":
-            # Fielding data comes from its own table, so fielding-only players count.
+        if self.category == "Fielding" or (
+            self.category == "THE LAST GATE" and self.metric_key in {"fld_caught", "fld_dropped", "fld_eff"}
+        ):
+            # Fielding data is loaded from the active competition's own records.
+            active_competition = "THE LAST GATE" if self.category == "THE LAST GATE" else "MAIN TOURNAMENT"
+            self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
             for uid, rec in self.cog.fielding_by_user.items():
                 if not _fielding_eligible(self.metric_key, rec):
                     continue
@@ -665,7 +683,8 @@ class LeaderboardView(discord.ui.View):
         elif self.metric_key in BATTER_IMPACT_KEYS:
             # Re-read the database on every render so owner edits/resets appear
             # when the leaderboard is refreshed, not only after a bot restart.
-            self.cog.batter_impact_by_user = self.cog._batter_impact_rows(guild.id)
+            active_competition = "THE LAST GATE" if self.category == "THE LAST GATE" else "MAIN TOURNAMENT"
+            self.cog.batter_impact_by_user = self.cog._batter_impact_rows(guild.id, active_competition)
             index = BATTER_IMPACT_KEYS[self.metric_key]
             for uid, rec in self.cog.batter_impact_by_user.items():
                 value = int(rec[index])
@@ -792,7 +811,7 @@ class LeaderboardCog(commands.Cog):
         """Fetch the server icon for the card's top-left corner."""
         return await self._asset_bytes(guild.icon if guild is not None else None)
 
-    def _batter_impact_rows(self, guild_id: int) -> dict[int, tuple[int, int]]:
+    def _batter_impact_rows(self, guild_id: int, competition: str = "MAIN TOURNAMENT") -> dict[int, tuple[int, int]]:
         """{user_id: (catches_dropped, catches_taken)} as a batter, from batter_catch_events."""
         db = getattr(self.bot, "db", None)
         if db is None:
@@ -800,8 +819,8 @@ class LeaderboardCog(commands.Cog):
         try:
             rows = db.execute(
                 "SELECT user_id, SUM(result='dropped'), SUM(result='taken') "
-                "FROM batter_catch_events WHERE guild_id = ? GROUP BY user_id",
-                (guild_id,),
+                "FROM batter_catch_events WHERE guild_id = ? AND competition = ? GROUP BY user_id",
+                (guild_id, competition),
             ).fetchall()
         except Exception:
             # batcatches may not have been loaded yet; keep the rest of +lb usable.
