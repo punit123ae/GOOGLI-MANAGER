@@ -1499,7 +1499,7 @@ class Stats(commands.Cog):
         records = self.db.execute(
             """
             SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
-                   p.runs_conceded, p.balls_bowled, p.wickets, p.not_out
+                   p.runs_conceded, p.balls_bowled, p.wickets, p.not_out, i.imported_at
             FROM player_match_stats p
             JOIN stats_imports i
               ON i.source_message_id = p.source_message_id
@@ -2185,19 +2185,21 @@ class Stats(commands.Cog):
             self._saved_player_team(row["source_message_id"], member.id)
             for row in recent_rows
         ]
-        # The recent list is newest-first. Add a divider at the beginning of
-        # every transferred-to team segment represented in these recent matches.
-        transferred_to = {
-            str(item["new_team_name"]).casefold(): str(item["new_team_name"])
+        # Recent rows are newest-first. A divider is shown only at a real
+        # team change between adjacent saved match snapshots, not merely because
+        # a team appears anywhere in the player's transfer history.
+        transfer_pairs = {
+            (str(item["old_team_name"]).casefold(), str(item["new_team_name"]).casefold()):
+            str(item["new_team_name"])
             for item in transfers
         }
         for index, row in enumerate(recent_rows, start=1):
             team_name = recent_team_names[index - 1]
-            previous_newer_team = recent_team_names[index - 2] if index > 1 else None
-            if (team_name and team_name.casefold() in transferred_to
-                    and (previous_newer_team or "").casefold() != team_name.casefold()):
+            older_team = recent_team_names[index] if index < len(recent_team_names) else None
+            pair = ((older_team or "").casefold(), (team_name or "").casefold())
+            if team_name and older_team and pair in transfer_pairs and pair[0] != pair[1]:
                 recent_lines.append(
-                    f"**-- {discord.utils.escape_markdown(transferred_to[team_name.casefold()])} --**"
+                    f"**-- {discord.utils.escape_markdown(transfer_pairs[pair])} --**"
                 )
             status = "*" if row["not_out"] else ""
             fielding_row = self.db.execute(
