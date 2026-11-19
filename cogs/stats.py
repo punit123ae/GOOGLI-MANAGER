@@ -2078,11 +2078,19 @@ class Stats(commands.Cog):
                 competition = "THE LAST GATE"
                 rows = last_gate_rows
         if not rows:
-            await ctx.reply(
+            message = (
                 f"No imported stats found for {member.mention} in **{competition}** yet. "
-                "Import a match with `+as` first.",
-                mention_author=False,
+                "Import a match with +as first."
             )
+            pending_switches = getattr(self, "_stats_switch_interactions", {})
+            switch_interaction = pending_switches.pop(int(ctx.message.id), None)
+            if switch_interaction is not None:
+                await switch_interaction.edit_original_response(
+                    content=message, embed=None, attachments=[], view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await ctx.reply(message, mention_author=False)
             return
 
         avatar = guild_icon = None
