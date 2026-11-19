@@ -887,6 +887,21 @@ class TeamCommandsB:
                 continue
             caught, dropped = result.get(uid, (0, 0))
             result[uid] = (caught + int(row["catches_taken"]), dropped + int(row["catches_dropped"]))
+
+        # Keep existing aggregate/live fielding totals for current players who have
+        # never been transferred. Transferred players use match-level rows so their
+        # catches are not all reassigned to their latest team.
+        try:
+            aggregate_rows = db.execute(
+                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=?",
+                (int(guild_id),),
+            ).fetchall()
+            for aggregate in aggregate_rows:
+                uid = int(aggregate["user_id"])
+                if uid in current_ids and not self._team_transfer_history(guild_id, uid):
+                    result[uid] = (int(aggregate["catches_caught"]), int(aggregate["catches_dropped"]))
+        except Exception:
+            pass
         return result
 
     def _comparison_page(self, ctx, team, title, entry_fn, data_by_user, member_ids, summary, empty_text):
