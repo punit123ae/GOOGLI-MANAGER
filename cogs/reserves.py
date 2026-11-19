@@ -582,13 +582,18 @@ class Reserves(commands.Cog):
 
         with _connect() as conn:
             current_counts = conn.execute("""
-                SELECT stage_name, team_name, COUNT(*) AS n
-                FROM (
-                    SELECT stage_name, reserving_team AS team_name FROM reservations
+                SELECT r.stage_name, x.team_name, COUNT(*) AS n
+                FROM reservations r
+                JOIN (
+                    SELECT id, reserving_team AS team_name FROM reservations
                     UNION ALL
-                    SELECT stage_name, opposing_team AS team_name FROM reservations
+                    SELECT id, opposing_team AS team_name FROM reservations
+                ) x ON x.id=r.id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM reserve_stage_limits l
+                    WHERE LOWER(l.stage_name)=LOWER(r.stage_name)
                 )
-                GROUP BY stage_name COLLATE NOCASE, team_name COLLATE NOCASE
+                GROUP BY r.stage_name COLLATE NOCASE, x.team_name COLLATE NOCASE
             """).fetchall()
             over = [f"{r['stage_name']}: {r['team_name']}" for r in current_counts if int(r["n"]) > total]
             if over:
@@ -622,6 +627,38 @@ class Reserves(commands.Cog):
             await ctx.reply('Usage: `+reservelimit <stage name> <limit>`', mention_author=False)
             return
         stage_name, total_text = parts
+        if not _stage_exists(ctx.guild.id, stage_name):
+            await ctx.reply(
+                f"Stage **{stage_name}** does not exist. Create it before setting its reserve limit.",
+                mention_author=False,
+            )
+            return
+        if total_text.casefold() == "default":
+            fallback = _limit()
+            with _connect() as conn:
+                counts = conn.execute(
+                    "SELECT team_name, COUNT(*) AS n FROM ("
+                    "SELECT reserving_team AS team_name FROM reservations WHERE LOWER(stage_name)=LOWER(?) "
+                    "UNION ALL SELECT opposing_team AS team_name FROM reservations WHERE LOWER(stage_name)=LOWER(?)"
+                    ") GROUP BY team_name COLLATE NOCASE",
+                    (stage_name, stage_name),
+                ).fetchall()
+                over = [row["team_name"] for row in counts if int(row["n"]) > fallback]
+                if over:
+                    await ctx.reply(
+                        f"Cannot remove this override because the global default ({fallback}) is too low for: "
+                        + ", ".join(over[:20]), mention_author=False
+                    )
+                    return
+                conn.execute("DELETE FROM reserve_stage_limits WHERE stage_name=? COLLATE NOCASE", (stage_name,))
+            await ctx.reply(
+                f"**{stage_name}** now uses the global default reserve limit of **{fallback}**.",
+                mention_author=False,
+            )
+            return
+        if not total_text.isdigit():
+            await ctx.reply("Use a number from 1 to 100, or use default to remove the stage override.", mention_author=False)
+            return
         total = int(total_text)
         if total < 1 or total > 100:
             await ctx.reply("Choose a stage reserve limit from 1 to 100.", mention_author=False)
@@ -956,6 +993,12 @@ class Reserves(commands.Cog):
             await ctx.reply("This command can only be used inside a server.", mention_author=False)
             return
 
+        stage_name = None
+        if "|" in team_name:
+            team_name, stage_name = (part.strip() for part in team_name.rsplit("|", 1))
+            if not team_name or not stage_name or not _stage_exists(ctx.guild.id, stage_name):
+                await ctx.reply("Use a valid team and existing stage: +reservestatus Team Name | Stage Name.", mention_author=False)
+                return
         canonical, status, suggestions = _resolve_approved_team(ctx.guild.id, team_name)
         if status != "ok":
             if status == "multiple":
@@ -974,14 +1017,6 @@ class Reserves(commands.Cog):
             )
             return
 
-        # Optional syntax: +reservestatus Team Name | Stage Name
-        if "|" in team_name:
-            _, stage_name = (part.strip() for part in team_name.rsplit("|", 1))
-            if not stage_name or not _stage_exists(ctx.guild.id, stage_name):
-                await ctx.reply("That tournament stage does not exist.", mention_author=False)
-                return
-        else:
-            stage_name = None
         limit = _limit(stage_name)
         total, initiated = _team_counts(canonical, stage_name)
         rows = [
