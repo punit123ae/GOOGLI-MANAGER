@@ -816,11 +816,24 @@ class TeamCommandsB:
             return {}
         result = {}
         target = str(team["name"]).casefold()
+        current_ids = {int(team["captain_id"])}
+        if team["vice_captain_id"]:
+            current_ids.add(int(team["vice_captain_id"]))
+        try:
+            current_ids.update(
+                int(item[0]) for item in self.db.execute(
+                    "SELECT user_id FROM team_players WHERE team_id=?", (int(team["id"]),)
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            pass
         for row in rows:
             uid = int(row["user_id"])
             team_at_match = self._team_at_match(
                 guild_id, uid, row["source_message_id"], row["imported_at"], row["team_name"]
             )
+            if not team_at_match and uid in current_ids:
+                team_at_match = str(team["name"])
             if not team_at_match or team_at_match.casefold() != target:
                 continue
             result.setdefault(uid, []).append({
@@ -852,11 +865,24 @@ class TeamCommandsB:
             return {}
         result = {}
         target = str(team["name"]).casefold()
+        current_ids = {int(team["captain_id"])}
+        if team["vice_captain_id"]:
+            current_ids.add(int(team["vice_captain_id"]))
+        try:
+            current_ids.update(
+                int(item[0]) for item in self.db.execute(
+                    "SELECT user_id FROM team_players WHERE team_id=?", (int(team["id"]),)
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            pass
         for row in rows:
             uid = int(row["user_id"])
             team_at_match = self._team_at_match(
                 guild_id, uid, row["source_message_id"], row["imported_at"], row["team_name"]
             )
+            if not team_at_match and uid in current_ids:
+                team_at_match = str(team["name"])
             if not team_at_match or team_at_match.casefold() != target:
                 continue
             caught, dropped = result.get(uid, (0, 0))
