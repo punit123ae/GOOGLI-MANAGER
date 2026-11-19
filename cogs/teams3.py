@@ -757,44 +757,111 @@ class TeamCommandsB:
             await ctx.send(embed=embed)
 
     # ------------------------------------------------------------------ team comparison
-    def _team_stat_rows(self, guild_id):
-        """Per-match batting/bowling rows for this server: {user_id: [row dict, ...]}."""
+    def _team_match_time(self, source_message_id, imported_at=0):
+        """Use the raw-stat message timestamp, not its later import timestamp."""
+        try:
+            return discord.utils.snowflake_time(int(source_message_id)).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return float(imported_at or 0)
+
+    def _team_transfer_history(self, guild_id, user_id):
+        try:
+            return self.db.execute(
+                """SELECT old_team_id, old_team_name, new_team_id, new_team_name, transferred_at
+                   FROM player_team_transfers
+                   WHERE guild_id=? AND user_id=? ORDER BY transferred_at ASC""",
+                (int(guild_id), int(user_id)),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+
+    def _team_at_match(self, guild_id, user_id, source_message_id, imported_at, saved_team):
+        transfers = self._team_transfer_history(guild_id, user_id)
+        if not transfers:
+            return str(saved_team) if saved_team else None
+        match_at = self._team_match_time(source_message_id, imported_at)
+        team_name = str(transfers[0]["old_team_name"])
+        for transfer in transfers:
+            try:
+                transferred_at = datetime.fromisoformat(
+                    str(transfer["transferred_at"]).replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if match_at >= transferred_at:
+                team_name = str(transfer["new_team_name"])
+            else:
+                break
+        return team_name
+
+    def _team_stat_rows(self, guild_id, team):
+        """Main-tournament batting/bowling rows assigned to the team at match time."""
         db = getattr(self.bot, "db", None)
         if db is None:
             return {}
         try:
             rows = db.execute(
-                """SELECT p.user_id, p.runs, p.balls_faced, p.runs_conceded,
-                          p.balls_bowled, p.wickets, p.not_out
+                """SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
+                          p.runs_conceded, p.balls_bowled, p.wickets, p.not_out,
+                          i.imported_at, mt.team_name
                    FROM player_match_stats p
-                   JOIN stats_imports i ON i.source_message_id = p.source_message_id
-                   WHERE i.guild_id = ?
-                     AND COALESCE(i.competition, 'MAIN TOURNAMENT') = 'MAIN TOURNAMENT'""",
+                   JOIN stats_imports i ON i.source_message_id=p.source_message_id
+                   LEFT JOIN match_teams mt
+                     ON mt.source_message_id=p.source_message_id AND mt.user_id=p.user_id
+                   WHERE i.guild_id=?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT')='MAIN TOURNAMENT'""",
                 (int(guild_id),),
             ).fetchall()
         except Exception:
             return {}
         result = {}
-        for r in rows:
-            result.setdefault(int(r[0]), []).append({
-                "runs": int(r[1]), "balls_faced": int(r[2]), "runs_conceded": int(r[3]),
-                "balls_bowled": int(r[4]), "wickets": int(r[5]), "not_out": int(r[6]),
+        target = str(team["name"]).casefold()
+        for row in rows:
+            uid = int(row["user_id"])
+            team_at_match = self._team_at_match(
+                guild_id, uid, row["source_message_id"], row["imported_at"], row["team_name"]
+            )
+            if not team_at_match or team_at_match.casefold() != target:
+                continue
+            result.setdefault(uid, []).append({
+                "runs": int(row["runs"]), "balls_faced": int(row["balls_faced"]),
+                "runs_conceded": int(row["runs_conceded"]), "balls_bowled": int(row["balls_bowled"]),
+                "wickets": int(row["wickets"]), "not_out": int(row["not_out"]),
             })
         return result
 
-    def _team_fielding_totals(self, guild_id):
-        """Saved fielding totals for this server: {user_id: (caught, dropped)}."""
+    def _team_fielding_totals(self, guild_id, team):
+        """Imported main-tournament fielding totals attributed to the team at match time."""
         db = getattr(self.bot, "db", None)
         if db is None:
             return {}
         try:
             rows = db.execute(
-                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id = ?",
+                """SELECT f.source_message_id, f.user_id, f.catches_taken, f.catches_dropped,
+                          i.imported_at, mt.team_name
+                   FROM player_match_fielding f
+                   JOIN stats_imports i ON i.source_message_id=f.source_message_id
+                   LEFT JOIN match_teams mt
+                     ON mt.source_message_id=f.source_message_id AND mt.user_id=f.user_id
+                   WHERE i.guild_id=?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT')='MAIN TOURNAMENT'
+                   AND (f.catches_taken>0 OR f.catches_dropped>0)""",
                 (int(guild_id),),
             ).fetchall()
         except Exception:
             return {}
-        return {int(r[0]): (int(r[1]), int(r[2])) for r in rows}
+        result = {}
+        target = str(team["name"]).casefold()
+        for row in rows:
+            uid = int(row["user_id"])
+            team_at_match = self._team_at_match(
+                guild_id, uid, row["source_message_id"], row["imported_at"], row["team_name"]
+            )
+            if not team_at_match or team_at_match.casefold() != target:
+                continue
+            caught, dropped = result.get(uid, (0, 0))
+            result[uid] = (caught + int(row["catches_taken"]), dropped + int(row["catches_dropped"]))
+        return result
 
     def _comparison_page(self, ctx, team, title, entry_fn, data_by_user, member_ids, summary, empty_text):
         """One ranked comparison page. The person who ran the command gets ⭐ and a bold name."""
@@ -846,8 +913,18 @@ class TeamCommandsB:
             + ([int(team["vice_captain_id"])] if team["vice_captain_id"] else [])
             + [int(uid) for uid in ordered_ids]
         ))
-        stat_rows = self._team_stat_rows(ctx.guild.id)
-        fielding = self._team_fielding_totals(ctx.guild.id)
+        # Include players who used to represent this team, even after a steal.
+        try:
+            historical = self.db.execute(
+                "SELECT DISTINCT user_id FROM player_team_transfers "
+                "WHERE guild_id=? AND (old_team_id=? OR new_team_id=?)",
+                (int(ctx.guild.id), int(team["id"]), int(team["id"])),
+            ).fetchall()
+            member_ids = list(dict.fromkeys(member_ids + [int(row[0]) for row in historical]))
+        except sqlite3.Error:
+            pass
+        stat_rows = self._team_stat_rows(ctx.guild.id, team)
+        fielding = self._team_fielding_totals(ctx.guild.id, team)
 
         team_rows = [r for uid in member_ids for r in stat_rows.get(uid, [])]
         t = _totals(team_rows)
