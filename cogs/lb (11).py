@@ -240,7 +240,7 @@ def _value(key: str, rows: list[dict]) -> float | int | tuple[int, int]:
     return 0
 
 
-def _eligible(key: str, rows: list[dict]) -> bool:
+def _eligible(key: str, rows: list[dict], last_gate: bool = False) -> bool:
     t = _totals(rows)
     if key in ("runs", "bat_avg", "highest", "strike_rate", "lowest_strike_rate", "fifties", "hundreds", "ducks"):
         if key in ("strike_rate", "lowest_strike_rate"):
@@ -249,9 +249,9 @@ def _eligible(key: str, rows: list[dict]) -> bool:
             return any(r["runs"] == 0 and not r["not_out"] for r in rows)
         return t["runs"] > 0
     if key in ("bowl_avg", "bowl_sr"):
-        return t["wickets"] >= 10
+        return t["wickets"] >= (5 if last_gate else 10)
     if key == "economy":
-        return t["balls_bowled"] >= 60  # 10 overs
+        return t["balls_bowled"] >= (36 if last_gate else 60)  # 6 overs in Last Gate, 10 in main
     if key in ("wickets", "best_figures", "overs", "runs_leaked"):
         return t["balls_bowled"] > 0 or t["wickets"] > 0
     return bool(rows)
@@ -568,7 +568,7 @@ class LeaderboardView(discord.ui.View):
         """Ranking for the metrics that come from imported match rows (everything except fielding/batter-catches)."""
         computed = []
         for uid, rows in rows_by_user.items():
-            if not _eligible(self.metric_key, rows):
+            if not _eligible(self.metric_key, rows, self.competition == 'THE LAST GATE'):
                 continue
             value = _value(self.metric_key, rows)
             if self.metric_key == "fantasy":
