@@ -623,8 +623,11 @@ class Reserves(commands.Cog):
         if not await self.owner_only(ctx):
             return
         parts = arguments.rsplit(maxsplit=1)
-        if len(parts) != 2 or not parts[1].isdigit():
-            await ctx.reply('Usage: `+reservelimit <stage name> <limit>`', mention_author=False)
+        if len(parts) != 2:
+            await ctx.reply(
+                'Usage: `+reservelimit <stage name> <limit|default>`',
+                mention_author=False,
+            )
             return
         stage_name, total_text = parts
         if not _stage_exists(ctx.guild.id, stage_name):
