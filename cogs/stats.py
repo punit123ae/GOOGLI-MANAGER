@@ -2232,7 +2232,7 @@ class Stats(commands.Cog):
         if last_gate_team_name:
             embed.add_field(
                 name="🚪 **__THE LAST GATE TEAM__**",
-                value=f"**{discord.utils.escape_markdown(last_gate_team_name)}** (team represented before the steal)",
+                value=f"**{discord.utils.escape_markdown(last_gate_team_name)}** (team(s) represented in Last Gate matches)",
                 inline=False,
             )
 
@@ -2327,7 +2327,7 @@ class Stats(commands.Cog):
             title=f"{member.display_name} stats for `KASHMIR TITANS S1` • {competition} — Deep Stats",
             description=(
                 f"**MATCHES RECORDED:** `{t['matches']}`\n"
-                + (f"🚪 **THE LAST GATE TEAM:** **{discord.utils.escape_markdown(last_gate_team_name)}**\n" if last_gate_team_name else "")
+                + (f"🚪 **THE LAST GATE TEAM(S):** **{discord.utils.escape_markdown(last_gate_team_name)}**\n" if last_gate_team_name else "")
                 + f"\n<:recent:1561311937843957801>  **__RECENT 5 MATCH SCORES__**\n{recent_text}"
             ),
             colour=discord.Colour.blurple(),
