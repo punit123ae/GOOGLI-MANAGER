@@ -894,9 +894,9 @@ class LeaderboardCog(commands.Cog):
         """Set every image leaderboard's current standings as the new neutral baseline."""
         try:
             guild_id = int(ctx.guild.id)
-            self.rows_by_user = self.cog._rows(guild_id)
-            self.fielding_by_user = self.cog._fielding_rows(guild_id)
-            self.batter_impact_by_user = self.cog._batter_impact_rows(guild_id)
+            self.rows_by_user = self._rows(guild_id)
+            self.fielding_by_user = self._fielding_rows(guild_id)
+            self.batter_impact_by_user = self._batter_impact_rows(guild_id)
             db = getattr(self.bot, "db", None)
             if db is None:
                 raise RuntimeError("Database connection is unavailable.")
