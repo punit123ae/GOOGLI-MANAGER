@@ -950,16 +950,18 @@ class StatsCompetitionSelect(discord.ui.Select):
         selected = self.values[0]
         await interaction.response.defer()
         # Re-render into this same message instead of posting a second stats message.
-        view.ctx._stats_switch_interaction = interaction
+        pending = getattr(view.cog, "_stats_switch_interactions", None)
+        if pending is None:
+            pending = {}
+            view.cog._stats_switch_interactions = pending
+        context_key = int(view.ctx.message.id)
+        pending[context_key] = interaction
         try:
             await view.cog.player_stats.callback(
                 view.cog, view.ctx, user_id=f"{view.member_id} | {selected}"
             )
         finally:
-            try:
-                del view.ctx._stats_switch_interaction
-            except AttributeError:
-                pass
+            pending.pop(context_key, None)
 
 
 class StatsView(discord.ui.View):
@@ -2395,7 +2397,8 @@ class Stats(commands.Cog):
         )
 
         # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
-        switch_interaction = getattr(ctx, "_stats_switch_interaction", None)
+        pending_switches = getattr(self, "_stats_switch_interactions", {})
+        switch_interaction = pending_switches.pop(int(ctx.message.id), None)
         if switch_interaction is not None:
             await switch_interaction.edit_original_response(
                 embed=embed,
