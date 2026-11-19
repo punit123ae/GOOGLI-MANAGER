@@ -112,6 +112,8 @@ CURATED = {
                       "+addallplayers <team name>  (reply to the squad list)", WHITELIST),
     "bulkadd": ("Team Administration", "Add every member of a role to a team.",
                 "+bulkadd <team name> <ROLE_ID>", WHITELIST),
+    "stealplayer": ("Team Administration", "Transfer a player between approved teams while preserving their match history.",
+                    "+stealplayer @player Old Team | New Team", WHITELIST),
     "kickplayer": ("Team Administration", "Remove a player from a team.",
                    "+kickplayer <@user | ID> <team name>", WHITELIST),
     "setcaptain": ("Team Administration", "Appoint a new captain for a team.",
@@ -173,6 +175,8 @@ CURATED = {
                       "+resetmatchups", WHITELIST),
     "reserveaudit": ("Reserves", "Check reservations for problems (limits exceeded, duplicates, and so on).",
                      "+reserveaudit", WHITELIST),
+    "reservelimit": ("Reserves", "Set the global default reserve limit or a stage-specific override. Use default to remove a stage override.",
+                    "+reservelimit <stage name> <limit|default>", WHITELIST),
     # ---------------------------------------------------------------- Groups & Schedules
     "openmatch": ("Groups & Schedules", "Reply to the daily fixtures: unlocks each stadium, pings only the two "
                   "captains, then tracks their messages and confirms the match time once both agree.",
