@@ -5,6 +5,7 @@ SQLite database (bot.db), plus per-channel tracking switches that survive restar
 """
 
 import re
+import sqlite3
 import time
 
 import discord
