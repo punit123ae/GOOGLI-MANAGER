@@ -92,12 +92,19 @@ def load_reservations():
             {int(k): int(v) for k, v in days.items()})
 
 
-def reserve_limit():
-    """The number set with +setreserves (0 if not set)."""
+def reserve_limit(stage_name=None):
+    """The reserve limit (0 if not set): the stage's own limit if it has one, else the default."""
     if not Path(RESERVE_DB).is_file():
         return 0
     conn = sqlite3.connect(RESERVE_DB)
     try:
+        if stage_name:
+            own = conn.execute(
+                "SELECT total_limit FROM reserve_stage_limits WHERE stage_name=? COLLATE NOCASE",
+                (stage_name,),
+            ).fetchone()
+            if own:
+                return int(own[0])
         row = conn.execute("SELECT total_limit FROM reserve_settings WHERE id = 1").fetchone()
         return int(row[0]) if row else 0
     except sqlite3.Error:
@@ -393,7 +400,6 @@ class ReserveNumbering(commands.Cog):
             return
 
         numbers = original_numbers(ctx.guild.id, reservations, swaps)
-        limit = reserve_limit()
 
         # stages in the order they first appear
         stage_order, names = [], {}
@@ -410,7 +416,7 @@ class ReserveNumbering(commands.Cog):
                         "group_key": numbers[r["id"]][4], "group": numbers[r["id"]][1],
                         "round": numbers[r["id"]][2], "db_round": numbers[r["id"]][3]}
                        for r in reservations if _norm(r["stage"]) == key and r["id"] in numbers]
-            day_of, day_count, warnings = plan_days(matches, saved_days, limit)
+            day_of, day_count, warnings = plan_days(matches, saved_days, reserve_limit(names[key]))
             plans[key] = (matches, day_of, day_count, warnings)
 
         # ---- preview

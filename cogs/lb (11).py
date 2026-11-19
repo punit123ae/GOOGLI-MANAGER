@@ -84,8 +84,8 @@ LAST_GATE_METRICS = {
         ("bc_taken", "Most Catches Taken (as Batter)"),
     ],
     "Bowling": [
-        ("wickets", "Wickets"), ("bowl_avg", "Bowling Average"),
-        ("bowl_sr", "Bowling Strike Rate"), ("economy", "Economy"),
+        ("wickets", "Wickets"), ("bowl_avg", "Bowling Average (minimum 5 wickets)"),
+        ("bowl_sr", "Bowling Strike Rate (minimum 5 wickets)"), ("economy", "Economy (minimum 6 overs)"),
         ("best_figures", "Bowling Figures"), ("overs", "Most Overs Bowled"),
         ("runs_leaked", "Most Runs Leaked"),
     ],

@@ -11,7 +11,7 @@ The cog uses its own SQLite database (reserve_matches.db) so it does not alter
 your existing team database or schema.
 
 Commands:
-    +reservelimit default <number>       Set global default
+    +reservelimit <number>               Set global default (alias: +setreserves)
     +reservelimit <stage> <limit>       Set stage override
     +reservelimit <stage> default       Remove stage override
     +reservematch               Bot owner only; prompts for both team names
@@ -574,7 +574,7 @@ class Reserves(commands.Cog):
             return None
         return answer
 
-    @commands.command(name="reservelimit")
+    @commands.command(name="reservelimit", aliases=["setreserves"])
     async def set_stage_reserve_limit(self, ctx, *, arguments: str):
         """Set the global default or a stage-specific reserve limit.
 
@@ -584,6 +584,8 @@ class Reserves(commands.Cog):
         if not await self.owner_only(ctx):
             return
         parts = arguments.rsplit(maxsplit=1)
+        if len(parts) == 1 and parts[0].isdigit():
+            parts = ["default", parts[0]]  # "+setreserves 8" = global default
         if len(parts) != 2:
             await ctx.reply(
                 'Usage: `+reservelimit default <limit>` or `+reservelimit <stage name> <limit|default>`',

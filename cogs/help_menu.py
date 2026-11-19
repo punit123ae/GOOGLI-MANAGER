@@ -158,7 +158,7 @@ CURATED = {
                "+result", WHITELIST),
     # ---------------------------------------------------------------- Reserves
     "setreserves": ("Reserves", "Set how many reserve matches each team may have (1-100).",
-                    "+setreserves <number>", WHITELIST),
+                    "+setreserves <number> | +reservelimit <stage> <number|default>", WHITELIST),
     "reservematch": ("Reserves", "Record a reserve match. The bot asks for the reserving and opposing team.",
                      "+reservematch", WHITELIST),
     "reservelist": ("Reserves", "Show all reserved matches, 10 per page.",
