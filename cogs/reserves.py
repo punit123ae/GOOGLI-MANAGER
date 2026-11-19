@@ -586,7 +586,7 @@ class Reserves(commands.Cog):
         parts = arguments.rsplit(maxsplit=1)
         if len(parts) != 2:
             await ctx.reply(
-                'Usage: `+reservelimit <stage name> <limit|default>`',
+                'Usage: `+reservelimit default <limit>` or `+reservelimit <stage name> <limit|default>`',
                 mention_author=False,
             )
             return
