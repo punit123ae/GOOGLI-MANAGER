@@ -430,9 +430,9 @@ class CompetitionSelect(discord.ui.Select):
         view.category = "Batting"
         view.metric_key, view.metric_label = view.metrics[view.category][0]
         db_competition = COMPETITION_LABELS[view.competition]
-        view.cog.rows_by_user = view.cog._rows(view.ctx.guild.id, db_competition)
-        view.cog.fielding_by_user = view.cog._fielding_rows(view.ctx.guild.id, db_competition)
-        view.cog.batter_impact_by_user = view.cog._batter_impact_rows(view.ctx.guild.id, db_competition)
+        view.rows_by_user = view.cog._rows(view.ctx.guild.id, db_competition)
+        view.fielding_by_user = view.cog._fielding_rows(view.ctx.guild.id, db_competition)
+        view.batter_impact_by_user = view.cog._batter_impact_rows(view.ctx.guild.id, db_competition)
         view.page = 0
         await view.refresh(interaction)
 
@@ -512,6 +512,11 @@ class LeaderboardView(discord.ui.View):
         self.page = 0
         self.team_names: dict[int, str] = {}
         self._rank_delta_cache: dict[tuple[str, str, str], dict[int, int | None]] = {}
+        # Every +lb message owns its own competition data; one user's menu cannot
+        # change the rows displayed by another user's leaderboard.
+        self.rows_by_user = dict(cog.rows_by_user)
+        self.fielding_by_user = dict(cog.fielding_by_user)
+        self.batter_impact_by_user = dict(cog.batter_impact_by_user)
         self._rebuild_items()
 
     def _rebuild_items(self):
@@ -568,7 +573,7 @@ class LeaderboardView(discord.ui.View):
             value = _value(self.metric_key, rows)
             if self.metric_key == "fantasy":
                 # Total = batting + bowling + fielding, same as +stats.
-                value += _fielding_fantasy_points(self.cog.fielding_by_user.get(uid))
+                value += _fielding_fantasy_points(self.fielding_by_user.get(uid))
             computed.append((uid, value))
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         return computed
@@ -576,7 +581,7 @@ class LeaderboardView(discord.ui.View):
     def _match_times(self) -> dict[int, float]:
         """{match_id: import time}. One stats import = one match."""
         stamps: dict[int, float] = {}
-        for rows in self.cog.rows_by_user.values():
+        for rows in self.rows_by_user.values():
             for row in rows:
                 stamps[int(row["match"])] = float(row.get("imported_at", 0) or 0)
         return stamps
@@ -610,7 +615,7 @@ class LeaderboardView(discord.ui.View):
 
     def _rows_in(self, match_ids: set[int]) -> dict[int, list[dict]]:
         result: dict[int, list[dict]] = {}
-        for uid, rows in self.cog.rows_by_user.items():
+        for uid, rows in self.rows_by_user.items():
             kept = [row for row in rows if int(row["match"]) in match_ids]
             if kept:
                 result[int(uid)] = kept
@@ -691,20 +696,20 @@ class LeaderboardView(discord.ui.View):
     async def make_payload(self) -> tuple[discord.Embed | None, discord.File | None]:
         """(embed, None) for Fielding / Team Fielding, otherwise (None, card image file)."""
         guild = self.ctx.guild
-        rows_by_user = self.cog.rows_by_user
+        rows_by_user = self.rows_by_user
         computed = []
         if self.category == "Fielding":
             # Fielding data is loaded from the active competition's own records.
             active_competition = COMPETITION_LABELS[self.competition]
-            self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
-            for uid, rec in self.cog.fielding_by_user.items():
+            self.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
+            for uid, rec in self.fielding_by_user.items():
                 if not _fielding_eligible(self.metric_key, rec):
                     continue
                 computed.append((uid, _fielding_value(self.metric_key, rec)))
         elif self.category == "Team Fielding":
             # Re-read both databases on every render so new catches and roster changes show up.
-            self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, COMPETITION_LABELS[self.competition])
-            teams = _team_fielding(guild.id, self.cog.fielding_by_user)
+            self.fielding_by_user = self.cog._fielding_rows(guild.id, COMPETITION_LABELS[self.competition])
+            teams = _team_fielding(guild.id, self.fielding_by_user)
             self.team_names = {team_id: t["name"] for team_id, t in teams.items()}
             for team_id, t in teams.items():
                 value = _team_value(self.metric_key, t, guild)
@@ -714,9 +719,9 @@ class LeaderboardView(discord.ui.View):
             # Re-read the database on every render so owner edits/resets appear
             # when the leaderboard is refreshed, not only after a bot restart.
             active_competition = COMPETITION_LABELS[self.competition]
-            self.cog.batter_impact_by_user = self.cog._batter_impact_rows(guild.id, active_competition)
+            self.batter_impact_by_user = self.cog._batter_impact_rows(guild.id, active_competition)
             index = BATTER_IMPACT_KEYS[self.metric_key]
-            for uid, rec in self.cog.batter_impact_by_user.items():
+            for uid, rec in self.batter_impact_by_user.items():
                 value = int(rec[index])
                 if value > 0:
                     computed.append((uid, value))
@@ -724,7 +729,7 @@ class LeaderboardView(discord.ui.View):
             if self.metric_key == "fantasy":
                 # Re-read the fielding totals for the active competition.
                 active_competition = COMPETITION_LABELS[self.competition]
-                self.cog.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
+                self.fielding_by_user = self.cog._fielding_rows(guild.id, active_competition)
             computed = self._generic_ranking(rows_by_user)
         computed.sort(key=lambda item: (_sort_key(self.metric_key, item[1]), item[0]))
         if self.category in EMBED_CATEGORIES:
@@ -778,7 +783,7 @@ class LeaderboardView(discord.ui.View):
         # Recent form: last five imported match performances, weighted toward wickets.
         watch_uid = None
         watch_score = None
-        for uid, player_rows in self.cog.rows_by_user.items():
+        for uid, player_rows in self.rows_by_user.items():
             recent = player_rows[-5:]
             if not recent:
                 continue
@@ -889,9 +894,9 @@ class LeaderboardCog(commands.Cog):
         """Set every image leaderboard's current standings as the new neutral baseline."""
         try:
             guild_id = int(ctx.guild.id)
-            self.rows_by_user = self._rows(guild_id)
-            self.fielding_by_user = self._fielding_rows(guild_id)
-            self.batter_impact_by_user = self._batter_impact_rows(guild_id)
+            self.rows_by_user = self.cog._rows(guild_id)
+            self.fielding_by_user = self.cog._fielding_rows(guild_id)
+            self.batter_impact_by_user = self.cog._batter_impact_rows(guild_id)
             db = getattr(self.bot, "db", None)
             if db is None:
                 raise RuntimeError("Database connection is unavailable.")
@@ -911,9 +916,12 @@ class LeaderboardCog(commands.Cog):
                 ("THE LAST GATE", LAST_GATE_METRICS),
             ]
             for competition_label, metric_groups in reset_scopes:
-                competition_rows = self._batter_impact_rows(
-                    guild_id, COMPETITION_LABELS[competition_label]
-                )
+                competition_name = COMPETITION_LABELS[competition_label]
+                self.rows_by_user = self._rows(guild_id, competition_name)
+                self.fielding_by_user = self._fielding_rows(guild_id, competition_name)
+                self.batter_impact_by_user = self._batter_impact_rows(guild_id, competition_name)
+                day_token = LeaderboardView(self, ctx)._checkpoints(db, guild_id)[0]
+                competition_rows = self.batter_impact_by_user
                 for category, metrics in metric_groups.items():
                     if category in EMBED_CATEGORIES:
                         continue
@@ -982,9 +990,9 @@ class LeaderboardCog(commands.Cog):
     @commands.guild_only()
     async def leaderboard(self, ctx: commands.Context):
         try:
-            self.rows_by_user = self._rows(ctx.guild.id, "MAIN TOURNAMENT")
-            self.fielding_by_user = self._fielding_rows(ctx.guild.id, "MAIN TOURNAMENT")
-            self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.rows_by_user = self.cog._rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.fielding_by_user = self.cog._fielding_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.batter_impact_by_user = self.cog._batter_impact_rows(ctx.guild.id, "MAIN TOURNAMENT")
             view = LeaderboardView(self, ctx)
             async with ctx.typing():
                 embed, card = await view.make_payload()
