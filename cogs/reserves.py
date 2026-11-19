@@ -252,17 +252,28 @@ def _limit(stage_name=None):
         return int(row["total_limit"]) if row else 0
 
 
-def _team_counts(team_name: str):
+def _team_counts(team_name: str, stage_name: str = None):
     with _connect() as conn:
-        total = conn.execute("""
-            SELECT COUNT(*) AS n FROM reservations
-            WHERE reserving_team = ? COLLATE NOCASE
-               OR opposing_team = ? COLLATE NOCASE
-        """, (team_name, team_name)).fetchone()["n"]
-        initiated = conn.execute("""
-            SELECT COUNT(*) AS n FROM reservations
-            WHERE reserving_team = ? COLLATE NOCASE
-        """, (team_name,)).fetchone()["n"]
+        if stage_name:
+            total = conn.execute("""
+                SELECT COUNT(*) AS n FROM reservations
+                WHERE stage_name=? COLLATE NOCASE
+                  AND (reserving_team=? COLLATE NOCASE OR opposing_team=? COLLATE NOCASE)
+            """, (stage_name, team_name, team_name)).fetchone()["n"]
+            initiated = conn.execute("""
+                SELECT COUNT(*) AS n FROM reservations
+                WHERE stage_name=? COLLATE NOCASE AND reserving_team=? COLLATE NOCASE
+            """, (stage_name, team_name)).fetchone()["n"]
+        else:
+            total = conn.execute("""
+                SELECT COUNT(*) AS n FROM reservations
+                WHERE reserving_team = ? COLLATE NOCASE
+                   OR opposing_team = ? COLLATE NOCASE
+            """, (team_name, team_name)).fetchone()["n"]
+            initiated = conn.execute("""
+                SELECT COUNT(*) AS n FROM reservations
+                WHERE reserving_team = ? COLLATE NOCASE
+            """, (team_name,)).fetchone()["n"]
     return int(total), int(initiated)
 
 
@@ -963,10 +974,18 @@ class Reserves(commands.Cog):
             )
             return
 
-        limit = _limit()
-        total, initiated = _team_counts(canonical)
+        # Optional syntax: +reservestatus Team Name | Stage Name
+        if "|" in team_name:
+            _, stage_name = (part.strip() for part in team_name.rsplit("|", 1))
+            if not stage_name or not _stage_exists(ctx.guild.id, stage_name):
+                await ctx.reply("That tournament stage does not exist.", mention_author=False)
+                return
+        else:
+            stage_name = None
+        limit = _limit(stage_name)
+        total, initiated = _team_counts(canonical, stage_name)
         rows = [
-            row for row in _all_reservations()
+            row for row in _all_reservations(stage_name)
             if canonical.casefold() in (
                 row["reserving_team"].casefold(), row["opposing_team"].casefold()
             )
@@ -974,7 +993,8 @@ class Reserves(commands.Cog):
 
         embed = discord.Embed(
             title="✦ RESERVE STATUS",
-            description=f"**{discord.utils.escape_markdown(canonical)}**",
+            description=(f"**{discord.utils.escape_markdown(canonical)}**"
+                         + (f"\nStage: **{discord.utils.escape_markdown(stage_name)}**" if stage_name else "\nAll stages")),
             color=discord.Color.from_rgb(35, 63, 110),
         )
         embed.add_field(name="Total Matches", value=f"**{total}/{limit}**", inline=True)
