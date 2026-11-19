@@ -949,9 +949,17 @@ class StatsCompetitionSelect(discord.ui.Select):
             return
         selected = self.values[0]
         await interaction.response.defer()
-        await view.cog.player_stats.callback(
-            view.cog, view.ctx, user_id=f"{view.member_id} | {selected}"
-        )
+        # Re-render into this same message instead of posting a second stats message.
+        view.ctx._stats_switch_interaction = interaction
+        try:
+            await view.cog.player_stats.callback(
+                view.cog, view.ctx, user_id=f"{view.member_id} | {selected}"
+            )
+        finally:
+            try:
+                del view.ctx._stats_switch_interaction
+            except AttributeError:
+                pass
 
 
 class StatsView(discord.ui.View):
@@ -1249,15 +1257,20 @@ class Stats(commands.Cog):
         saved = self._saved_player_team(row["source_message_id"], user_id)
         if not transfers:
             return saved
-        if competition == "THE LAST GATE":
-            return str(transfers[0]["old_team_name"])
-        imported_at = float(row.get("imported_at", 0) or 0)
+        # Use the raw-stat message snowflake time, not the import time: an old
+        # match may be imported after a player has already been transferred.
+        try:
+            match_at = discord.utils.snowflake_time(
+                int(row["source_message_id"])
+            ).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            match_at = float(row.get("imported_at", 0) or 0)
         expected = str(transfers[0]["old_team_name"])
         for transfer in transfers:
             transferred_at = self._transfer_time(transfer.get("transferred_at"))
             if transferred_at is None:
                 continue
-            if imported_at >= transferred_at:
+            if match_at >= transferred_at:
                 expected = str(transfer["new_team_name"])
             else:
                 break
@@ -1924,8 +1937,9 @@ class Stats(commands.Cog):
         view = ResetServerStatsView(self, ctx.guild.id, ctx.author.id)
         await ctx.reply(
             "⚠️ **Confirm server stats reset**\n"
-            "This will permanently delete all imported match statistics for this server. "
-            "It will not affect other servers or your saved design settings.\n\n"
+            "This permanently deletes imported match statistics for BOTH **KASHMIR TITANS S1** "
+            "and **THE LAST GATE** in this server. It does not preserve either competition's stats. "
+            "Other servers and saved design settings are not affected.\n\n"
             "Press **Confirm reset** to continue, or **Cancel** to keep the stats.",
             view=view,
             mention_author=False,
@@ -2137,10 +2151,14 @@ class Stats(commands.Cog):
         total_points += fielding_points
         transfers = self.get_player_transfers(ctx.guild.id, member.id)
         last_gate_rows = self.get_player_rows(ctx.guild.id, member.id, "THE LAST GATE")
-        last_gate_team_name = (
-            str(transfers[0]["old_team_name"])
-            if transfers and last_gate_rows else None
-        )
+        last_gate_team_names = []
+        for last_gate_row in last_gate_rows:
+            represented_team = self._team_for_performance(
+                last_gate_row, member.id, "THE LAST GATE", transfers
+            )
+            if represented_team and represented_team not in last_gate_team_names:
+                last_gate_team_names.append(represented_team)
+        last_gate_team_name = " / ".join(last_gate_team_names) or None
         fifties = sum(50 <= r["runs"] < 100 for r in rows)
         hundreds = sum(r["runs"] >= 100 for r in rows)
         ducks = sum(r["runs"] == 0 and not r["not_out"] for r in rows)
@@ -2377,11 +2395,20 @@ class Stats(commands.Cog):
         )
 
         # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
-        await ctx.send(
-            embed=embed,
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        switch_interaction = getattr(ctx, "_stats_switch_interaction", None)
+        if switch_interaction is not None:
+            await switch_interaction.edit_original_response(
+                embed=embed,
+                view=view,
+                attachments=[],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            await ctx.send(
+                embed=embed,
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
 
 async def setup(bot):
