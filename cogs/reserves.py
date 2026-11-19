@@ -11,7 +11,7 @@ The cog uses its own SQLite database (reserve_matches.db) so it does not alter
 your existing team database or schema.
 
 Commands:
-    +setreserves <number>       Bot owner only
+    +reservelimit default <number>       Bot owner only
     +reservematch               Bot owner only; prompts for both team names
     +reservelist                Everyone; 10 reservations per page
     +deletereserve <number>     Bot owner only; owner-only confirmation buttons
@@ -572,47 +572,6 @@ class Reserves(commands.Cog):
             return None
         return answer
 
-    @commands.command(name="setreserves")
-    async def setreserves(self, ctx, total: int):
-        if not await self.owner_only(ctx):
-            return
-        if total < 1 or total > 100:
-            await ctx.reply("Choose a reserve limit from 1 to 100.", mention_author=False)
-            return
-
-        with _connect() as conn:
-            current_counts = conn.execute("""
-                SELECT r.stage_name, x.team_name, COUNT(*) AS n
-                FROM reservations r
-                JOIN (
-                    SELECT id, reserving_team AS team_name FROM reservations
-                    UNION ALL
-                    SELECT id, opposing_team AS team_name FROM reservations
-                ) x ON x.id=r.id
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM reserve_stage_limits l
-                    WHERE LOWER(l.stage_name)=LOWER(r.stage_name)
-                )
-                GROUP BY r.stage_name COLLATE NOCASE, x.team_name COLLATE NOCASE
-            """).fetchall()
-            over = [f"{r['stage_name']}: {r['team_name']}" for r in current_counts if int(r["n"]) > total]
-            if over:
-                await ctx.reply(
-                    f"Cannot set the limit to {total}: these teams already exceed it: "
-                    + ", ".join(over[:20]),
-                    mention_author=False,
-                )
-                return
-            conn.execute(                "UPDATE reserve_settings SET total_limit = ? WHERE id = 1", (total,)
-            )
-
-        await ctx.send(
-            f"Reserve limit set to **{total} matches per team**.\n"
-            f"Each team may initiate **{total // 2}** reservations per stage.\n"
-            "Each team's total involvement within a stage (as reserving or opposing team) cannot exceed "
-            f"**{total}**."
-        )
-
     @commands.command(name="reservelimit")
     async def set_stage_reserve_limit(self, ctx, *, arguments: str):
         """Set a reserve limit override for one tournament stage.
@@ -630,6 +589,42 @@ class Reserves(commands.Cog):
             )
             return
         stage_name, total_text = parts
+        if stage_name.casefold() == "default":
+            if not total_text.isdigit() or not 1 <= int(total_text) <= 100:
+                await ctx.reply("Choose a global default reserve limit from 1 to 100.", mention_author=False)
+                return
+            total = int(total_text)
+            with _connect() as conn:
+                current_counts = conn.execute("""
+                    SELECT r.stage_name, x.team_name, COUNT(*) AS n
+                    FROM reservations r
+                    JOIN (
+                        SELECT id, reserving_team AS team_name FROM reservations
+                        UNION ALL
+                        SELECT id, opposing_team AS team_name FROM reservations
+                    ) x ON x.id=r.id
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM reserve_stage_limits l
+                        WHERE LOWER(l.stage_name)=LOWER(r.stage_name)
+                    )
+                    GROUP BY r.stage_name COLLATE NOCASE, x.team_name COLLATE NOCASE
+                """).fetchall()
+                over = [f"{row['stage_name']}: {row['team_name']}" for row in current_counts
+                        if int(row["n"]) > total]
+                if over:
+                    await ctx.reply(
+                        "Cannot lower the global default; these teams in stages without overrides "
+                        "already exceed it: " + ", ".join(over[:20]),
+                        mention_author=False,
+                    )
+                    return
+                conn.execute("UPDATE reserve_settings SET total_limit=? WHERE id=1", (total,))
+            await ctx.reply(
+                f"Global default reserve limit set to **{total} matches per team**. "
+                "Stage-specific overrides remain unchanged.",
+                mention_author=False,
+            )
+            return
         if not _stage_exists(ctx.guild.id, stage_name):
             await ctx.reply(
                 f"Stage **{stage_name}** does not exist. Create it before setting its reserve limit.",
@@ -695,7 +690,7 @@ class Reserves(commands.Cog):
             )
         await ctx.reply(
             f"Reserve limit for **{stage_name}** set to **{total}** matches per team. "
-            "Stages without an override continue using the global setreserves limit.",
+            "Stages without an override continue using the global global default reserve limit.",
             mention_author=False,
         )
 
@@ -711,7 +706,7 @@ class Reserves(commands.Cog):
             return
         limit = _limit(stage_name)
         if limit <= 0:
-            await ctx.send("Set the limit first with `+setreserves <number>`.")
+            await ctx.send("Set the limit first with `+reservelimit default <number>`.")
             return
 
         reserving = await self.ask_team(ctx, "Enter the **reserving team name**:")
@@ -821,7 +816,7 @@ class Reserves(commands.Cog):
 
         limit = _limit(stage_name)
         if limit <= 0:
-            await ctx.send("Set the global default with `+setreserves <number>` or configure this stage with `+reservelimit <stage name> <limit>`.")
+            await ctx.send("Set the global default with `+reservelimit default <number>` or configure this stage with `+reservelimit <stage name> <limit>`.")
             return
 
         if ctx.guild is None:
@@ -1081,7 +1076,7 @@ class Reserves(commands.Cog):
             return
         limit = _limit(stage_name)
         if limit <= 0:
-            await ctx.send("Set the global default with `+setreserves <number>` or configure this stage with `+reservelimit <stage name> <limit>`.")
+            await ctx.send("Set the global default with `+reservelimit default <number>` or configure this stage with `+reservelimit <stage name> <limit>`.")
             return
         rows = _all_reservations(stage_name)
         if not rows:
