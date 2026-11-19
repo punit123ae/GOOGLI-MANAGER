@@ -990,9 +990,9 @@ class LeaderboardCog(commands.Cog):
     @commands.guild_only()
     async def leaderboard(self, ctx: commands.Context):
         try:
-            self.rows_by_user = self.cog._rows(ctx.guild.id, "MAIN TOURNAMENT")
-            self.fielding_by_user = self.cog._fielding_rows(ctx.guild.id, "MAIN TOURNAMENT")
-            self.batter_impact_by_user = self.cog._batter_impact_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.rows_by_user = self._rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.fielding_by_user = self._fielding_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id, "MAIN TOURNAMENT")
             view = LeaderboardView(self, ctx)
             async with ctx.typing():
                 embed, card = await view.make_payload()
