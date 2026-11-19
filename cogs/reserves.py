@@ -11,7 +11,9 @@ The cog uses its own SQLite database (reserve_matches.db) so it does not alter
 your existing team database or schema.
 
 Commands:
-    +reservelimit default <number>       Bot owner only
+    +reservelimit default <number>       Set global default
+    +reservelimit <stage> <limit>       Set stage override
+    +reservelimit <stage> default       Remove stage override
     +reservematch               Bot owner only; prompts for both team names
     +reservelist                Everyone; 10 reservations per page
     +deletereserve <number>     Bot owner only; owner-only confirmation buttons
@@ -574,10 +576,10 @@ class Reserves(commands.Cog):
 
     @commands.command(name="reservelimit")
     async def set_stage_reserve_limit(self, ctx, *, arguments: str):
-        """Set a reserve limit override for one tournament stage.
+        """Set the global default or a stage-specific reserve limit.
 
-        The final token is the numeric limit; the preceding text is the full stage name,
-        so names containing spaces work without requiring quotation marks.
+        Use "default <limit>" for the global fallback, "<stage> <limit>" for an
+        override, or "<stage> default" to remove that override.
         """
         if not await self.owner_only(ctx):
             return
