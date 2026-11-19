@@ -175,6 +175,8 @@ CURATED = {
                       "+resetmatchups", WHITELIST),
     "reserveaudit": ("Reserves", "Check reservations for problems (limits exceeded, duplicates, and so on).",
                      "+reserveaudit", WHITELIST),
+    "reservestatus": ("Reserves", "Show a team's reserve usage across all stages, or for one specific stage.",
+                    "+reservestatus <team name> [| <stage name>]", EVERYONE),
     "reservelimit": ("Reserves", "Set the global default reserve limit, set a stage override, or use default to remove a stage override.",
                     "+reservelimit default <limit> | <stage name> <limit|default>", WHITELIST),
     # ---------------------------------------------------------------- Groups & Schedules
