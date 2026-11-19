@@ -1030,9 +1030,18 @@ class Reserves(commands.Cog):
                          + (f"\nStage: **{discord.utils.escape_markdown(stage_name)}**" if stage_name else "\nAll stages")),
             color=discord.Color.from_rgb(35, 63, 110),
         )
-        embed.add_field(name="Total Matches", value=f"**{total}/{limit}**", inline=True)
-        embed.add_field(name="Initiated", value=f"**{initiated}/{limit // 2}**", inline=True)
-        embed.add_field(name="Remaining", value=f"**{max(0, limit - total)}**", inline=True)
+        if stage_name:
+            embed.add_field(name="Total Matches", value=f"**{total}/{limit}**", inline=True)
+            embed.add_field(name="Initiated", value=f"**{initiated}/{limit // 2}**", inline=True)
+            embed.add_field(name="Remaining", value=f"**{max(0, limit - total)}**", inline=True)
+        else:
+            embed.add_field(name="Total Matches", value=f"**{total}** across all stages", inline=True)
+            embed.add_field(name="Initiated", value=f"**{initiated}** across all stages", inline=True)
+            embed.add_field(
+                name="Stage-specific status",
+                value="Use +reservestatus Team Name | Stage Name to see that stage's exact limit and remaining matches.",
+                inline=False,
+            )
 
         if rows:
             lines = [
