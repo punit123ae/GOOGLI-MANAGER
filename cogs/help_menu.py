@@ -175,8 +175,8 @@ CURATED = {
                       "+resetmatchups", WHITELIST),
     "reserveaudit": ("Reserves", "Check reservations for problems (limits exceeded, duplicates, and so on).",
                      "+reserveaudit", WHITELIST),
-    "reservelimit": ("Reserves", "Set the global default reserve limit or a stage-specific override. Use default to remove a stage override.",
-                    "+reservelimit <stage name> <limit|default>", WHITELIST),
+    "reservelimit": ("Reserves", "Set the global default reserve limit, set a stage override, or use default to remove a stage override.",
+                    "+reservelimit default <limit> | <stage name> <limit|default>", WHITELIST),
     # ---------------------------------------------------------------- Groups & Schedules
     "openmatch": ("Groups & Schedules", "Reply to the daily fixtures: unlocks each stadium, pings only the two "
                   "captains, then tracks their messages and confirms the match time once both agree.",
