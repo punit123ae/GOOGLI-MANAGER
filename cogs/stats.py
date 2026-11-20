@@ -857,25 +857,6 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     draw.text((1121, 741), f"{best[0]}/{-best[1]}", font=load_font(25, True),
               fill=cyan)
 
-    # Dedicated fielding category, matching the existing full-width footer style.
-    draw.rounded_rectangle((55, 805, 1545, 850), radius=12,
-                           fill=(10, 25, 43, 236), outline=(39, 133, 247, 150), width=1)
-    draw.text((78, 827), "FIELDING", font=load_font(15, True), fill=cyan, anchor="lm")
-    field_items = [
-        ("CATCHES", catches_caught),
-        ("DROPS", catches_dropped),
-        ("FIELDING PTS", fmt(fielding_points)),
-        ("BATTER DROPS", batter_drops),
-        ("BATTER CATCHES", batter_taken),
-    ]
-    for i, (label, value) in enumerate(field_items):
-        x = 300 + i * 235
-        if i:
-            draw.line((x - 22, 814, x - 22, 841), fill=(64, 94, 126, 150), width=1)
-        draw.text((x, 814), label, font=load_font(10, True), fill=muted)
-        draw.text((x, 830), str(value), font=load_font(17, True),
-                  fill=violet if label == "FIELDING PTS" else white)
-
     draw.text((800, 862), "GOOGLI MANAGER  •  PLAYER PERFORMANCE FROM RECORDED MATCH STATS",
               font=load_font(12, True), fill=muted, anchor="mt")
 
@@ -2497,10 +2478,6 @@ class Stats(commands.Cog):
                     rows,
                     avatar=avatar,
                     fielding_points=fielding_points,
-                    catches_caught=catches_caught,
-                    catches_dropped=catches_dropped,
-                    batter_drops=batter_drops,
-                    batter_taken=batter_taken,
                     recent_matches=recent_match_cards,
                 )
             elif design == 2:
