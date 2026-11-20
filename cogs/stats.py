@@ -886,6 +886,74 @@ def load_stats_display_font(size, bold=False):
     return ImageFont.load_default()
 
 
+def make_stats_image_new_design(member, rows, design, avatar=None):
+    """Three distinct 16:9 stats dashboards: collectible, broadcast, analytics."""
+    W, H = 1600, 900
+    t = totals(rows)
+    bat_impact, bowl_impact = design2_impact_scores(rows, t)
+    bat_pts, bowl_pts, fantasy = fantasy_raw_points(rows, t)
+    rating = overall_rating(bat_impact, bowl_impact)
+    username = getattr(member, 'display_name', 'PLAYER')
+    team = get_player_team_name(member).upper() or 'NO TEAM'
+    guild = getattr(getattr(member, 'guild', None), 'name', 'PLAYER STATS').upper()
+    image = _cached_design2_background().copy().convert('RGBA')
+    if image.size != (W, H): image = image.resize((W, H), Image.Resampling.LANCZOS)
+    d = ImageDraw.Draw(image)
+    white=(248,250,255,255); muted=(174,190,208,255); panel=(4,17,32,239); edge=(65,100,133,255)
+    lime=(194,255,65,255); cyan=(67,222,239,255); gold=(255,197,83,255); violet=(190,155,255,255)
+    def box(x1,y1,x2,y2,fill=panel,outline=edge,r=18): d.rounded_rectangle((x1,y1,x2,y2),radius=r,fill=fill,outline=outline,width=2)
+    def text(x,y,v,size=18,color=white,anchor=None): d.text((x,y),str(v),font=load_stats_display_font(size,True),fill=color,anchor=anchor)
+    def av(x,y,size):
+        d.ellipse((x-5,y-5,x+size+5,y+size+5),fill=panel,outline=gold,width=4)
+        if avatar:
+            try:
+                im=Image.open(io.BytesIO(avatar)).convert('RGB').resize((size,size),Image.Resampling.LANCZOS)
+                mask=Image.new('L',(size,size),0); ImageDraw.Draw(mask).ellipse((0,0,size-1,size-1),fill=255); image.paste(im,(x,y),mask); return
+            except Exception: pass
+        text(x+size//2,y+size//2,username[:1].upper(),40,gold,'mm')
+    batting=[('MATCHES',t['matches']),('RUNS',t['runs']),('AVERAGE',fmt(t['bat_avg'])),('STRIKE RATE',fmt(t['strike_rate'])),('BALLS',t['balls_faced']),('NOT OUTS',t['not_outs']),('50s',sum(50<=r['runs']<100 for r in rows)),('100s',sum(r['runs']>=100 for r in rows)),('DUCKS',sum(r['runs']==0 and not r['not_out'] for r in rows)),('HIGH SCORE',max((r['runs'] for r in rows),default=0))]
+    bowling=[('INNINGS',sum(r['balls_bowled']>0 for r in rows)),('WICKETS',t['wickets']),('OVERS',fmt(t['overs'])),('ECONOMY',fmt(t['economy'])),('AVERAGE',fmt(t['bowl_avg'])),('STRIKE RATE',fmt(t['bowl_sr'])),('3W HAULS',sum(3<=r['wickets']<5 for r in rows)),('5W HAULS',sum(r['wickets']>=5 for r in rows))]
+    if design == 4:
+        d.rectangle((0,0,W,9),fill=gold); text(55,28,guild,19,lime); text(1545,28,'ULTIMATE PLAYER CARD',18,gold,'ra')
+        box(55,85,1545,330,(3,15,30,245),(163,127,62,255),26); av(90,120,170)
+        text(315,112,'OVERALL',17,gold); text(305,137,rating,88,gold); text(430,210,'/ 99',22,muted)
+        text(575,125,username,42,white); text(580,183,team,19,cyan); text(580,225,classify_player(t,rows),19,lime); text(580,270,str(t['matches'])+' MATCHES  •  '+str(round(fantasy,1))+' FANTASY PTS',17,muted)
+        attrs=[('RUNS',t['runs'],lime),('WICKETS',t['wickets'],cyan),('BAT IMPACT',bat_impact,lime),('BOWL IMPACT',bowl_impact,cyan),('AVERAGE',fmt(t['bat_avg']),gold),('ECONOMY',fmt(t['economy']),violet)]
+        for i,(name,val,col) in enumerate(attrs):
+            x=55+i*250; box(x,355,x+225,480,(5,23,41,245)); text(x+16,376,name,14,col); text(x+16,414,val,40,white)
+        for x,title,data,col in [(55,'BATTING',batting,lime),(825,'BOWLING',bowling,cyan)]:
+            box(x,510,x+720,840); text(x+24,530,title,22,col)
+            for i,(name,val) in enumerate(data[:8]):
+                xx=x+25+(i%4)*172; yy=585+(i//4)*105; text(xx,yy,name,13,muted); text(xx,yy+25,val,27,white)
+    elif design == 5:
+        d.rectangle((0,0,W,10),fill=cyan); text(55,27,guild,18,white); text(1545,27,'PLAYER MATCH CENTRE / SEASON REPORT',17,cyan,'ra')
+        box(55,75,1545,235,(2,14,28,245),edge,14); av(85,100,110)
+        text(235,103,username,37,white); text(238,155,team,17,cyan); text(238,190,classify_player(t,rows),15,lime)
+        text(1050,99,'OVERALL',14,muted); text(1045,126,str(rating)+'/99',48,gold); text(1295,99,'FANTASY POINTS',14,muted); text(1295,130,round(fantasy,1),36,white)
+        for x,title,data,col,impact in [(55,'BATTING SCOREBOARD',batting,lime,bat_impact),(825,'BOWLING SCOREBOARD',bowling,cyan,bowl_impact)]:
+            box(x,265,x+720,675,(2,15,29,245),edge,12); d.rectangle((x,265,x+720,325),fill=(9,38,58,245)); text(x+22,282,title,22,col); text(x+680,278,impact,32,col,'ra')
+            for i,(name,val) in enumerate(data):
+                xx=x+25+(i%2)*340; yy=350+(i//2)*61; text(xx,yy,name,13,muted); text(xx+300,yy-5,val,25,white,'ra')
+        box(55,705,1545,840,(2,14,27,245),edge,12); text(82,724,'SEASON SUMMARY',18,gold)
+        for i,(name,val,col) in enumerate([('MATCHES',t['matches'],white),('RUNS',t['runs'],lime),('WICKETS',t['wickets'],cyan),('BAT PTS',round(bat_pts,1),lime),('BOWL PTS',round(bowl_pts,1),cyan)]):
+            x=90+i*290; text(x,770,name,13,muted); text(x,795,val,28,col)
+    else:
+        d.rectangle((0,0,W,8),fill=violet); text(55,25,guild,18,white); text(1545,25,'PLAYER ANALYTICS',18,violet,'ra')
+        box(55,70,1545,195,(3,15,30,245)); av(82,88,88); text(205,98,username,34,white); text(208,145,team+' • '+classify_player(t,rows),15,cyan)
+        text(1080,90,'OVERALL RATING',13,muted); text(1080,115,str(rating)+'/99',43,gold); text(1320,90,'FANTASY PTS',13,muted); text(1320,120,round(fantasy,1),32,white)
+        kpis=[('MATCHES',t['matches'],gold),('RUNS',t['runs'],lime),('WICKETS',t['wickets'],cyan),('BAT AVG',fmt(t['bat_avg']),lime),('STRIKE RATE',fmt(t['strike_rate']),gold),('ECONOMY',fmt(t['economy']),cyan)]
+        for i,(name,val,col) in enumerate(kpis):
+            x=55+i*250; box(x,220,x+225,325,(5,22,40,245),edge,13); text(x+15,237,name,13,col); text(x+15,270,val,32,white)
+        box(55,345,1545,475,(3,15,29,245)); text(80,360,'IMPACT INDEX',17,violet)
+        for yy,name,val,col in [(392,'BATTING',bat_impact,lime),(435,'BOWLING',bowl_impact,cyan)]:
+            text(82,yy-8,name,13,muted); text(330,yy-13,val,25,col); d.rounded_rectangle((440,yy,1490,yy+15),radius=7,fill=(37,54,71,255)); d.rounded_rectangle((440,yy,440+int(1050*max(0,min(99,val))/99),yy+15),radius=7,fill=col)
+        for x,title,data,col,pts in [(55,'BATTING',batting,lime,bat_pts),(825,'BOWLING',bowling,cyan,bowl_pts)]:
+            box(x,500,x+720,840,(3,15,29,245)); text(x+22,518,title,21,col)
+            for i,(name,val) in enumerate(data):
+                xx=x+25+(i%2)*340; yy=565+(i//2)*48; text(xx,yy,name,12,muted); text(xx+295,yy-4,val,22,white,'ra')
+            text(x+500,800,'FANTASY PTS '+str(round(pts,1)),15,gold)
+    out=io.BytesIO(); image.convert('RGB').save(out,format='PNG',optimize=True); out.seek(0); return out
+
 def make_stats_image_design3(
     member, rows, avatar=None, fielding_points=0,
     catches_caught=0, catches_dropped=0,
@@ -1479,7 +1547,7 @@ class Stats(commands.Cog):
             CREATE TABLE IF NOT EXISTS stats_design_settings (
                 guild_id INTEGER PRIMARY KEY,
                 design INTEGER NOT NULL DEFAULT 1
-                    CHECK (design IN (1, 2, 3))
+                    CHECK (design IN (1, 2, 3, 4, 5, 6))
             )
             """
         )
@@ -1488,7 +1556,7 @@ class Stats(commands.Cog):
         design_schema = self.db.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='stats_design_settings'"
         ).fetchone()
-        if design_schema and "1, 2, 3" not in str(design_schema[0]):
+        if design_schema and "1, 2, 3, 4, 5, 6" not in str(design_schema[0]):
             self.db.execute("ALTER TABLE stats_design_settings RENAME TO stats_design_settings_old")
             self.db.execute(
                 """
@@ -2296,9 +2364,9 @@ class Stats(commands.Cog):
             )
             return
 
-        if design_number not in ("1", "2", "3"):
+        if design_number not in ("1", "2", "3", "4", "5", "6"):
             await ctx.reply(
-                "Invalid design number. Use `+setdesign 1`, `+setdesign 2`, or `+setdesign 3`.",
+                "Invalid design number. Use `+setdesign 1` through `+setdesign 6`.",
                 mention_author=False,
             )
             return
@@ -2343,7 +2411,7 @@ class Stats(commands.Cog):
                 (ctx.guild.id, design),
             )
 
-        design_names = {1: "Original", 2: "Blue Background", 3: "Tiered Player Card"}
+        design_names = {1: "Original", 2: "Blue Background", 3: "Tiered Player Card", 4: "Ultimate Team", 5: "Broadcast Scorecard", 6: "Player Analytics"}
         await ctx.reply(
             f"✅ Stats design for this server is now **Design {design} — {design_names[design]}**.",
             mention_author=False,
@@ -2458,7 +2526,9 @@ class Stats(commands.Cog):
         batter_drops, batter_taken = self.get_batter_catches(ctx.guild.id, member.id, competition)
 
         try:
-            if design == 3:
+            if design in (4, 5, 6):
+                image = await asyncio.to_thread(make_stats_image_new_design, member, rows, design, avatar=avatar)
+            elif design == 3:
                 recent_match_cards = []
                 for recent_row in reversed(rows[-5:]):
                     recent_match_cards.append({
