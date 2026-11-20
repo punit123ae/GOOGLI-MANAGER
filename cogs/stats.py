@@ -783,9 +783,9 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
 def make_stats_image_design3(
     member, rows, avatar=None, fielding_points=0,
     catches_caught=0, catches_dropped=0,
-    batter_drops=0, batter_taken=0,
+    batter_drops=0, batter_taken=0, recent_matches=None,
 ):
-    """Render a detailed 16:9 player dashboard on a clean solid background."""
+    """Render a combined season identity, performance trends and recent-match dashboard."""
     width, height = 1600, 900
     t = totals(rows)
     bat_impact, bowl_impact = impact_scores(rows, t)
@@ -796,17 +796,11 @@ def make_stats_image_design3(
         role = "FIELDER"
     rating = overall_rating(bat_impact, bowl_impact)
 
-    # Clean, solid midnight-navy canvas with restrained blue/cyan/gold accents.
-    bg = (8, 15, 27)
-    panel = (15, 27, 43)
-    panel_alt = (19, 34, 52)
-    white = (244, 248, 253)
-    muted = (151, 170, 191)
-    blue = (76, 151, 255)
-    cyan = (76, 213, 225)
-    gold = (239, 190, 91)
-    red = (238, 105, 111)
-    line = (42, 61, 83)
+    bg, panel, panel_alt = (7, 13, 23), (13, 22, 34), (17, 29, 44)
+    white, muted = (241, 246, 253), (137, 155, 177)
+    blue, blue_light = (20, 111, 205), (63, 157, 245)
+    cyan, lime, gold, red = (77, 215, 235), (190, 255, 48), (239, 190, 91), (239, 102, 116)
+    line = (34, 49, 67)
 
     image = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(image)
@@ -814,21 +808,28 @@ def make_stats_image_design3(
     username = getattr(member, "display_name", "PLAYER")
     team_name = get_player_team_name(member).upper()
 
-    # Header.
-    draw.rectangle((0, 0, width, 8), fill=blue)
-    draw.text((58, 31), guild[:42], font=load_font(25, True), fill=white)
-    draw.text((58, 69), "PLAYER PERFORMANCE  /  SEASON STATISTICS",
-              font=load_font(15, True), fill=blue)
-    draw.text((1540, 47), "PLAYER DOSSIER  •  DESIGN 03",
-              font=load_font(15, True), fill=muted, anchor="ra")
-    draw.line((55, 112, 1545, 112), fill=line, width=2)
+    # Restrained broadcast-style background texture.
+    draw.polygon([(1110, 0), (1600, 0), (1600, 900), (1430, 900)], fill=(8, 25, 45))
+    draw.polygon([(0, 0), (35, 0), (210, 900), (145, 900)], fill=(9, 43, 78))
+    for x in range(260, 1600, 105):
+        draw.line((x, 0, x - 470, 900), fill=(12, 23, 37), width=1)
+    draw.rectangle((0, 0, width, 7), fill=blue)
+    draw.text((56, 26), guild[:40], font=load_font(22, True), fill=white)
+    draw.text((57, 62), "PLAYER PERFORMANCE  /  SEASON INTELLIGENCE",
+              font=load_font(14, True), fill=blue_light)
+    draw.text((1542, 31), "01 / 01", font=load_font(12, True), fill=muted, anchor="ra")
+    draw.text((1542, 57), "PERFORMANCE DASHBOARD",
+              font=load_font(25, True), fill=white, anchor="ra")
+    draw.line((55, 103, 1545, 103), fill=line, width=2)
+    draw.line((55, 103, 260, 103), fill=blue, width=3)
+    draw.line((260, 103, 305, 103), fill=lime, width=3)
 
-    # Identity banner: avatar, player/team, role and rating.
-    draw.rounded_rectangle((55, 132, 1545, 286), radius=22,
-                           fill=panel, outline=line, width=2)
-    av_size, av_x, av_y = 112, 82, 153
-    draw.ellipse((av_x - 5, av_y - 5, av_x + av_size + 5, av_y + av_size + 5),
-                 fill=panel_alt, outline=blue, width=4)
+    # Player identity and rating banner.
+    draw.rounded_rectangle((55, 122, 1545, 244), radius=22, fill=panel, outline=line, width=2)
+    draw.rounded_rectangle((55, 148, 61, 220), radius=3, fill=blue)
+    av_size, av_x, av_y = 88, 82, 139
+    draw.ellipse((av_x - 4, av_y - 4, av_x + av_size + 4, av_y + av_size + 4),
+                 fill=panel_alt, outline=white, width=3)
     pasted = False
     if avatar:
         try:
@@ -841,68 +842,61 @@ def make_stats_image_design3(
         except Exception:
             pass
     if not pasted:
-        draw.text((av_x + av_size // 2, av_y + 25),
-                  (username[:1] or "?").upper(),
-                  font=load_font(55, True), fill=white, anchor="mt")
-    draw.ellipse((av_x - 5, av_y - 5, av_x + av_size + 5, av_y + av_size + 5),
-                 outline=blue, width=4)
+        draw.text((av_x + av_size // 2, av_y + 18), (username[:1] or "?").upper(),
+                  font=load_font(48, True), fill=white, anchor="mt")
+    draw.ellipse((av_x - 4, av_y - 4, av_x + av_size + 4, av_y + av_size + 4),
+                 outline=white, width=3)
 
-    name_size = 34
+    name_size = 32
     name_font = load_font(name_size, True)
-    while draw.textbbox((0, 0), username, font=name_font)[2] > 650 and name_size > 19:
+    while draw.textbbox((0, 0), username, font=name_font)[2] > 620 and name_size > 18:
         name_size -= 1
         name_font = load_font(name_size, True)
-    draw.text((230, 157), username, font=name_font, fill=white)
-    team_size = 19
-    team_font = load_font(team_size, True)
-    while draw.textbbox((0, 0), team_name, font=team_font)[2] > 650 and team_size > 12:
+    draw.text((194, 143), username, font=name_font, fill=white)
+    team_size, team_font = 17, load_font(17, True)
+    while draw.textbbox((0, 0), team_name, font=team_font)[2] > 620 and team_size > 11:
         team_size -= 1
         team_font = load_font(team_size, True)
-    draw.text((232, 207), team_name, font=team_font, fill=muted)
-    draw.rounded_rectangle((230, 242, 405, 270), radius=12,
-                           fill=(17, 48, 78), outline=(40, 95, 150), width=1)
-    draw.text((317, 256), role, font=load_font(13, True), fill=cyan, anchor="mm")
+    draw.text((196, 190), team_name, font=team_font, fill=muted)
+    draw.rounded_rectangle((196, 211, 350, 234), radius=10,
+                           fill=(13, 48, 79), outline=(29, 91, 145), width=1)
+    draw.text((273, 222), role, font=load_font(11, True), fill=cyan, anchor="mm")
 
-    # Rating block.
-    draw.line((1190, 153, 1190, 265), fill=line, width=2)
-    draw.text((1230, 157), "OVERALL RATING", font=load_font(14, True), fill=muted)
-    draw.text((1225, 179), str(rating), font=load_font(61, True), fill=gold)
-    draw.text((1320, 215), "/ 99", font=load_font(18, True), fill=muted)
-    draw.text((1488, 171), "FANTASY", font=load_font(13, True), fill=muted, anchor="ra")
-    draw.text((1488, 199), fmt(fantasy_points), font=load_font(27, True), fill=cyan, anchor="ra")
-    draw.text((1488, 237), "BAT  " + str(bat_impact) + "    BOWL  " + str(bowl_impact),
-              font=load_font(12, True), fill=muted, anchor="ra")
+    draw.line((920, 143, 920, 224), fill=line, width=2)
+    draw.text((956, 145), "OVERALL RATING", font=load_font(12, True), fill=muted)
+    draw.text((950, 165), str(rating), font=load_font(48, True), fill=gold)
+    draw.text((1017, 195), "/ 99", font=load_font(14, True), fill=muted)
+    draw.line((1100, 143, 1100, 224), fill=line, width=1)
+    draw.text((1130, 145), "FANTASY POINTS", font=load_font(12, True), fill=muted)
+    draw.text((1130, 174), fmt(fantasy_points), font=load_font(31, True), fill=cyan)
+    draw.text((1515, 151), "BAT  " + str(bat_impact), font=load_font(13, True), fill=lime, anchor="ra")
+    draw.text((1515, 190), "BOWL  " + str(bowl_impact), font=load_font(13, True), fill=cyan, anchor="ra")
+    draw.text((1515, 219), "SEASON PROFILE", font=load_font(10, True), fill=muted, anchor="ra")
 
-    # Season snapshot: six quick headline figures.
+    # Six headline season metrics.
     snapshot = [
-        ("MATCHES", t["matches"], blue),
-        ("TOTAL RUNS", t["runs"], gold),
-        ("WICKETS", t["wickets"], cyan),
-        ("BATTING AVG", fmt(t["bat_avg"]), white),
-        ("STRIKE RATE", fmt(t["strike_rate"]), white),
-        ("ECONOMY", fmt(t["economy"]), white),
+        ("MATCHES", t["matches"], blue_light), ("RUNS", t["runs"], lime),
+        ("WICKETS", t["wickets"], cyan), ("BATTING AVG", fmt(t["bat_avg"]), white),
+        ("STRIKE RATE", fmt(t["strike_rate"]), white), ("ECONOMY", fmt(t["economy"]), white),
     ]
-    snap_x, snap_y, snap_w, snap_gap = 55, 307, 231, 15
+    sx, sy, sw, sg = 55, 263, 231, 12
     for i, (label, value, accent) in enumerate(snapshot):
-        x = snap_x + i * (snap_w + snap_gap)
-        draw.rounded_rectangle((x, snap_y, x + snap_w, snap_y + 91), radius=15,
+        x = sx + i * (sw + sg)
+        draw.rounded_rectangle((x, sy, x + sw, sy + 78), radius=14,
                                fill=panel_alt, outline=line, width=1)
-        draw.text((x + 17, snap_y + 15), label, font=load_font(13, True), fill=muted)
-        draw.text((x + 17, snap_y + 43), str(value), font=load_font(29, True), fill=accent)
+        draw.text((x + 16, sy + 13), label, font=load_font(11, True), fill=muted)
+        draw.text((x + 16, sy + 37), str(value), font=load_font(27, True), fill=accent)
+        draw.ellipse((x + sw - 25, sy + 15, x + sw - 15, sy + 25), fill=accent)
 
-    # Detailed batting panel.
-    left = (55, 420, 785, 705)
-    draw.rounded_rectangle(left, radius=19, fill=panel, outline=line, width=2)
-    draw.rounded_rectangle((78, 440, 119, 447), radius=3, fill=gold)
-    draw.text((78, 460), "BATTING", font=load_font(20, True), fill=gold)
-    draw.text((758, 465), "CAREER BREAKDOWN", font=load_font(11, True), fill=muted, anchor="ra")
+    # Batting and bowling breakdowns.
+    draw.rounded_rectangle((55, 357, 785, 548), radius=18, fill=panel, outline=line, width=2)
+    draw.rounded_rectangle((815, 357, 1545, 548), radius=18, fill=panel, outline=line, width=2)
+    draw.rounded_rectangle((78, 376, 119, 382), radius=3, fill=lime)
+    draw.text((78, 394), "BATTING", font=load_font(17, True), fill=lime)
+    draw.text((758, 398), "AT THE CREASE", font=load_font(10, True), fill=muted, anchor="ra")
     batting = [
-        ("INNINGS", t["matches"]),
-        ("RUNS SCORED", t["runs"]),
-        ("BALLS FACED", t["balls_faced"]),
-        ("BATTING AVERAGE", fmt(t["bat_avg"])),
-        ("STRIKE RATE", fmt(t["strike_rate"])),
-        ("NOT OUTS", t["not_outs"]),
+        ("INNINGS", t["matches"]), ("RUNS SCORED", t["runs"]), ("BALLS FACED", t["balls_faced"]),
+        ("AVERAGE", fmt(t["bat_avg"])), ("STRIKE RATE", fmt(t["strike_rate"])), ("NOT OUTS", t["not_outs"]),
         ("FIFTIES", sum(50 <= r["runs"] < 100 for r in rows)),
         ("HUNDREDS", sum(r["runs"] >= 100 for r in rows)),
         ("DUCKS", sum(r["runs"] == 0 and not r["not_out"] for r in rows)),
@@ -910,85 +904,117 @@ def make_stats_image_design3(
     ]
     for i, (label, value) in enumerate(batting):
         col, row = i % 2, i // 2
-        x = 82 + col * 345
-        y = 505 + row * 37
-        draw.text((x, y), label, font=load_font(12, True), fill=muted)
-        val_color = red if label == "DUCKS" and value else (gold if label == "HIGH SCORE" else white)
-        draw.text((x + 300, y - 2), str(value), font=load_font(17, True),
-                  fill=val_color, anchor="ra")
-    draw.line((425, 501, 425, 680), fill=line, width=1)
+        x, y = 82 + col * 340, 431 + row * 22
+        draw.text((x, y), label, font=load_font(10, True), fill=muted)
+        color = red if label == "DUCKS" and value else (lime if label == "HIGH SCORE" else white)
+        draw.text((x + 300, y - 2), str(value), font=load_font(14, True), fill=color, anchor="ra")
+    draw.line((425, 430, 425, 532), fill=line, width=1)
 
-    # Detailed bowling panel.
-    right = (815, 420, 1545, 705)
-    draw.rounded_rectangle(right, radius=19, fill=panel, outline=line, width=2)
-    draw.rounded_rectangle((838, 440, 879, 447), radius=3, fill=cyan)
-    draw.text((838, 460), "BOWLING", font=load_font(20, True), fill=cyan)
-    draw.text((1518, 465), "CAREER BREAKDOWN", font=load_font(11, True), fill=muted, anchor="ra")
-    best = max(
-        ((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0),
-        default=(0, 0),
-    )
+    draw.rounded_rectangle((838, 376, 879, 382), radius=3, fill=cyan)
+    draw.text((838, 394), "BOWLING", font=load_font(17, True), fill=cyan)
+    draw.text((1518, 398), "WITH THE BALL", font=load_font(10, True), fill=muted, anchor="ra")
+    best = max(((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0), default=(0, 0))
     bowling = [
         ("BOWLING INNINGS", sum(r["balls_bowled"] > 0 for r in rows)),
-        ("OVERS BOWLED", fmt(t["overs"])),
-        ("WICKETS TAKEN", t["wickets"]),
-        ("RUNS CONCEDED", t["runs_conceded"]),
-        ("BOWLING AVERAGE", fmt(t["bowl_avg"])),
-        ("ECONOMY RATE", fmt(t["economy"])),
-        ("BOWLING STRIKE RATE", fmt(t["bowl_sr"])),
+        ("OVERS BOWLED", fmt(t["overs"])), ("WICKETS TAKEN", t["wickets"]),
+        ("RUNS CONCEDED", t["runs_conceded"]), ("AVERAGE", fmt(t["bowl_avg"])),
+        ("ECONOMY", fmt(t["economy"])), ("STRIKE RATE", fmt(t["bowl_sr"])),
         ("BEST FIGURES", f"{best[0]}/{-best[1]}"),
         ("3-WICKET HAULS", sum(3 <= r["wickets"] < 5 for r in rows)),
         ("5-WICKET HAULS", sum(r["wickets"] >= 5 for r in rows)),
     ]
     for i, (label, value) in enumerate(bowling):
         col, row = i % 2, i // 2
-        x = 842 + col * 345
-        y = 505 + row * 37
-        draw.text((x, y), label, font=load_font(12, True), fill=muted)
-        draw.text((x + 300, y - 2), str(value), font=load_font(17, True),
-                  fill=cyan if label in ("WICKETS TAKEN", "BEST FIGURES") else white,
-                  anchor="ra")
-    draw.line((1185, 501, 1185, 680), fill=line, width=1)
+        x, y = 842 + col * 340, 431 + row * 22
+        draw.text((x, y), label, font=load_font(10, True), fill=muted)
+        color = cyan if label in ("WICKETS TAKEN", "BEST FIGURES") else white
+        draw.text((x + 300, y - 2), str(value), font=load_font(14, True), fill=color, anchor="ra")
+    draw.line((1185, 430, 1185, 532), fill=line, width=1)
 
-    # Bottom strip: fielding impact and five most recent match records.
-    draw.rounded_rectangle((55, 724, 1545, 850), radius=18,
-                           fill=panel, outline=line, width=2)
-    draw.text((80, 744), "FIELDING", font=load_font(15, True), fill=cyan)
-    draw.text((80, 780), "CATCHES", font=load_font(11, True), fill=muted)
-    draw.text((80, 801), f"{catches_caught} / {catches_dropped}",
-              font=load_font(20, True), fill=white)
-    draw.text((250, 780), "FIELDING PTS", font=load_font(11, True), fill=muted)
-    draw.text((250, 801), fmt(fielding_points), font=load_font(20, True), fill=cyan)
-    draw.text((420, 780), "BATTER DROPS", font=load_font(11, True), fill=muted)
-    draw.text((420, 801), str(batter_drops), font=load_font(20, True), fill=white)
-    draw.text((590, 780), "BATTER CATCHES", font=load_font(11, True), fill=muted)
-    draw.text((590, 801), str(batter_taken), font=load_font(20, True), fill=white)
-    draw.line((755, 743, 755, 831), fill=line, width=2)
-
-    draw.text((790, 744), "LAST 5 MATCHES", font=load_font(15, True), fill=white)
-    recent = list(reversed(rows[-5:]))
-    if recent:
-        recent_x, recent_w, recent_gap = 790, 139, 11
-        for i, row in enumerate(recent):
-            x = recent_x + i * (recent_w + recent_gap)
-            draw.rounded_rectangle((x, 773, x + recent_w, 827), radius=10,
-                                   fill=panel_alt, outline=line, width=1)
-            status = "*" if row["not_out"] else ""
-            draw.text((x + 10, 782), f"{row['runs']}{status} ({row['balls_faced']})",
-                      font=load_font(15, True), fill=gold)
-            draw.text((x + 10, 807), f"{row['wickets']} W  •  {row['runs_conceded']} R",
-                      font=load_font(11, True), fill=muted)
+    # Runs and wickets trend across the ten most recent records.
+    trend_rows = list(rows[-10:])
+    draw.rounded_rectangle((55, 563, 1545, 694), radius=17, fill=panel, outline=line, width=2)
+    draw.text((78, 578), "PERFORMANCE TRENDS", font=load_font(14, True), fill=white)
+    draw.line((313, 585, 340, 585), fill=lime, width=3)
+    draw.text((350, 578), "RUNS", font=load_font(10, True), fill=lime)
+    draw.line((455, 585, 482, 585), fill=cyan, width=3)
+    draw.text((492, 578), "WICKETS", font=load_font(10, True), fill=cyan)
+    draw.text((1515, 580), "OLDEST  →  NEWEST", font=load_font(10, True), fill=muted, anchor="ra")
+    plot_left, plot_right, plot_bottom = 92, 1508, 675
+    draw.line((plot_left, plot_bottom, plot_right, plot_bottom), fill=(47, 63, 80), width=1)
+    for grid_y in (635, 655):
+        draw.line((plot_left, grid_y, plot_right, grid_y), fill=(25, 39, 54), width=1)
+    if trend_rows:
+        max_runs = max(1, max(int(r["runs"]) for r in trend_rows))
+        max_wickets = max(1, max(int(r["wickets"]) for r in trend_rows))
+        run_points, wicket_points = [], []
+        count = len(trend_rows)
+        for i, row in enumerate(trend_rows):
+            x = plot_left + (plot_right - plot_left) * i / max(1, count - 1)
+            run_points.append((int(x), int(plot_bottom - int(row["runs"]) / max_runs * 49)))
+            wicket_points.append((int(x), int(plot_bottom - int(row["wickets"]) / max_wickets * 49)))
+        if len(run_points) > 1:
+            draw.line(run_points, fill=lime, width=4, joint="curve")
+            draw.line(wicket_points, fill=cyan, width=3, joint="curve")
+        for i, (row, point) in enumerate(zip(trend_rows, run_points)):
+            x, y = point
+            draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=lime, outline=bg, width=1)
+            wx, wy = wicket_points[i]
+            draw.ellipse((wx - 3, wy - 3, wx + 3, wy + 3), fill=cyan, outline=bg, width=1)
+            if count <= 7 or i in (0, count - 1) or i % 2 == 0:
+                draw.text((x, min(plot_bottom - 2, y + 7)), str(row["runs"]),
+                          font=load_font(9, True), fill=lime, anchor="mt")
     else:
-        draw.text((800, 795), "NO RECENT MATCH DATA",
-                  font=load_font(14, True), fill=muted)
+        draw.text((800, 647), "NO RECENT MATCH DATA", font=load_font(12, True), fill=muted, anchor="mm")
 
-    draw.text((800, 876), "GOOGLI MANAGER  •  PLAYER PERFORMANCE FROM RECORDED MATCH STATS",
-              font=load_font(11, True), fill=(112, 132, 154), anchor="mm")
+    # Fielding strip.
+    draw.rounded_rectangle((55, 708, 1545, 766), radius=14, fill=panel_alt, outline=line, width=1)
+    draw.text((78, 728), "FIELDING", font=load_font(12, True), fill=cyan)
+    field_items = [
+        ("CATCHES", f"{catches_caught} / {catches_dropped}"),
+        ("FIELDING PTS", fmt(fielding_points)), ("BATTER DROPS", batter_drops),
+        ("BATTER CATCHES", batter_taken),
+    ]
+    for i, (label, value) in enumerate(field_items):
+        x = 285 + i * 300
+        draw.line((x - 22, 721, x - 22, 753), fill=line, width=1)
+        draw.text((x, 718), label, font=load_font(9, True), fill=muted)
+        draw.text((x, 735), str(value), font=load_font(16, True), fill=cyan if i == 1 else white)
+
+    # Five compact match cards.
+    recent_matches = recent_matches or []
+    draw.text((57, 780), "RECENT MATCHES", font=load_font(12, True), fill=white)
+    draw.text((1542, 780), "NEWEST FIRST", font=load_font(9, True), fill=muted, anchor="ra")
+    card_y, card_h, card_w, card_gap = 800, 78, 285, 12
+    for i in range(5):
+        x = 55 + i * (card_w + card_gap)
+        item = recent_matches[i] if i < len(recent_matches) else None
+        accent = blue if item is None else (lime if int(item.get("runs", 0)) >= 20 else cyan)
+        draw.rounded_rectangle((x, card_y, x + card_w, card_y + card_h),
+                               radius=11, fill=panel, outline=line, width=1)
+        draw.rounded_rectangle((x, card_y + 12, x + 4, card_y + card_h - 12), radius=2, fill=accent)
+        if item:
+            opponent = str(item.get("opponent") or "MATCH RECORD")[:25].upper()
+            draw.text((x + 15, card_y + 10), "VS " + opponent, font=load_font(9, True), fill=muted)
+            status = "*" if item.get("not_out") else ""
+            draw.text((x + 15, card_y + 31), f'{item.get("runs", 0)}{status}',
+                      font=load_font(22, True), fill=accent)
+            draw.text((x + 15, card_y + 58), f'{item.get("balls_faced", 0)} BALLS',
+                      font=load_font(8, True), fill=muted)
+            draw.line((x + 127, card_y + 30, x + 127, card_y + 66), fill=line, width=1)
+            draw.text((x + 143, card_y + 34), "BOWLING", font=load_font(8, True), fill=muted)
+            bowling_text = (f'{item.get("wickets", 0)}/{item.get("runs_conceded", 0)}'
+                            if int(item.get("balls_bowled", 0)) > 0 else "DNB")
+            draw.text((x + 143, card_y + 49), bowling_text, font=load_font(14, True), fill=white)
+        else:
+            draw.text((x + 15, card_y + 28), "NO MATCH DATA", font=load_font(11, True), fill=muted)
+
+    draw.text((800, 890), "GOOGLI MANAGER  •  PLAYER PERFORMANCE FROM RECORDED MATCH STATS",
+              font=load_font(9, True), fill=(103, 123, 146), anchor="mm")
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=False, compress_level=2)
     output.seek(0)
     return output
-
 
 # ============================================================
 # EXISTING EMBEDS AND DROPDOWN
@@ -2355,6 +2381,19 @@ class Stats(commands.Cog):
 
         try:
             if design == 3:
+                recent_match_cards = []
+                for recent_row in reversed(rows[-5:]):
+                    recent_match_cards.append({
+                        "opponent": self._saved_opponent(
+                            recent_row["source_message_id"], member.id
+                        ),
+                        "runs": recent_row["runs"],
+                        "balls_faced": recent_row["balls_faced"],
+                        "not_out": recent_row["not_out"],
+                        "wickets": recent_row["wickets"],
+                        "runs_conceded": recent_row["runs_conceded"],
+                        "balls_bowled": recent_row["balls_bowled"],
+                    })
                 image = await asyncio.to_thread(
                     make_stats_image_design3,
                     member,
@@ -2365,6 +2404,7 @@ class Stats(commands.Cog):
                     catches_dropped=catches_dropped,
                     batter_drops=batter_drops,
                     batter_taken=batter_taken,
+                    recent_matches=recent_match_cards,
                 )
             elif design == 2:
                 # Pillow rendering is CPU-bound; keep it off Discord's event loop.
