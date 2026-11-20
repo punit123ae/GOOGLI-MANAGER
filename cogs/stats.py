@@ -747,17 +747,14 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     draw.text(((role_left + role_right) // 2, 299), role_label,
               font=role_font, fill=blue, anchor="mm")
 
-    # Compact overall-rating badge beside the avatar, without moving the profile layout.
-    rating_box = (574, 368, 682, 452)
-    draw.rounded_rectangle(rating_box, radius=16, fill=(8, 24, 42, 245),
-                           outline=(55, 139, 220, 230), width=2)
-    draw.rounded_rectangle((574, 368, 581, 452), radius=3, fill=blue)
-    draw.text((628, 386), "OVERALL", font=load_font(11, True),
-              fill=muted, anchor="mt")
-    draw.text((628, 411), str(rating), font=load_font(34, True),
-              fill=white, anchor="mt")
-    draw.text((628, 440), "/99", font=load_font(11, True),
-              fill=blue, anchor="mt")
+    # Reference-inspired overall rating: bold score and /100 above-left of avatar.
+    # Keep the avatar and role badge in their existing positions.
+    draw.text((584, 286), "OVERALL RATING", font=load_font(16, True),
+              fill=blue, anchor="lt")
+    draw.text((582, 306), str(rating), font=load_font(66, True),
+              fill=white, anchor="lt")
+    draw.text((671, 347), "/100", font=load_font(17, True),
+              fill=muted, anchor="lm")
 
     avatar_size, avatar_x, avatar_y = 206, 697, 338
     draw.ellipse((avatar_x - 9, avatar_y - 9, avatar_x + avatar_size + 9, avatar_y + avatar_size + 9),
