@@ -1082,7 +1082,12 @@ def make_stats_image_experience(
         # Left portrait and collectible identity.
         panel((72, 110, 615, 820), (43, 29, 42), (126, 91, 64), 24, 2)
         portrait(172, 150, 330, gold)
-        txt(342, 510, name, 34, cream, "mt")
+        name_size = 34
+        name_font = F(name_size, True)
+        while d.textbbox((0, 0), name, font=name_font)[2] > 490 and name_size > 18:
+            name_size -= 1
+            name_font = F(name_size, True)
+        d.text((342, 510), name, font=name_font, fill=cream, anchor="mt")
         txt(342, 560, team, 15, gold, "mt")
         txt(342, 595, role, 17, (225, 194, 157), "mt")
         txt(342, 650, "OVERALL", 15, muted, "mt")
@@ -1093,8 +1098,8 @@ def make_stats_image_experience(
         attrs = [
             ("BATTING", bat_impact, (230, 174, 94)),
             ("BOWLING", bowl_impact, (101, 190, 220)),
-            ("RUNS", min(99, best_bat), (232, 206, 153)),
-            ("WICKETS", min(99, t["wickets"] * 5), (153, 190, 235)),
+            ("HIGH SCORE", best_bat, (232, 206, 153)),
+            ("WICKETS", t["wickets"], (153, 190, 235)),
             ("CONSISTENCY", consistency, (178, 202, 145)),
         ]
         for i, (label, value, col) in enumerate(attrs):
@@ -1136,7 +1141,12 @@ def make_stats_image_experience(
         txt(1545, 28, "PLAYER MATCH CENTRE  /  SEASON REVIEW", 15, cyan, "ra")
         panel((50, 75, 1550, 260), (9, 20, 35), (59, 84, 111), 15)
         portrait(82, 105, 120, cyan)
-        txt(245, 106, name, 38, white)
+        name_size = 38
+        name_font = F(name_size, True)
+        while d.textbbox((0, 0), name, font=name_font)[2] > 700 and name_size > 20:
+            name_size -= 1
+            name_font = F(name_size, True)
+        d.text((245, 106), name, font=name_font, fill=white)
         txt(248, 158, team, 17, cyan)
         txt(248, 199, role, 15, muted)
         txt(1020, 100, "OVR", 13, muted)
