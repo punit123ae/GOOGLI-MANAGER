@@ -31,6 +31,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.utility",
             "cogs.scheduling",
             "cogs.matchday",
+            "cogs.reschedule",
             "cogs.stats",
             "cogs.lb",
             "cogs.teams1",
