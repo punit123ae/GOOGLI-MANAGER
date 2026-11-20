@@ -896,11 +896,61 @@ def make_stats_image_new_design(member, rows, design, avatar=None):
     username = getattr(member, 'display_name', 'PLAYER')
     team = get_player_team_name(member).upper() or 'NO TEAM'
     guild = getattr(getattr(member, 'guild', None), 'name', 'PLAYER STATS').upper()
-    image = _cached_design2_background().copy().convert('RGBA')
-    if image.size != (W, H): image = image.resize((W, H), Image.Resampling.LANCZOS)
+    # Give each new design its own full canvas and visual language. These must
+    # not reuse Design 2's blue stadium artwork.
+    image = Image.new('RGBA', (W, H), (0, 0, 0, 255))
+    bg = ImageDraw.Draw(image)
+    if design == 4:
+        # Collectible / Ultimate Team: deep plum-to-bronze gradient with a
+        # restrained geometric foil pattern.
+        top, bottom = (24, 15, 38), (83, 48, 37)
+        for y in range(H):
+            p = y / max(H - 1, 1)
+            color = tuple(int(top[i] * (1 - p) + bottom[i] * p) for i in range(3))
+            bg.line((0, y, W, y), fill=(*color, 255))
+        for x in range(-900, 1900, 180):
+            bg.line((x, 0, x + 900, H), fill=(204, 151, 83, 34), width=3)
+        bg.ellipse((1120, -260, 1770, 390), outline=(222, 174, 105, 55), width=5)
+        bg.ellipse((1190, -190, 1700, 320), outline=(222, 174, 105, 35), width=2)
+        white=(255,246,226,255); muted=(205,183,164,255)
+        panel=(35,25,39,248); edge=(177,132,76,255)
+        lime=(235,190,104,255); cyan=(227,166,115,255)
+        gold=(255,213,139,255); violet=(210,164,190,255)
+    elif design == 5:
+        # Broadcast scorecard: near-black broadcast navy with red arena
+        # lighting and horizontal scan-line accents.
+        top, bottom = (7, 13, 25), (30, 19, 35)
+        for y in range(H):
+            p = y / max(H - 1, 1)
+            color = tuple(int(top[i] * (1 - p) + bottom[i] * p) for i in range(3))
+            bg.line((0, y, W, y), fill=(*color, 255))
+        bg.polygon([(0, 0), (520, 0), (230, 900), (0, 900)], fill=(130, 24, 43, 45))
+        bg.polygon([(1600, 0), (1300, 0), (1510, 900), (1600, 900)], fill=(24, 90, 122, 40))
+        for y in range(0, H, 7):
+            bg.line((0, y, W, y), fill=(180, 205, 230, 9), width=1)
+        white=(248,250,255,255); muted=(167,181,199,255)
+        panel=(8,17,31,248); edge=(91,111,139,255)
+        lime=(255,91,105,255); cyan=(75,211,245,255)
+        gold=(255,190,104,255); violet=(178,151,255,255)
+    else:
+        # Modern Analytics: bright ice-grey canvas, subtle grid and pale
+        # blue geometry, with white cards and dark readable typography.
+        top, bottom = (244, 248, 253), (218, 230, 242)
+        for y in range(H):
+            p = y / max(H - 1, 1)
+            color = tuple(int(top[i] * (1 - p) + bottom[i] * p) for i in range(3))
+            bg.line((0, y, W, y), fill=(*color, 255))
+        for x in range(40, W, 80):
+            bg.line((x, 0, x, H), fill=(72, 112, 157, 18), width=1)
+        for y in range(40, H, 80):
+            bg.line((0, y, W, y), fill=(72, 112, 157, 18), width=1)
+        bg.ellipse((1160, -300, 1780, 320), fill=(90, 155, 220, 22))
+        bg.ellipse((-260, 650, 300, 1210), fill=(115, 170, 210, 18))
+        white=(24,39,59,255); muted=(91,109,130,255)
+        panel=(250,252,255,248); edge=(174,193,214,255)
+        lime=(15,151,126,255); cyan=(34,119,190,255)
+        gold=(204,132,36,255); violet=(111,92,190,255)
     d = ImageDraw.Draw(image)
-    white=(248,250,255,255); muted=(174,190,208,255); panel=(4,17,32,239); edge=(65,100,133,255)
-    lime=(194,255,65,255); cyan=(67,222,239,255); gold=(255,197,83,255); violet=(190,155,255,255)
     def box(x1,y1,x2,y2,fill=panel,outline=edge,r=18): d.rounded_rectangle((x1,y1,x2,y2),radius=r,fill=fill,outline=outline,width=2)
     def text(x,y,v,size=18,color=white,anchor=None): d.text((x,y),str(v),font=load_stats_display_font(size,True),fill=color,anchor=anchor)
     def av(x,y,size):
