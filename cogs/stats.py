@@ -1004,6 +1004,295 @@ def make_stats_image_new_design(member, rows, design, avatar=None):
             text(x+500,800,'FANTASY PTS '+str(round(pts,1)),15,gold)
     out=io.BytesIO(); image.convert('RGB').save(out,format='PNG',optimize=True); out.seek(0); return out
 
+
+
+def make_stats_image_experience(
+    member, rows, design, avatar=None, fielding_points=0,
+    catches_caught=0, catches_dropped=0, recent_matches=None,
+):
+    """Render three genuinely different player experiences, not recolours of one template."""
+    W, H = 1600, 900
+    t = totals(rows)
+    bat_impact, bowl_impact = design2_impact_scores(rows, t)
+    bat_pts, bowl_pts, _ = fantasy_raw_points(rows, t)
+    fantasy = bat_pts + bowl_pts + float(fielding_points or 0)
+    rating = overall_rating(bat_impact, bowl_impact)
+    name = str(getattr(member, "display_name", "PLAYER"))[:32]
+    team = str(get_player_team_name(member) or "NO TEAM CONNECTED").upper()[:38]
+    guild = str(getattr(getattr(member, "guild", None), "name", "KASHMIR TITANS")).upper()[:38]
+    role = classify_player(t, rows)
+    recent = list(recent_matches or [])[-5:]
+    fifties = sum(50 <= r["runs"] < 100 for r in rows)
+    hundreds = sum(r["runs"] >= 100 for r in rows)
+    three_w = sum(3 <= r["wickets"] < 5 for r in rows)
+    five_w = sum(r["wickets"] >= 5 for r in rows)
+    best_bat = max((r["runs"] for r in rows), default=0)
+    best_bowl = max(
+        ((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0),
+        default=(0, 0),
+    )
+    consistent = sum(
+        1 for r in rows if r["runs"] >= 10 or r["wickets"] >= 1
+    )
+    consistency = round(100 * consistent / len(rows)) if rows else 0
+
+    image = Image.new("RGB", (W, H), (8, 14, 24))
+    d = ImageDraw.Draw(image)
+    F = load_stats_display_font
+
+    def txt(x, y, value, size=18, color=(245, 248, 255), anchor=None):
+        d.text((x, y), str(value), font=F(size, True), fill=color, anchor=anchor)
+
+    def panel(coords, fill, outline=None, radius=18, width=2):
+        d.rounded_rectangle(coords, radius=radius, fill=fill,
+                             outline=outline or fill, width=width)
+
+    def portrait(x, y, size, ring):
+        d.ellipse((x-7, y-7, x+size+7, y+size+7), fill=ring)
+        d.ellipse((x-2, y-2, x+size+2, y+size+2), fill=(15, 24, 38))
+        if avatar:
+            try:
+                pic = Image.open(io.BytesIO(avatar)).convert("RGB")
+                pic = ImageOps.fit(pic, (size, size), method=Image.Resampling.LANCZOS)
+                mask = Image.new("L", (size, size), 0)
+                ImageDraw.Draw(mask).ellipse((0, 0, size-1, size-1), fill=255)
+                image.paste(pic, (x, y), mask)
+                return
+            except Exception:
+                pass
+        txt(x + size//2, y + size//2, name[:1].upper(), max(28, size//2), ring, "mm")
+
+    if design == 4:
+        # COLLECTIBLE: portrait-led player card with rarity, milestones and attributes.
+        bg = Image.new("RGB", (W, H), (19, 13, 28))
+        bd = ImageDraw.Draw(bg)
+        top, bottom = (32, 20, 43), (91, 55, 39)
+        for yy in range(H):
+            p = yy / (H - 1)
+            c = tuple(int(top[k]*(1-p) + bottom[k]*p) for k in range(3))
+            bd.line((0, yy, W, yy), fill=c)
+        for xx in range(-700, 1800, 170):
+            bd.line((xx, 0, xx+900, H), fill=(191, 145, 88), width=2)
+        image = bg
+        d = ImageDraw.Draw(image)
+        gold, cream, muted = (246, 197, 115), (255, 245, 225), (199, 179, 159)
+        txt(58, 34, "KT  /  PLAYER COLLECTION", 19, gold)
+        txt(1540, 34, "SEASON EDITION", 16, cream, "ra")
+        panel((45, 80, 1555, 850), (28, 20, 34), (185, 139, 78), 30, 3)
+        # Left portrait and collectible identity.
+        panel((72, 110, 615, 820), (43, 29, 42), (126, 91, 64), 24, 2)
+        portrait(172, 150, 330, gold)
+        name_size = 34
+        name_font = F(name_size, True)
+        while d.textbbox((0, 0), name, font=name_font)[2] > 490 and name_size > 18:
+            name_size -= 1
+            name_font = F(name_size, True)
+        d.text((342, 510), name, font=name_font, fill=cream, anchor="mt")
+        txt(342, 560, team, 15, gold, "mt")
+        txt(342, 595, role, 17, (225, 194, 157), "mt")
+        txt(342, 650, "OVERALL", 15, muted, "mt")
+        txt(342, 680, rating, 78, gold, "mt")
+        txt(342, 765, "/ 99 RATING", 15, cream, "mt")
+        # Rarity / milestone panel on the right.
+        txt(675, 125, "PLAYER ATTRIBUTES", 23, gold)
+        attrs = [
+            ("BATTING", bat_impact, (230, 174, 94)),
+            ("BOWLING", bowl_impact, (101, 190, 220)),
+            ("HIGH SCORE", best_bat, (232, 206, 153)),
+            ("WICKETS", t["wickets"], (153, 190, 235)),
+            ("CONSISTENCY", consistency, (178, 202, 145)),
+        ]
+        for i, (label, value, col) in enumerate(attrs):
+            yy = 185 + i*83
+            txt(680, yy, label, 14, muted)
+            txt(1500, yy-5, value, 23, cream, "ra")
+            d.rounded_rectangle((680, yy+30, 1500, yy+45), radius=7, fill=(61, 48, 55))
+            if value:
+                d.rounded_rectangle((680, yy+30, 680+int(820*max(0,min(99,value))/99), yy+45),
+                                    radius=7, fill=col)
+        txt(680, 620, "UNLOCKED MILESTONES", 18, gold)
+        milestones = []
+        if fifties: milestones.append(f"{fifties} × 50 CLUB")
+        if hundreds: milestones.append(f"{hundreds} × CENTURY")
+        if three_w: milestones.append(f"{three_w} × 3W HAUL")
+        if five_w: milestones.append(f"{five_w} × 5W HAUL")
+        if t["runs"] >= 500: milestones.append("500 RUN CLUB")
+        if t["wickets"] >= 10: milestones.append("10 WICKET CLUB")
+        if not milestones: milestones = ["FIRST MILESTONE AWAITS"]
+        for i, label in enumerate(milestones[:4]):
+            xx = 680 + (i%2)*420
+            yy = 665 + (i//2)*65
+            panel((xx, yy, xx+390, yy+48), (54, 38, 43), (135, 99, 67), 12, 1)
+            txt(xx+18, yy+14, "✦  "+label, 14, cream)
+        txt(680, 800, f"{t['matches']} MATCHES   •   {fmt(fantasy,1)} FANTASY POINTS", 16, gold)
+
+    elif design == 5:
+        # BROADCAST: television match-centre with a score strip and recent-form ticker.
+        image = Image.new("RGB", (W, H), (5, 12, 23))
+        d = ImageDraw.Draw(image)
+        d.rectangle((0, 0, W, 12), fill=(239, 57, 75))
+        d.polygon([(0, 12), (520, 12), (300, 900), (0, 900)], fill=(23, 35, 55))
+        d.polygon([(1600, 12), (1320, 12), (1510, 900), (1600, 900)], fill=(13, 49, 65))
+        for yy in range(20, H, 8):
+            d.line((0, yy, W, yy), fill=(90, 130, 165), width=1)
+        red, cyan, gold = (255, 75, 91), (65, 211, 238), (255, 193, 100)
+        white, muted = (247, 250, 255), (151, 169, 191)
+        txt(55, 28, "KT SPORTS NETWORK", 18, red)
+        txt(1545, 28, "PLAYER MATCH CENTRE  /  SEASON REVIEW", 15, cyan, "ra")
+        panel((50, 75, 1550, 260), (9, 20, 35), (59, 84, 111), 15)
+        portrait(82, 105, 120, cyan)
+        name_size = 38
+        name_font = F(name_size, True)
+        while d.textbbox((0, 0), name, font=name_font)[2] > 700 and name_size > 20:
+            name_size -= 1
+            name_font = F(name_size, True)
+        d.text((245, 106), name, font=name_font, fill=white)
+        txt(248, 158, team, 17, cyan)
+        txt(248, 199, role, 15, muted)
+        txt(1020, 100, "OVR", 13, muted)
+        txt(1010, 128, f"{rating}/99", 44, gold)
+        txt(1250, 100, "FANTASY", 13, muted)
+        txt(1245, 132, fmt(fantasy,1), 36, white)
+        # Split scoreboards are laid out like a live broadcast graphic.
+        for x, title, accent, data in [
+            (50, "BATTING SCOREBOARD", red, [
+                ("RUNS", t["runs"]), ("INNINGS", t["matches"]),
+                ("AVERAGE", fmt(t["bat_avg"])), ("STRIKE RATE", fmt(t["strike_rate"])),
+                ("HIGH SCORE", best_bat), ("50s / 100s", f"{fifties} / {hundreds}"),
+                ("BAT IMPACT", bat_impact), ("BAT FANTASY", fmt(bat_pts,1)),
+            ]),
+            (825, "BOWLING SCOREBOARD", cyan, [
+                ("WICKETS", t["wickets"]), ("INNINGS", sum(r["balls_bowled"] > 0 for r in rows)),
+                ("OVERS", fmt(t["overs"])), ("ECONOMY", fmt(t["economy"])),
+                ("AVERAGE", fmt(t["bowl_avg"])), ("BEST FIGURES", f"{best_bowl[0]}/{-best_bowl[1]}"),
+                ("BOWL IMPACT", bowl_impact), ("BOWL FANTASY", fmt(bowl_pts,1)),
+            ]),
+        ]:
+            panel((x, 285, x+725, 650), (8, 20, 35), (54, 78, 103), 13)
+            d.rectangle((x, 285, x+725, 345), fill=(18, 39, 58))
+            txt(x+24, 302, title, 20, accent)
+            for i, (label, value) in enumerate(data):
+                col, row = i%2, i//2
+                xx, yy = x+28+col*340, 370+row*66
+                txt(xx, yy, label, 12, muted)
+                txt(xx+300, yy+21, value, 24, white, "ra")
+                d.line((xx, yy+52, xx+300, yy+52), fill=(36, 54, 73), width=1)
+        # A proper last-five form ticker, using actual saved match figures.
+        panel((50, 680, 1550, 850), (8, 20, 35), (54, 78, 103), 13)
+        txt(78, 700, "RECENT FORM  /  LAST FIVE", 18, gold)
+        if recent:
+            for i, item in enumerate(recent[-5:]):
+                xx = 78 + i*292
+                runs = int(item.get("runs", 0))
+                wkts = int(item.get("wickets", 0))
+                accent = red if runs >= 30 else cyan if wkts else muted
+                panel((xx, 738, xx+265, 820), (17, 34, 52), (51, 73, 96), 9, 1)
+                opp = str(item.get("opponent") or f"MATCH {i+1}").upper()[:22]
+                txt(xx+13, 749, opp, 10, muted)
+                txt(xx+13, 774, f"{runs}{'*' if item.get('not_out') else ''} RUNS", 20, accent)
+                txt(xx+245, 781, f"{wkts} W", 14, white, "ra")
+        else:
+            txt(80, 760, "NO RECENT MATCH DATA", 16, muted)
+
+    else:
+        # ANALYTICS: light data studio with trend chart, impact breakdown and discipline cards.
+        image = Image.new("RGB", (W, H), (238, 244, 250))
+        d = ImageDraw.Draw(image)
+        navy, ink, muted = (21, 39, 61), (32, 52, 76), (103, 121, 143)
+        blue, teal, amber, violet = (44, 117, 190), (17, 157, 135), (206, 139, 46), (119, 101, 190)
+        for xx in range(35, W, 70):
+            d.line((xx, 0, xx, H), fill=(212, 223, 235), width=1)
+        for yy in range(35, H, 70):
+            d.line((0, yy, W, yy), fill=(212, 223, 235), width=1)
+        txt(55, 25, "PLAYER PERFORMANCE LAB", 19, blue)
+        txt(1545, 25, "KT  /  ANALYTICS REPORT", 15, muted, "ra")
+        panel((50, 70, 1550, 180), (255, 255, 255), (204, 216, 229), 16)
+        portrait(75, 88, 72, blue)
+        txt(180, 93, name, 30, navy)
+        txt(183, 137, team+"  •  "+role, 14, muted)
+        txt(1030, 88, "OVERALL RATING", 12, muted)
+        txt(1025, 111, f"{rating}/99", 36, blue)
+        txt(1270, 88, "FANTASY POINTS", 12, muted)
+        txt(1265, 113, fmt(fantasy,1), 30, teal)
+        # KPI row.
+        kpis = [
+            ("MATCHES", t["matches"], blue), ("RUNS", t["runs"], teal),
+            ("WICKETS", t["wickets"], violet), ("BAT AVG", fmt(t["bat_avg"]), amber),
+            ("STRIKE RATE", fmt(t["strike_rate"]), blue), ("ECONOMY", fmt(t["economy"]), teal),
+        ]
+        for i, (label, value, color) in enumerate(kpis):
+            xx = 50+i*250
+            panel((xx, 200, xx+230, 295), (255,255,255), (204,216,229), 12, 1)
+            txt(xx+15, 216, label, 12, muted)
+            txt(xx+15, 246, value, 30, color)
+        # Recent performance line chart, runs and wickets, newest match at right.
+        panel((50, 315, 1000, 635), (255,255,255), (204,216,229), 15)
+        txt(78, 337, "MATCH-BY-MATCH TREND", 18, navy)
+        txt(78, 370, "Runs scored per match  •  latest five recorded matches", 12, muted)
+        chart = recent[-5:]
+        chart_left, chart_top, chart_w, chart_h = 105, 420, 820, 165
+        d.line((chart_left, chart_top+chart_h, chart_left+chart_w, chart_top+chart_h),
+               fill=(183,198,215), width=2)
+        if chart:
+            max_runs = max(10, max(int(x.get("runs",0)) for x in chart))
+            points = []
+            for i, item in enumerate(chart):
+                px = chart_left + int(chart_w*i/max(1,len(chart)-1))
+                py = chart_top+chart_h-int(chart_h*int(item.get("runs",0))/max_runs)
+                points.append((px,py))
+                d.ellipse((px-6,py-6,px+6,py+6), fill=blue, outline=(255,255,255), width=2)
+                txt(px, py-28, item.get("runs",0), 12, navy, "mm")
+                txt(px, chart_top+chart_h+12, f"M{i+1}", 10, muted, "mt")
+            if len(points)>1:
+                d.line(points, fill=blue, width=4)
+        else:
+            txt(515, 490, "NOT ENOUGH RECENT MATCH DATA", 14, muted, "mm")
+        # Contribution mix and transparent consistency indicator.
+        panel((1025, 315, 1550, 635), (255,255,255), (204,216,229), 15)
+        txt(1055, 337, "FANTASY CONTRIBUTION", 18, navy)
+        parts = [max(0,bat_pts), max(0,bowl_pts), max(0,float(fielding_points or 0))]
+        total = sum(parts)
+        colors = [teal, blue, amber]
+        if total > 0:
+            start = -90
+            for value, color in zip(parts, colors):
+                extent = 360*value/total
+                d.pieslice((1080, 395, 1300, 615), start=start, end=start+extent, fill=color)
+                start += extent
+            d.ellipse((1135,450,1245,560), fill=(255,255,255))
+            txt(1190, 495, fmt(fantasy,0), 22, navy, "mm")
+            txt(1190, 522, "TOTAL", 10, muted, "mm")
+        else:
+            d.ellipse((1080,395,1300,615), outline=(203,215,228), width=24)
+            txt(1190, 500, "0 PTS", 18, navy, "mm")
+        for i,(label,value,color) in enumerate([
+            ("BATTING",fmt(bat_pts,1),teal),("BOWLING",fmt(bowl_pts,1),blue),
+            ("FIELDING",fmt(fielding_points,1),amber)
+        ]):
+            yy=415+i*58
+            d.ellipse((1340,yy+3,1354,yy+17),fill=color)
+            txt(1365,yy,label,11,muted)
+            txt(1515,yy+19,value,18,navy,"ra")
+        # Three discipline summaries and a consistency definition.
+        for x,title,color,lines in [
+            (50,"BATTING",teal,[("RUNS",t["runs"]),("AVERAGE",fmt(t["bat_avg"])),("HIGH SCORE",best_bat),("50s / 100s",f"{fifties} / {hundreds}")]),
+            (555,"BOWLING",blue,[("WICKETS",t["wickets"]),("ECONOMY",fmt(t["economy"])),("BEST FIGURES",f"{best_bowl[0]}/{-best_bowl[1]}"),("5W HAULS",five_w)]),
+            (1060,"FIELDING",amber,[("CATCHES TAKEN",catches_caught),("CATCHES DROPPED",catches_dropped),("FIELDING POINTS",fmt(fielding_points,1)),("CONSISTENCY",f"{consistency}%")]),
+        ]:
+            panel((x,655,x+490,850),(255,255,255),(204,216,229),14,1)
+            txt(x+22,674,title,18,color)
+            for i,(label,value) in enumerate(lines):
+                yy=715+i*31
+                txt(x+22,yy,label,11,muted)
+                txt(x+460,yy-3,value,17,ink,"ra")
+                if i<3: d.line((x+22,yy+23,x+460,yy+23),fill=(226,233,240),width=1)
+        txt(55, 870, "CONSISTENCY = MATCHES WITH 10+ RUNS OR AT LEAST 1 WICKET", 10, muted)
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
 def make_stats_image_design3(
     member, rows, avatar=None, fielding_points=0,
     catches_caught=0, catches_dropped=0,
@@ -2577,7 +2866,26 @@ class Stats(commands.Cog):
 
         try:
             if design in (4, 5, 6):
-                image = await asyncio.to_thread(make_stats_image_new_design, member, rows, design, avatar=avatar)
+                recent_match_cards = []
+                for recent_row in reversed(rows[-5:]):
+                    recent_match_cards.append({
+                        "opponent": self._saved_opponent(
+                            recent_row["source_message_id"], member.id
+                        ),
+                        "runs": recent_row["runs"],
+                        "balls_faced": recent_row["balls_faced"],
+                        "not_out": recent_row["not_out"],
+                        "wickets": recent_row["wickets"],
+                        "runs_conceded": recent_row["runs_conceded"],
+                        "balls_bowled": recent_row["balls_bowled"],
+                    })
+                image = await asyncio.to_thread(
+                    make_stats_image_experience, member, rows, design,
+                    avatar=avatar, fielding_points=fielding_points,
+                    catches_caught=catches_caught,
+                    catches_dropped=catches_dropped,
+                    recent_matches=recent_match_cards,
+                )
             elif design == 3:
                 recent_match_cards = []
                 for recent_row in reversed(rows[-5:]):
