@@ -777,6 +777,167 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
 
 
 # ============================================================
+# DESIGN 3 - TIERED PLAYER CARD
+# ============================================================
+
+def make_stats_image_design3(member, rows, avatar=None, fielding_points=0):
+    """Render a portrait player card with tier styling and a last-five form chart."""
+    width, height = 1100, 1400
+    t = totals(rows)
+    bat_impact, bowl_impact = impact_scores(rows, t)
+    batting_points, bowling_points, _ = fantasy_raw_points(rows, t)
+    role = classify_player(t, rows)
+    if float(fielding_points) > batting_points and float(fielding_points) > bowling_points:
+        role = "FIELDER"
+    rating = (
+        round(bat_impact * 0.55 + bowl_impact * 0.45)
+        if role == "ALL-ROUNDER"
+        else (bat_impact if role in ("BATTER", "BATSMAN") else
+              (bowl_impact if role == "BOWLER" else max(bat_impact, bowl_impact, round(fielding_points))))
+    )
+    rating = max(0, min(99, rating))
+
+    # Tier colours are deliberately restrained so the card remains readable.
+    if rating >= 85:
+        tier, accent, accent_dark = "TITAN", (247, 194, 91), (103, 69, 22)
+    elif rating >= 70:
+        tier, accent, accent_dark = "GOLD", (226, 190, 112), (91, 72, 34)
+    elif rating >= 50:
+        tier, accent, accent_dark = "SILVER", (177, 202, 222), (57, 76, 94)
+    else:
+        tier, accent, accent_dark = "BRONZE", (194, 137, 103), (87, 53, 38)
+
+    bg = (8, 15, 27)
+    panel = (15, 27, 44)
+    panel2 = (20, 35, 54)
+    white = (244, 248, 253)
+    muted = (151, 169, 190)
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+
+    # Subtle architectural framing, not a busy background image.
+    draw.polygon([(0, 0), (width, 0), (width, 14), (0, 14)], fill=accent)
+    draw.polygon([(0, 0), (15, 0), (15, height), (0, height)], fill=accent_dark)
+    draw.rounded_rectangle((38, 38, 1062, 1360), radius=34, fill=panel,
+                           outline=(39, 57, 78), width=2)
+    draw.text((76, 70), getattr(getattr(member, "guild", None), "name", "GOOGLI MANAGER").upper()[:34],
+              font=load_font(23, True), fill=white)
+    draw.text((76, 108), "PLAYER PERFORMANCE CARD", font=load_font(15, True), fill=accent)
+    draw.text((1022, 83), "SEASON PROFILE", font=load_font(14, True), fill=muted, anchor="ra")
+    draw.line((76, 151, 1024, 151), fill=(48, 66, 88), width=2)
+
+    # Rating and identity.
+    draw.rounded_rectangle((76, 181, 1024, 525), radius=25, fill=panel2,
+                           outline=accent_dark, width=2)
+    draw.text((112, 213), tier, font=load_font(18, True), fill=accent)
+    draw.text((108, 242), str(rating), font=load_font(112, True), fill=white)
+    draw.text((278, 315), "/ 99", font=load_font(25, True), fill=muted)
+    draw.text((112, 392), "OVERALL RATING", font=load_font(16, True), fill=muted)
+    draw.rounded_rectangle((112, 438, 435, 478), radius=18, fill=accent_dark)
+    draw.text((273, 458), role, font=load_font(17, True), fill=white, anchor="mm")
+
+    avatar_size = 250
+    avatar_x, avatar_y = 690, 224
+    draw.ellipse((avatar_x - 10, avatar_y - 10, avatar_x + avatar_size + 10, avatar_y + avatar_size + 10),
+                 fill=bg, outline=accent, width=6)
+    pasted = False
+    if avatar:
+        try:
+            av = Image.open(io.BytesIO(avatar)).convert("RGB")
+            av = ImageOps.fit(av, (avatar_size, avatar_size), method=Image.Resampling.LANCZOS)
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size - 1, avatar_size - 1), fill=255)
+            image.paste(av, (avatar_x, avatar_y), mask)
+            pasted = True
+        except Exception:
+            pass
+    if not pasted:
+        initial = (getattr(member, "display_name", "?")[:1] or "?").upper()
+        draw.text((avatar_x + avatar_size // 2, avatar_y + 75), initial,
+                  font=load_font(92, True), fill=white, anchor="mt")
+    draw.ellipse((avatar_x - 10, avatar_y - 10, avatar_x + avatar_size + 10, avatar_y + avatar_size + 10),
+                 outline=accent, width=6)
+
+    name = getattr(member, "display_name", "Player")
+    name_size = 27
+    name_font = load_font(name_size, True)
+    while draw.textbbox((0, 0), name, font=name_font)[2] > 420 and name_size > 16:
+        name_size -= 1
+        name_font = load_font(name_size, True)
+    draw.text((815, 495), name, font=name_font, fill=white, anchor="ms")
+
+    # Three high-priority statistics.
+    headline = [
+        ("MATCHES", t["matches"]),
+        ("RUNS", t["runs"]),
+        ("WICKETS", t["wickets"]),
+    ]
+    card_y, card_w, gap = 558, 294, 22
+    for index, (label, value) in enumerate(headline):
+        x = 76 + index * (card_w + gap)
+        draw.rounded_rectangle((x, card_y, x + card_w, card_y + 132), radius=18,
+                               fill=panel2, outline=(43, 62, 84), width=1)
+        draw.text((x + 22, card_y + 22), label, font=load_font(15, True), fill=muted)
+        draw.text((x + 22, card_y + 59), str(value), font=load_font(43, True),
+                  fill=accent if index == 1 else white)
+
+    # Six compact attributes make the batting/bowling profile easy to scan.
+    draw.text((76, 735), "PLAYER ATTRIBUTES", font=load_font(20, True), fill=white)
+    attributes = [
+        ("BAT", bat_impact), ("BOWL", bowl_impact),
+        ("SR", fmt(t["strike_rate"])), ("ECO", fmt(t["economy"])),
+        ("AVG", fmt(t["bat_avg"])), ("W. AVG", fmt(t["bowl_avg"])),
+    ]
+    attr_w, attr_h, attr_gap = 294, 88, 22
+    for index, (label, value) in enumerate(attributes):
+        col, row = index % 3, index // 3
+        x = 76 + col * (attr_w + attr_gap)
+        y = 777 + row * 104
+        draw.rounded_rectangle((x, y, x + attr_w, y + attr_h), radius=14,
+                               fill=(12, 23, 38), outline=(39, 57, 78), width=1)
+        draw.text((x + 18, y + 17), label, font=load_font(14, True), fill=muted)
+        draw.text((x + attr_w - 18, y + 42), str(value), font=load_font(26, True),
+                  fill=white, anchor="rm")
+
+    # Last five innings: bars are scaled against the highest score in this sample.
+    draw.text((76, 1005), "RECENT FORM", font=load_font(20, True), fill=white)
+    recent = rows[-5:]
+    chart_box = (76, 1045, 1024, 1290)
+    draw.rounded_rectangle(chart_box, radius=18, fill=(12, 23, 38),
+                           outline=(39, 57, 78), width=1)
+    if recent:
+        max_runs = max(1, max(int(row.get("runs", 0)) for row in recent))
+        chart_left, chart_right = 125, 975
+        chart_top, chart_bottom = 1100, 1225
+        draw.line((chart_left, chart_bottom, chart_right, chart_bottom),
+                  fill=(65, 82, 103), width=2)
+        slot = (chart_right - chart_left) / len(recent)
+        bar_w = min(92, int(slot * 0.48))
+        for index, row in enumerate(recent):
+            runs = max(0, int(row.get("runs", 0)))
+            x_mid = chart_left + slot * (index + 0.5)
+            bar_h = max(5, int((runs / max_runs) * 100))
+            left = int(x_mid - bar_w / 2)
+            top = chart_bottom - bar_h
+            draw.rounded_rectangle((left, top, left + bar_w, chart_bottom),
+                                   radius=8, fill=accent)
+            draw.text((int(x_mid), top - 25), str(runs), font=load_font(17, True),
+                      fill=white, anchor="mm")
+            draw.text((int(x_mid), 1252), f"M{index + 1}",
+                      font=load_font(13, True), fill=muted, anchor="mm")
+    else:
+        draw.text((550, 1165), "NO RECENT MATCH DATA",
+                  font=load_font(20, True), fill=muted, anchor="mm")
+
+    draw.text((550, 1322), "GOOGLI MANAGER  •  GENERATED FROM RECORDED MATCH STATS",
+              font=load_font(12, True), fill=muted, anchor="mm")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=False, compress_level=2)
+    output.seek(0)
+    return output
+
+
+# ============================================================
 # EXISTING EMBEDS AND DROPDOWN
 # ============================================================
 
@@ -1161,10 +1322,31 @@ class Stats(commands.Cog):
             CREATE TABLE IF NOT EXISTS stats_design_settings (
                 guild_id INTEGER PRIMARY KEY,
                 design INTEGER NOT NULL DEFAULT 1
-                    CHECK (design IN (1, 2))
+                    CHECK (design IN (1, 2, 3))
             )
             """
         )
+        # Upgrade the older two-design CHECK constraint without losing saved
+        # per-server selections. SQLite cannot alter a CHECK constraint in place.
+        design_schema = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='stats_design_settings'"
+        ).fetchone()
+        if design_schema and "1, 2, 3" not in str(design_schema[0]):
+            self.db.execute("ALTER TABLE stats_design_settings RENAME TO stats_design_settings_old")
+            self.db.execute(
+                """
+                CREATE TABLE stats_design_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    design INTEGER NOT NULL DEFAULT 1
+                        CHECK (design IN (1, 2, 3))
+                )
+                """
+            )
+            self.db.execute(
+                "INSERT INTO stats_design_settings (guild_id, design) "
+                "SELECT guild_id, design FROM stats_design_settings_old"
+            )
+            self.db.execute("DROP TABLE stats_design_settings_old")
         self.db.execute(
             """
             CREATE TABLE IF NOT EXISTS player_match_fielding (
@@ -1957,9 +2139,9 @@ class Stats(commands.Cog):
             )
             return
 
-        if design_number not in ("1", "2"):
+        if design_number not in ("1", "2", "3"):
             await ctx.reply(
-                "Invalid design number. Use `+setdesign 1` or `+setdesign 2`.",
+                "Invalid design number. Use `+setdesign 1`, `+setdesign 2`, or `+setdesign 3`.",
                 mention_author=False,
             )
             return
@@ -2004,8 +2186,9 @@ class Stats(commands.Cog):
                 (ctx.guild.id, design),
             )
 
+        design_names = {1: "Original", 2: "Blue Background", 3: "Tiered Player Card"}
         await ctx.reply(
-            f"✅ Stats design for this server is now **Design {design}**.",
+            f"✅ Stats design for this server is now **Design {design} — {design_names[design]}**.",
             mention_author=False,
         )
 
@@ -2118,7 +2301,15 @@ class Stats(commands.Cog):
         batter_drops, batter_taken = self.get_batter_catches(ctx.guild.id, member.id, competition)
 
         try:
-            if design == 2:
+            if design == 3:
+                image = await asyncio.to_thread(
+                    make_stats_image_design3,
+                    member,
+                    rows,
+                    avatar=avatar,
+                    fielding_points=fielding_points,
+                )
+            elif design == 2:
                 # Pillow rendering is CPU-bound; keep it off Discord's event loop.
                 image = await asyncio.to_thread(
                     make_stats_image_design2,
