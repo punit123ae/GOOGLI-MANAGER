@@ -720,8 +720,8 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         col, row = i % 2, i // 2
         x, y = col_x[col], row_y[row]
         draw.rounded_rectangle((x - 7, y - 8, x + 190, y + 61), radius=10,
-                               fill=(14, 31, 50, 145))
-        draw.text((x + 4, y), label, font=load_font(16, True), fill=muted)
+                               fill=(17, 39, 30, 175), outline=(76, 119, 53, 105), width=1)
+        draw.text((x + 4, y), label, font=load_font(16, True), fill=(205, 235, 185, 255))
         # All batting values are white except the ducks number, which is red.
         draw.text((x + 4, y + 23), str(value), font=load_font(26, True), fill=red if label == "DUCKS" else white)
     draw.line((292, 351, 292, 682), fill=divider, width=2)
@@ -815,22 +815,26 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         ("AVERAGE", fmt(t["bowl_avg"]), blue),
         ("ECONOMY", fmt(t["economy"]), cyan),
         ("STRIKE RATE", fmt(t["bowl_sr"]), blue),
-        ("BEST FIGURES", f"{best[0]}/{-best[1]}", violet),
         ("3W HAULS", sum(3 <= r["wickets"] < 5 for r in rows), gold),
-        ("5W HAULS", sum(r["wickets"] >= 5 for r in rows), gold),
     ]
     bowl_col_x = (1108, 1345)
-    # Five rows are required for the 9 bowling metrics (two columns, final row has one item).
-    bowl_row_y = (354, 442, 530, 618, 706)
+    bowl_row_y = (354, 442, 530, 618)
     for i, (label, value, accent) in enumerate(bowling):
         col, row = i % 2, i // 2
         x, y = bowl_col_x[col], bowl_row_y[row]
         draw.rounded_rectangle((x - 5, y - 8, x + 190, y + 61), radius=10,
-                               fill=(14, 31, 50, 145))
-        draw.text((x + 5, y), label, font=load_font(16, True), fill=muted)
-        # All bowling values are white except the 5-wicket haul number, which is red.
-        draw.text((x + 5, y + 23), str(value), font=load_font(26, True), fill=red if label == "5W HAULS" else white)
-    draw.line((1320, 351, 1320, 682), fill=divider, width=2)
+                               fill=(12, 35, 47, 180), outline=(47, 111, 130, 105), width=1)
+        draw.text((x + 5, y), label, font=load_font(16, True), fill=(190, 232, 240, 255))
+        draw.text((x + 5, y + 23), str(value), font=load_font(26, True), fill=white)
+    draw.line((1320, 351, 1320, 682), fill=(79, 145, 160, 190), width=2)
+
+    # Best figures gets the same full-width highlight-card treatment as batting high score.
+    draw.rounded_rectangle((1105, 713, 1518, 775), radius=12,
+                           fill=(12, 35, 47, 180), outline=(47, 111, 130, 145), width=1)
+    draw.text((1121, 722), "BEST FIGURES", font=load_font(16, True),
+              fill=(190, 232, 240, 255))
+    draw.text((1121, 741), f"{best[0]}/{-best[1]}", font=load_font(25, True),
+              fill=cyan)
 
     draw.text((800, 862), "GOOGLI MANAGER  •  PLAYER PERFORMANCE FROM RECORDED MATCH STATS",
               font=load_font(12, True), fill=muted, anchor="mt")
