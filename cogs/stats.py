@@ -1195,98 +1195,143 @@ def make_stats_image_experience(
             txt(80, 760, "NO RECENT MATCH DATA", 16, muted)
 
     else:
-        # ANALYTICS: light data studio with trend chart, impact breakdown and discipline cards.
-        image = Image.new("RGB", (W, H), (238, 244, 250))
+        # ANALYTICS: dark, high-contrast performance studio with dual-series match trend.
+        image = Image.new("RGB", (W, H), (12, 19, 31))
         d = ImageDraw.Draw(image)
-        navy, ink, muted = (21, 39, 61), (32, 52, 76), (103, 121, 143)
-        blue, teal, amber, violet = (44, 117, 190), (17, 157, 135), (206, 139, 46), (119, 101, 190)
+        navy, panel_bg, panel_alt = (17, 29, 45), (21, 36, 54), (27, 45, 65)
+        ink, white, muted = (229, 238, 248), (246, 249, 253), (145, 164, 185)
+        blue, teal, amber, violet = (74, 153, 235), (42, 202, 174), (239, 178, 83), (164, 139, 238)
+        edge = (48, 69, 91)
+        # Restrained technical grid; no bright white canvas.
         for xx in range(35, W, 70):
-            d.line((xx, 0, xx, H), fill=(212, 223, 235), width=1)
+            d.line((xx, 0, xx, H), fill=(19, 32, 48), width=1)
         for yy in range(35, H, 70):
-            d.line((0, yy, W, yy), fill=(212, 223, 235), width=1)
+            d.line((0, yy, W, yy), fill=(19, 32, 48), width=1)
         txt(55, 25, "PLAYER PERFORMANCE LAB", 19, blue)
         txt(1545, 25, "KT  /  ANALYTICS REPORT", 15, muted, "ra")
-        panel((50, 70, 1550, 180), (255, 255, 255), (204, 216, 229), 16)
+        panel((50, 70, 1550, 180), panel_bg, edge, 16)
         portrait(75, 88, 72, blue)
-        txt(180, 93, name, 30, navy)
+        txt(180, 93, name, 30, white)
         txt(183, 137, team+"  •  "+role, 14, muted)
         txt(1030, 88, "OVERALL RATING", 12, muted)
         txt(1025, 111, f"{rating}/99", 36, blue)
-        txt(1270, 88, "FANTASY POINTS", 12, muted)
+        txt(1270, 88, "FANTASY", 12, muted)
         txt(1265, 113, fmt(fantasy,1), 30, teal)
-        # KPI row.
+
+        catch_total = int(catches_caught or 0) + int(catches_dropped or 0)
+        catch_efficiency = (100 * int(catches_caught or 0) / catch_total) if catch_total else 0.0
+        # Seven compact KPI tiles, including catch efficiency instead of consistency.
         kpis = [
             ("MATCHES", t["matches"], blue), ("RUNS", t["runs"], teal),
             ("WICKETS", t["wickets"], violet), ("BAT AVG", fmt(t["bat_avg"]), amber),
             ("STRIKE RATE", fmt(t["strike_rate"]), blue), ("ECONOMY", fmt(t["economy"]), teal),
+            ("EFFICIENCY", f"{catch_efficiency:.1f}%", amber),
         ]
+        kpi_gap, kpi_w = 10, 204
         for i, (label, value, color) in enumerate(kpis):
-            xx = 50+i*250
-            panel((xx, 200, xx+230, 295), (255,255,255), (204,216,229), 12, 1)
-            txt(xx+15, 216, label, 12, muted)
-            txt(xx+15, 246, value, 30, color)
-        # Recent performance line chart, runs and wickets, newest match at right.
-        panel((50, 315, 1000, 635), (255,255,255), (204,216,229), 15)
-        txt(78, 337, "MATCH-BY-MATCH TREND", 18, navy)
-        txt(78, 370, "Runs scored per match  •  latest five recorded matches", 12, muted)
+            xx = 50+i*(kpi_w+kpi_gap)
+            panel((xx, 200, xx+kpi_w, 295), panel_bg, edge, 12, 1)
+            txt(xx+14, 216, label, 11, muted)
+            txt(xx+14, 246, value, 27, color)
+
+        # Dual-series trend: batting runs and bowling wickets, each normalized
+        # to its own scale so both remain readable on the same clean plot.
+        panel((50, 315, 1000, 635), panel_bg, edge, 15)
+        txt(78, 337, "MATCH-BY-MATCH TREND", 18, white)
+        txt(78, 370, "Runs scored and wickets taken  •  latest five matches", 12, muted)
+        d.line((700, 350, 730, 350), fill=teal, width=4)
+        txt(740, 342, "RUNS", 10, muted)
+        d.line((830, 350, 860, 350), fill=blue, width=4)
+        txt(870, 342, "WICKETS", 10, muted)
         chart = recent[-5:]
-        chart_left, chart_top, chart_w, chart_h = 105, 420, 820, 165
-        d.line((chart_left, chart_top+chart_h, chart_left+chart_w, chart_top+chart_h),
-               fill=(183,198,215), width=2)
+        chart_left, chart_top, chart_w, chart_h = 112, 420, 820, 150
+        # Straight, evenly spaced horizontal guides.
+        for grid_i in range(5):
+            gy = chart_top + int(chart_h*grid_i/4)
+            d.line((chart_left, gy, chart_left+chart_w, gy), fill=(42, 59, 78), width=1)
         if chart:
-            max_runs = max(10, max(int(x.get("runs",0)) for x in chart))
-            points = []
+            max_runs = max(10, max(int(item.get("runs", 0)) for item in chart))
+            max_wickets = max(1, max(int(item.get("wickets", 0)) for item in chart))
+            run_points, wicket_points = [], []
             for i, item in enumerate(chart):
-                px = chart_left + int(chart_w*i/max(1,len(chart)-1))
-                py = chart_top+chart_h-int(chart_h*int(item.get("runs",0))/max_runs)
-                points.append((px,py))
-                d.ellipse((px-6,py-6,px+6,py+6), fill=blue, outline=(255,255,255), width=2)
-                txt(px, py-28, item.get("runs",0), 12, navy, "mm")
+                px = chart_left + int(chart_w*i/max(1, len(chart)-1))
+                run_value = int(item.get("runs", 0))
+                wicket_value = int(item.get("wickets", 0))
+                run_y = chart_top+chart_h-int(chart_h*run_value/max_runs)
+                wicket_y = chart_top+chart_h-int(chart_h*wicket_value/max_wickets)
+                run_points.append((px, run_y))
+                wicket_points.append((px, wicket_y))
                 txt(px, chart_top+chart_h+12, f"M{i+1}", 10, muted, "mt")
-            if len(points)>1:
-                d.line(points, fill=blue, width=4)
+                txt(run_value, px, run_y-20, 11, teal, "mm")
+                txt(wicket_value, px, wicket_y+18, 10, blue, "mm")
+            if len(run_points) > 1:
+                d.line(run_points, fill=teal, width=4, joint="curve")
+                d.line(wicket_points, fill=blue, width=4, joint="curve")
+            for px, py in run_points:
+                d.ellipse((px-5, py-5, px+5, py+5), fill=teal, outline=(12,19,31), width=2)
+            for px, py in wicket_points:
+                d.rectangle((px-4, py-4, px+4, py+4), fill=blue, outline=(12,19,31), width=1)
         else:
             txt(515, 490, "NOT ENOUGH RECENT MATCH DATA", 14, muted, "mm")
-        # Contribution mix and transparent consistency indicator.
-        panel((1025, 315, 1550, 635), (255,255,255), (204,216,229), 15)
-        txt(1055, 337, "FANTASY CONTRIBUTION", 18, navy)
-        parts = [max(0,bat_pts), max(0,bowl_pts), max(0,float(fielding_points or 0))]
+
+        # Fantasy contribution retains explicit category names; no generic points label.
+        panel((1025, 315, 1550, 635), panel_bg, edge, 15)
+        txt(1055, 337, "FANTASY CONTRIBUTION", 18, white)
+        parts = [max(0, bat_pts), max(0, bowl_pts), max(0, float(fielding_points or 0))]
         total = sum(parts)
         colors = [teal, blue, amber]
         if total > 0:
-            start = -90
+            start_angle = -90
             for value, color in zip(parts, colors):
                 extent = 360*value/total
-                d.pieslice((1080, 395, 1300, 615), start=start, end=start+extent, fill=color)
-                start += extent
-            d.ellipse((1135,450,1245,560), fill=(255,255,255))
-            txt(1190, 495, fmt(fantasy,0), 22, navy, "mm")
-            txt(1190, 522, "TOTAL", 10, muted, "mm")
+                d.pieslice((1070, 395, 1290, 615), start=start_angle, end=start_angle+extent, fill=color)
+                start_angle += extent
+            d.ellipse((1125, 450, 1235, 560), fill=panel_bg)
+            txt(1180, 495, fmt(fantasy,0), 22, white, "mm")
+            txt(1180, 522, "FANTASY", 10, muted, "mm")
         else:
-            d.ellipse((1080,395,1300,615), outline=(203,215,228), width=24)
-            txt(1190, 500, "0 PTS", 18, navy, "mm")
-        for i,(label,value,color) in enumerate([
-            ("BATTING",fmt(bat_pts,1),teal),("BOWLING",fmt(bowl_pts,1),blue),
-            ("FIELDING",fmt(fielding_points,1),amber)
+            d.ellipse((1070,395,1290,615), outline=edge, width=24)
+            txt(1180, 500, "0", 18, white, "mm")
+        for i, (label, value, color) in enumerate([
+            ("BATTING", fmt(bat_pts,1), teal),
+            ("BOWLING", fmt(bowl_pts,1), blue),
+            ("FIELDING", fmt(fielding_points,1), amber),
         ]):
-            yy=415+i*58
-            d.ellipse((1340,yy+3,1354,yy+17),fill=color)
-            txt(1365,yy,label,11,muted)
-            txt(1515,yy+19,value,18,navy,"ra")
-        # Three discipline summaries and a consistency definition.
-        for x,title,color,lines in [
-            (50,"BATTING",teal,[("RUNS",t["runs"]),("AVERAGE",fmt(t["bat_avg"])),("HIGH SCORE",best_bat),("50s / 100s",f"{fifties} / {hundreds}")]),
-            (555,"BOWLING",blue,[("WICKETS",t["wickets"]),("ECONOMY",fmt(t["economy"])),("BEST FIGURES",f"{best_bowl[0]}/{-best_bowl[1]}"),("5W HAULS",five_w)]),
-            (1060,"FIELDING",amber,[("CATCHES TAKEN",catches_caught),("CATCHES DROPPED",catches_dropped),("FIELDING POINTS",fmt(fielding_points,1)),("CONSISTENCY",f"{consistency}%")]),
+            yy = 415+i*58
+            d.ellipse((1325, yy+3, 1339, yy+17), fill=color)
+            txt(1350, yy, label, 11, muted)
+            txt(1515, yy+19, value, 18, white, "ra")
+
+        # Two balanced halves: eight batting metrics and eight bowling metrics.
+        batting_stats = [
+            ("INNINGS", t["matches"]), ("RUNS", t["runs"]),
+            ("BALLS FACED", t["balls_faced"]), ("AVERAGE", fmt(t["bat_avg"])),
+            ("STRIKE RATE", fmt(t["strike_rate"])), ("NOT OUTS", t["not_outs"]),
+            ("FIFTIES", fifties), ("HIGH SCORE", best_bat),
+        ]
+        bowling_innings = sum(1 for item in rows if item["balls_bowled"] > 0)
+        bowling_stats = [
+            ("INNINGS", bowling_innings), ("OVERS", fmt(t["overs"])),
+            ("WICKETS", t["wickets"]), ("RUNS CONCEDED", t["runs_conceded"]),
+            ("AVERAGE", fmt(t["bowl_avg"])), ("ECONOMY", fmt(t["economy"])),
+            ("STRIKE RATE", fmt(t["bowl_sr"])),
+            ("BEST FIGURES", f"{best_bowl[0]}/{-best_bowl[1]}"),
+        ]
+        for x, title, accent, stats in [
+            (50, "BATTING", teal, batting_stats),
+            (810, "BOWLING", blue, bowling_stats),
         ]:
-            panel((x,655,x+490,850),(255,255,255),(204,216,229),14,1)
-            txt(x+22,674,title,18,color)
-            for i,(label,value) in enumerate(lines):
-                yy=715+i*31
-                txt(x+22,yy,label,11,muted)
-                txt(x+460,yy-3,value,17,ink,"ra")
-                if i<3: d.line((x+22,yy+23,x+460,yy+23),fill=(226,233,240),width=1)
-        txt(55, 870, "CONSISTENCY = MATCHES WITH 10+ RUNS OR AT LEAST 1 WICKET", 10, muted)
+            panel((x, 655, x+740, 850), panel_bg, edge, 14, 1)
+            d.rounded_rectangle((x+20, 674, x+60, 680), radius=3, fill=accent)
+            txt(x+20, 690, title, 18, accent)
+            for i, (label, value) in enumerate(stats):
+                col, row = i//4, i%4
+                xx = x+25+col*355
+                yy = 725+row*29
+                txt(xx, yy, label, 10, muted)
+                txt(xx+325, yy-3, value, 17, white, "ra")
+                if row < 3:
+                    d.line((xx, yy+21, xx+325, yy+21), fill=(42, 59, 78), width=1)
 
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
