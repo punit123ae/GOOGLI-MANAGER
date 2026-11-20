@@ -820,7 +820,8 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         ("5W HAULS", sum(r["wickets"] >= 5 for r in rows), gold),
     ]
     bowl_col_x = (1108, 1345)
-    bowl_row_y = (354, 442, 530, 618)
+    # Five rows are required for the 9 bowling metrics (two columns, final row has one item).
+    bowl_row_y = (354, 442, 530, 618, 706)
     for i, (label, value, accent) in enumerate(bowling):
         col, row = i % 2, i // 2
         x, y = bowl_col_x[col], bowl_row_y[row]
