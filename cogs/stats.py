@@ -576,6 +576,55 @@ def _cached_design2_background():
         )
 
 
+def design2_impact_scores(rows, t=None):
+    """Balanced 0-99 impact ratings based on per-innings output and efficiency.
+
+    Unlike raw fantasy points, these scores are normalized, so long careers do
+    not automatically hit 99 and one huge innings cannot dominate the rating.
+    """
+    t = t or totals(rows)
+    matches = max(int(t.get("matches", 0)), 1)
+    batting_innings = sum(
+        1 for row in rows
+        if int(row.get("runs", 0)) > 0 or int(row.get("balls_faced", 0)) > 0
+    )
+    bowling_innings = sum(1 for row in rows if int(row.get("balls_bowled", 0)) > 0)
+
+    def clamp(value):
+        return max(0.0, min(100.0, float(value)))
+
+    # Batting rewards run output, average and scoring rate without allowing
+    # any single metric to overwhelm the others.
+    runs_per_innings = t["runs"] / max(batting_innings, 1)
+    bat_run_score = clamp(runs_per_innings / 50.0 * 100)
+    bat_average_score = clamp(t["bat_avg"] / 40.0 * 100)
+    bat_rate_score = clamp(t["strike_rate"] / 160.0 * 100)
+    bat_score = round(
+        bat_run_score * 0.45
+        + bat_average_score * 0.30
+        + bat_rate_score * 0.25
+    )
+
+    # Bowling gives the greatest weight to taking wickets, then rewards
+    # economical and effective spells. No-wicket spells cannot earn a
+    # misleadingly high impact from economy alone.
+    wickets_per_innings = t["wickets"] / max(bowling_innings, 1)
+    bowl_wicket_score = clamp(wickets_per_innings / 2.0 * 100)
+    bowl_economy_score = clamp((14.0 - t["economy"]) / 10.0 * 100)
+    bowl_average_score = clamp((40.0 - t["bowl_avg"]) / 35.0 * 100) if t["wickets"] else 0
+    bowl_rate_score = clamp((60.0 - t["bowl_sr"]) / 50.0 * 100) if t["wickets"] else 0
+    bowl_score = round(
+        bowl_wicket_score * 0.55
+        + bowl_economy_score * 0.25
+        + bowl_average_score * 0.10
+        + bowl_rate_score * 0.10
+    )
+    if t["wickets"] == 0:
+        bowl_score = min(bowl_score, 35)
+
+    return max(0, min(99, bat_score)), max(0, min(99, bowl_score))
+
+
 def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fielding_points=0):
     """Render Design 2: batting left, player profile centre, bowling right."""
     width, height = 1600, 900
@@ -607,10 +656,10 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
 
     t = totals(rows)
     batting_points, bowling_points, _ = fantasy_raw_points(rows, t)
+    bat_impact, bowl_impact = design2_impact_scores(rows, t)
     role = classify_player(t, rows)
     if float(fielding_points) > batting_points and float(fielding_points) > bowling_points:
         role = "FIELDER"
-    bat_impact, bowl_impact = impact_scores(rows, t)
     _, _, fantasy_points = fantasy_raw_points(rows, t)
     fantasy_points += float(fielding_points)
     guild = getattr(member, "guild", None)
@@ -721,21 +770,35 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         team_font_size -= 1
         team_font = load_font(team_font_size, True)
     draw.text((800, 608), team_name, font=team_font, fill=muted, anchor="mt")
-    draw.line((590, 646, 1010, 646), fill=(64, 94, 126, 200), width=1)
+    # Fantasy points repeated in the player identity area as requested.
+    draw.rounded_rectangle((650, 631, 950, 671), radius=12,
+                           fill=(14, 31, 50, 220), outline=(54, 95, 135, 170), width=1)
+    draw.text((670, 651), "FANTASY POINTS", font=load_font(13, True),
+              fill=muted, anchor="lm")
+    draw.text((930, 651), fmt(fantasy_points), font=load_font(22, True),
+              fill=violet, anchor="rm")
+    draw.line((590, 681, 1010, 681), fill=(64, 94, 126, 200), width=1)
 
-    # Impact values only: intentionally no progress bars/100-point lines.
-    draw.rounded_rectangle((590, 664, 1010, 716), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
-    impact1_mid_y = (664 + 716) // 2
-    draw.text((610, impact1_mid_y), "BATTING IMPACT", font=load_font(16, True),
-              fill=muted, anchor="lm")
-    draw.text((990, impact1_mid_y), str(bat_impact), font=load_font(26, True),
-              fill=lime, anchor="rm")
-    draw.rounded_rectangle((590, 731, 1010, 783), radius=13, fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
-    impact2_mid_y = (731 + 783) // 2
-    draw.text((610, impact2_mid_y), "BOWLING IMPACT", font=load_font(16, True),
-              fill=muted, anchor="lm")
-    draw.text((990, impact2_mid_y), str(bowl_impact), font=load_font(26, True),
-              fill=cyan, anchor="rm")
+    # Wider, thicker impact bars make the rating strength immediately visible.
+    draw.rounded_rectangle((590, 692, 1010, 740), radius=12,
+                           fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
+    draw.text((610, 701), "BATTING IMPACT", font=load_font(13, True), fill=muted)
+    draw.text((990, 698), str(bat_impact), font=load_font(23, True),
+              fill=lime, anchor="ra")
+    draw.rounded_rectangle((610, 725, 990, 734), radius=4, fill=(36, 48, 60, 255))
+    if bat_impact > 0:
+        draw.rounded_rectangle((610, 725, 610 + int(380 * bat_impact / 99), 734),
+                               radius=4, fill=lime)
+
+    draw.rounded_rectangle((590, 750, 1010, 798), radius=12,
+                           fill=(14, 31, 50, 210), outline=(54, 95, 135, 170), width=1)
+    draw.text((610, 759), "BOWLING IMPACT", font=load_font(13, True), fill=muted)
+    draw.text((990, 756), str(bowl_impact), font=load_font(23, True),
+              fill=cyan, anchor="ra")
+    draw.rounded_rectangle((610, 783, 990, 792), radius=4, fill=(36, 48, 60, 255))
+    if bowl_impact > 0:
+        draw.rounded_rectangle((610, 783, 610 + int(380 * bowl_impact / 99), 792),
+                               radius=4, fill=cyan)
 
     # Right panel: bowling stats with well-spaced paired columns.
     draw.rounded_rectangle((1105, 280, 1146, 287), radius=3, fill=cyan)
@@ -748,6 +811,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     bowling = [
         ("INNINGS", sum(r["balls_bowled"] > 0 for r in rows), cyan),
         ("OVERS", fmt(t["overs"]), blue),
+        ("WICKETS", t["wickets"], cyan),
         ("AVERAGE", fmt(t["bowl_avg"]), blue),
         ("ECONOMY", fmt(t["economy"]), cyan),
         ("STRIKE RATE", fmt(t["bowl_sr"]), blue),
