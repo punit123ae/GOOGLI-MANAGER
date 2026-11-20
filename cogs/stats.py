@@ -1261,7 +1261,7 @@ def make_stats_image_experience(
                 wicket_y = chart_top+chart_h-int(chart_h*wicket_value/max_wickets)
                 run_points.append((px, run_y))
                 wicket_points.append((px, wicket_y))
-                txt(f"M{i+1}", px, chart_top+chart_h+12, 10, muted, "mt")
+                txt(px, chart_top+chart_h+12, f"M{i+1}", 10, muted, "mt")
                 txt(run_value, px, run_y-20, 11, teal, "mm")
                 txt(wicket_value, px, wicket_y+18, 10, blue, "mm")
             if len(run_points) > 1:
