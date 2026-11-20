@@ -1234,21 +1234,21 @@ def make_stats_image_experience(
             txt(xx+14, 216, label, 11, muted)
             txt(xx+14, 246, value, 27, color)
 
-        # Dual-series trend: batting runs and bowling wickets, each normalized
-        # to its own scale so both remain readable on the same clean plot.
+        # Broadcast-style trend: neon series, soft bloom, gradient underglow,
+        # and compact value pills inspired by the supplied reference dashboard.
+        from PIL import ImageFilter
         panel((50, 315, 1000, 635), panel_bg, edge, 15)
-        txt(78, 337, "MATCH-BY-MATCH TREND", 18, white)
-        txt(78, 370, "Runs scored and wickets taken  •  latest five matches", 12, muted)
+        txt(78, 337, "PERFORMANCE TRENDS", 18, white)
+        txt(78, 370, "RUNS SCORED  /  WICKETS TAKEN  •  LATEST FIVE MATCHES", 11, muted)
         d.line((700, 350, 730, 350), fill=teal, width=4)
-        txt(740, 342, "RUNS", 10, muted)
+        txt(740, 342, "RUNS", 10, teal)
         d.line((830, 350, 860, 350), fill=blue, width=4)
-        txt(870, 342, "WICKETS", 10, muted)
+        txt(870, 342, "WICKETS", 10, blue)
         chart = recent[-5:]
         chart_left, chart_top, chart_w, chart_h = 112, 420, 820, 150
-        # Straight, evenly spaced horizontal guides.
-        for grid_i in range(5):
-            gy = chart_top + int(chart_h*grid_i/4)
-            d.line((chart_left, gy, chart_left+chart_w, gy), fill=(42, 59, 78), width=1)
+        for grid_i in range(4):
+            gy = chart_top + int(chart_h*grid_i/3)
+            d.line((chart_left, gy, chart_left+chart_w, gy), fill=(34, 49, 66), width=1)
         if chart:
             max_runs = max(10, max(int(item.get("runs", 0)) for item in chart))
             max_wickets = max(1, max(int(item.get("wickets", 0)) for item in chart))
@@ -1261,16 +1261,50 @@ def make_stats_image_experience(
                 wicket_y = chart_top+chart_h-int(chart_h*wicket_value/max_wickets)
                 run_points.append((px, run_y))
                 wicket_points.append((px, wicket_y))
-                txt(px, chart_top+chart_h+12, f"M{i+1}", 10, muted, "mt")
-                txt(run_value, px, run_y-20, 11, teal, "mm")
-                txt(wicket_value, px, wicket_y+18, 10, blue, "mm")
+
+            # Low-opacity fill below the runs curve gives the chart its depth.
+            glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            gd = ImageDraw.Draw(glow)
+            area = [(run_points[0][0], chart_top+chart_h)] + run_points + [
+                (run_points[-1][0], chart_top+chart_h)
+            ]
+            gd.polygon(area, fill=(42, 202, 174, 24))
+            # Broad blurred strokes create a soft neon bloom behind each series.
+            if len(run_points) > 1:
+                gd.line(run_points, fill=(42, 202, 174, 185), width=20, joint="curve")
+                gd.line(wicket_points, fill=(74, 153, 235, 165), width=17, joint="curve")
+            for px, py in run_points:
+                gd.ellipse((px-12, py-12, px+12, py+12), fill=(42, 202, 174, 145))
+            for px, py in wicket_points:
+                gd.ellipse((px-10, py-10, px+10, py+10), fill=(74, 153, 235, 135))
+            glow = glow.filter(ImageFilter.GaussianBlur(11))
+            image.paste(Image.alpha_composite(image.convert("RGBA"), glow).convert("RGB"))
+            d = ImageDraw.Draw(image)
+
             if len(run_points) > 1:
                 d.line(run_points, fill=teal, width=4, joint="curve")
                 d.line(wicket_points, fill=blue, width=4, joint="curve")
-            for px, py in run_points:
-                d.ellipse((px-5, py-5, px+5, py+5), fill=teal, outline=(12,19,31), width=2)
-            for px, py in wicket_points:
-                d.rectangle((px-4, py-4, px+4, py+4), fill=blue, outline=(12,19,31), width=1)
+
+            for i, (px, py) in enumerate(run_points):
+                # Glowing ring marker and a legible neon value capsule.
+                d.ellipse((px-6, py-6, px+6, py+6), fill=teal, outline=(225, 255, 249), width=2)
+                value = f"{int(chart[i].get('runs', 0))}R"
+                box_y = max(chart_top+3, py-31)
+                d.rounded_rectangle((px-23, box_y-10, px+23, box_y+11), radius=8,
+                                    fill=(12, 25, 38), outline=(91, 224, 196), width=1)
+                txt(px, box_y-7, value, 10, (111, 239, 210), "mt")
+
+            for i, (px, py) in enumerate(wicket_points):
+                d.ellipse((px-5, py-5, px+5, py+5), fill=blue, outline=(225, 242, 255), width=2)
+                value = f"{int(chart[i].get('wickets', 0))}W"
+                box_y = min(chart_top+chart_h-3, py+28)
+                d.rounded_rectangle((px-22, box_y-10, px+22, box_y+11), radius=8,
+                                    fill=(12, 25, 38), outline=(74, 153, 235), width=1)
+                txt(px, box_y-7, value, 10, (125, 185, 255), "mt")
+
+            for i in range(len(chart)):
+                px = chart_left + int(chart_w*i/max(1, len(chart)-1))
+                txt(px, chart_top+chart_h+12, f"M{i+1}", 10, muted, "mt")
         else:
             txt(515, 490, "NOT ENOUGH RECENT MATCH DATA", 14, muted, "mm")
 
