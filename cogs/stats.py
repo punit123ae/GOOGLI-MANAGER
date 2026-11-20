@@ -1563,7 +1563,7 @@ class Stats(commands.Cog):
                 CREATE TABLE stats_design_settings (
                     guild_id INTEGER PRIMARY KEY,
                     design INTEGER NOT NULL DEFAULT 1
-                        CHECK (design IN (1, 2, 3))
+                        CHECK (design IN (1, 2, 3, 4, 5, 6))
                 )
                 """
             )
