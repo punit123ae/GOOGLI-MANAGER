@@ -818,7 +818,9 @@ def make_stats_image_design3(
     stroke = (34, 49, 66)
     F = load_stats_display_font
 
-    image = Image.new("RGB", (width, height), bg)
+    image = _cached_design2_background().copy().convert("RGB")
+    if image.size != (width, height):
+        image = image.resize((width, height), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
     guild = getattr(getattr(member, "guild", None), "name", "GOOGLI MANAGER").upper()
     username = getattr(member, "display_name", "PLAYER")
@@ -830,10 +832,10 @@ def make_stats_image_design3(
     for x in range(300, 1600, 145):
         draw.line((x, 0, x - 360, 900), fill=(12, 23, 36), width=1)
     draw.rectangle((0, 0, width, 7), fill=blue)
-    draw.text((55, 22), guild[:42], font=F(18, True), fill=white)
-    draw.text((56, 51), "PLAYER PERFORMANCE  /  SEASON REPORT", font=F(12, True), fill=(71, 164, 244))
-    draw.text((1545, 27), "KT • PLAYER FILE", font=F(10, True), fill=muted, anchor="ra")
-    draw.text((1545, 48), "SEASON STATISTICS", font=F(24, True), fill=white, anchor="ra")
+    draw.text((55, 22), guild[:42], font=F(23, True), fill=white)
+    draw.text((56, 51), "PLAYER PERFORMANCE  /  SEASON REPORT", font=F(16, True), fill=(71, 164, 244))
+    draw.text((1545, 27), "KT • PLAYER FILE", font=F(13, True), fill=muted, anchor="ra")
+    draw.text((1545, 48), "SEASON STATISTICS", font=F(30, True), fill=white, anchor="ra")
     draw.line((55, 83, 1545, 83), fill=stroke, width=2)
     draw.line((55, 83, 225, 83), fill=blue, width=3)
     draw.line((225, 83, 275, 83), fill=lime, width=3)
@@ -846,7 +848,7 @@ def make_stats_image_design3(
     draw.text((173, 190), "/ 99", font=F(15, True), fill=muted)
     draw.line((255, 126, 255, 238), fill=stroke, width=1)
 
-    name_size = 36
+    name_size = 44
     name_font = F(name_size, True)
     while draw.textbbox((0, 0), username, font=name_font)[2] > 790 and name_size > 20:
         name_size -= 1
@@ -865,7 +867,7 @@ def make_stats_image_design3(
     draw.text((700, 225), f"BOWLING IMPACT  {bowl_impact}", font=F(10, True), fill=cyan)
     draw.line((1265, 126, 1265, 238), fill=stroke, width=1)
 
-    av_size, av_x, av_y = 112, 1350, 126
+    av_size, av_x, av_y = 126, 1342, 119
     pasted = False
     if avatar:
         try:
@@ -883,10 +885,10 @@ def make_stats_image_design3(
                   font=F(45, True), fill=white, anchor="mm")
     draw.ellipse((av_x - 4, av_y - 4, av_x + av_size + 4, av_y + av_size + 4),
                  outline=white, width=4)
-    draw.text((1406, 246), "PLAYER AVATAR", font=F(8, True), fill=muted, anchor="mm")
+    draw.text((1406, 246), "PLAYER AVATAR", font=F(10, True), fill=muted, anchor="mm")
 
     # Compact six-metric ribbon.
-    draw.text((57, 281), "SEASON SNAPSHOT", font=F(13, True), fill=white)
+    draw.text((57, 281), "SEASON SNAPSHOT", font=F(17, True), fill=white)
     snapshot = [
         ("MATCHES", t["matches"], blue),
         ("TOTAL RUNS", t["runs"], lime),
@@ -901,8 +903,8 @@ def make_stats_image_design3(
         x = snap_x + i * (snap_w + snap_gap)
         draw.rounded_rectangle((x, snap_y, x + snap_w, snap_y + 75), radius=13,
                                fill=panel2, outline=stroke, width=1)
-        draw.text((x + 15, snap_y + 12), label, font=F(9, True), fill=muted)
-        draw.text((x + 15, snap_y + 34), str(value), font=F(25, True), fill=accent)
+        draw.text((x + 15, snap_y + 11), label, font=F(11, True), fill=muted)
+        draw.text((x + 15, snap_y + 32), str(value), font=F(30, True), fill=accent)
         draw.rounded_rectangle((x + snap_w - 20, snap_y + 13, x + snap_w - 11, snap_y + 22),
                                radius=4, fill=accent)
 
@@ -914,8 +916,8 @@ def make_stats_image_design3(
 
     # Batting column uses a single aligned list to avoid the previous overlapping split columns.
     draw.rounded_rectangle((80, 424, 122, 431), radius=3, fill=lime)
-    draw.text((80, 447), "BATTING", font=F(19, True), fill=lime)
-    draw.text((510, 451), "AT THE CREASE", font=F(9, True), fill=muted, anchor="ra")
+    draw.text((80, 447), "BATTING", font=F(23, True), fill=lime)
+    draw.text((510, 451), "AT THE CREASE", font=F(11, True), fill=muted, anchor="ra")
     batting = [
         ("INNINGS", t["matches"]), ("RUNS SCORED", t["runs"]),
         ("BALLS FACED", t["balls_faced"]), ("AVERAGE", fmt(t["bat_avg"])),
@@ -926,16 +928,16 @@ def make_stats_image_design3(
         ("HIGH SCORE", max((r["runs"] for r in rows), default=0)),
     ]
     for i, (label, value) in enumerate(batting):
-        y = 485 + i * 27
-        draw.text((83, y), label, font=F(9, True), fill=muted)
+        y = 483 + i * 29
+        draw.text((83, y), label, font=F(11, True), fill=muted)
         color = red if label == "DUCKS" and value else (lime if label == "HIGH SCORE" else white)
-        draw.text((505, y - 2), str(value), font=F(15, True), fill=color, anchor="ra")
+        draw.text((505, y - 2), str(value), font=F(19, True), fill=color, anchor="ra")
         if i < len(batting) - 1:
             draw.line((82, y + 21, 508, y + 21), fill=(24, 37, 52), width=1)
 
     # Recent match list is now the center feature rather than a tiny bottom strip.
     draw.rounded_rectangle((585, 424, 627, 431), radius=3, fill=blue)
-    draw.text((585, 447), "RECENT MATCHES", font=F(19, True), fill=white)
+    draw.text((585, 447), "RECENT MATCHES", font=F(23, True), fill=white)
     draw.text((1015, 451), "LATEST 5", font=F(9, True), fill=muted, anchor="ra")
     recent_matches = recent_matches or []
     for i in range(5):
@@ -949,22 +951,22 @@ def make_stats_image_design3(
             opponent = str(item.get("opponent") or "OPPONENT NOT SAVED").upper()
             if len(opponent) > 25:
                 opponent = opponent[:23] + "…"
-            draw.text((598, y + 8), opponent, font=F(8, True), fill=muted)
+            draw.text((598, y + 8), opponent, font=F(10, True), fill=muted)
             score = f'{item.get("runs", 0)}{"*" if item.get("not_out") else ""}'
-            draw.text((598, y + 22), score, font=F(17, True), fill=accent)
+            draw.text((598, y + 22), score, font=F(22, True), fill=accent)
             draw.text((670, y + 31), f'{item.get("balls_faced", 0)} BALLS',
-                      font=F(8, True), fill=muted)
+                      font=F(10, True), fill=muted)
             draw.line((770, y + 9, 770, y + 40), fill=stroke, width=1)
             draw.text((786, y + 9), "BOWLING", font=F(8, True), fill=muted)
             bowl = (f'{item.get("wickets", 0)}/{item.get("runs_conceded", 0)}'
                     if int(item.get("balls_bowled", 0)) > 0 else "DNB")
-            draw.text((786, y + 23), bowl, font=F(14, True), fill=white)
+            draw.text((786, y + 23), bowl, font=F(17, True), fill=white)
         else:
             draw.text((598, y + 18), "NO MATCH DATA", font=F(9, True), fill=muted)
 
     # Bowling column, same single-column alignment for clean readability.
     draw.rounded_rectangle((1090, 424, 1132, 431), radius=3, fill=cyan)
-    draw.text((1090, 447), "BOWLING", font=F(19, True), fill=cyan)
+    draw.text((1090, 447), "BOWLING", font=F(23, True), fill=cyan)
     draw.text((1520, 451), "WITH THE BALL", font=F(9, True), fill=muted, anchor="ra")
     best = max(((r["wickets"], -r["runs_conceded"]) for r in rows if r["balls_bowled"] > 0),
                default=(0, 0))
@@ -988,7 +990,7 @@ def make_stats_image_design3(
     # Fielding footer is full-width and separate from the three columns.
     draw.rounded_rectangle((55, 805, 1545, 865), radius=13,
                            fill=panel2, outline=stroke, width=1)
-    draw.text((78, 827), "FIELDING", font=F(12, True), fill=cyan)
+    draw.text((78, 827), "FIELDING", font=F(15, True), fill=cyan)
     field_items = [
         ("CATCHES / DROPS", f"{catches_caught} / {catches_dropped}"),
         ("FIELDING POINTS", fmt(fielding_points)),
