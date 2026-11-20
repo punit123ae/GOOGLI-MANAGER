@@ -826,11 +826,7 @@ def make_stats_image_design3(
     username = getattr(member, "display_name", "PLAYER")
     team_name = get_player_team_name(member).upper() or "NO TEAM CONNECTED"
 
-    # New composition: angled side rails, offset header and no tall profile sidebar.
-    draw.polygon([(1190, 0), (1600, 0), (1600, 900), (1510, 900)], fill=(8, 26, 47))
-    draw.polygon([(0, 0), (26, 0), (180, 900), (125, 900)], fill=(9, 42, 76))
-    for x in range(300, 1600, 145):
-        draw.line((x, 0, x - 360, 900), fill=(12, 23, 36), width=1)
+    # Reuse Design 2's exact background artwork; only the layout and panels differ.
     draw.rectangle((0, 0, width, 7), fill=blue)
     draw.text((55, 22), guild[:42], font=F(23, True), fill=white)
     draw.text((56, 51), "PLAYER PERFORMANCE  /  SEASON REPORT", font=F(16, True), fill=(71, 164, 244))
