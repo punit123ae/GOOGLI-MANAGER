@@ -657,6 +657,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     t = totals(rows)
     batting_points, bowling_points, _ = fantasy_raw_points(rows, t)
     bat_impact, bowl_impact = design2_impact_scores(rows, t)
+    rating = overall_rating(bat_impact, bowl_impact)
     role = classify_player(t, rows)
     if float(fielding_points) > batting_points and float(fielding_points) > bowling_points:
         role = "FIELDER"
@@ -742,8 +743,21 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     role_left = role_right - role_pill_width
     draw.rounded_rectangle((role_left, 280, role_right, 319), radius=17,
                            fill=(13, 35, 59, 245), outline=(42, 113, 181, 220), width=1)
-    draw.text(((role_left + role_right) // 2, 289), role_label,
-              font=role_font, fill=blue, anchor="mt")
+    # Keep the existing role badge in place; center only its label vertically and horizontally.
+    draw.text(((role_left + role_right) // 2, 299), role_label,
+              font=role_font, fill=blue, anchor="mm")
+
+    # Compact overall-rating badge beside the avatar, without moving the profile layout.
+    rating_box = (574, 368, 682, 452)
+    draw.rounded_rectangle(rating_box, radius=16, fill=(8, 24, 42, 245),
+                           outline=(55, 139, 220, 230), width=2)
+    draw.rounded_rectangle((574, 368, 581, 452), radius=3, fill=blue)
+    draw.text((628, 386), "OVERALL", font=load_font(11, True),
+              fill=muted, anchor="mt")
+    draw.text((628, 411), str(rating), font=load_font(34, True),
+              fill=white, anchor="mt")
+    draw.text((628, 440), "/99", font=load_font(11, True),
+              fill=blue, anchor="mt")
 
     avatar_size, avatar_x, avatar_y = 206, 697, 338
     draw.ellipse((avatar_x - 9, avatar_y - 9, avatar_x + avatar_size + 9, avatar_y + avatar_size + 9),
