@@ -720,8 +720,8 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         col, row = i % 2, i // 2
         x, y = col_x[col], row_y[row]
         draw.rounded_rectangle((x - 7, y - 8, x + 190, y + 61), radius=10,
-                               fill=(17, 39, 30, 175), outline=(76, 119, 53, 105), width=1)
-        draw.text((x + 4, y), label, font=load_font(16, True), fill=(205, 235, 185, 255))
+                               fill=(19, 26, 36, 205), outline=(65, 82, 101, 115), width=1)
+        draw.text((x + 4, y), label, font=load_font(16, True), fill=(157, 172, 190, 255))
         # All batting values are white except the ducks number, which is red.
         draw.text((x + 4, y + 23), str(value), font=load_font(26, True), fill=red if label == "DUCKS" else white)
     draw.line((292, 351, 292, 682), fill=divider, width=2)
@@ -733,8 +733,17 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
     draw.text((98, 741), str(high_score), font=load_font(25, True), fill=gold)
 
     # Centre profile: avatar, username, team and role. No rating here.
-    draw.rounded_rectangle((690, 280, 910, 321), radius=17, fill=(12, 42, 76, 245), outline=(42, 113, 181, 220), width=1)
-    draw.text((800, 290), role, font=load_font(15, True), fill=blue, anchor="mt")
+    # Role pill is anchored to the upper-right of the profile area, clear of the avatar.
+    role_label = role.upper()
+    role_font = load_font(14, True)
+    role_width = draw.textbbox((0, 0), role_label, font=role_font)[2]
+    role_pill_width = max(150, role_width + 34)
+    role_right = 1018
+    role_left = role_right - role_pill_width
+    draw.rounded_rectangle((role_left, 280, role_right, 319), radius=17,
+                           fill=(13, 35, 59, 245), outline=(42, 113, 181, 220), width=1)
+    draw.text(((role_left + role_right) // 2, 289), role_label,
+              font=role_font, fill=blue, anchor="mt")
 
     avatar_size, avatar_x, avatar_y = 206, 697, 338
     draw.ellipse((avatar_x - 9, avatar_y - 9, avatar_x + avatar_size + 9, avatar_y + avatar_size + 9),
@@ -816,6 +825,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         ("ECONOMY", fmt(t["economy"]), cyan),
         ("STRIKE RATE", fmt(t["bowl_sr"]), blue),
         ("3W HAULS", sum(3 <= r["wickets"] < 5 for r in rows), gold),
+        ("5W HAULS", sum(r["wickets"] >= 5 for r in rows), gold),
     ]
     bowl_col_x = (1108, 1345)
     bowl_row_y = (354, 442, 530, 618)
@@ -823,16 +833,16 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
         col, row = i % 2, i // 2
         x, y = bowl_col_x[col], bowl_row_y[row]
         draw.rounded_rectangle((x - 5, y - 8, x + 190, y + 61), radius=10,
-                               fill=(12, 35, 47, 180), outline=(47, 111, 130, 105), width=1)
-        draw.text((x + 5, y), label, font=load_font(16, True), fill=(190, 232, 240, 255))
+                               fill=(19, 26, 36, 205), outline=(65, 82, 101, 115), width=1)
+        draw.text((x + 5, y), label, font=load_font(16, True), fill=(157, 172, 190, 255))
         draw.text((x + 5, y + 23), str(value), font=load_font(26, True), fill=white)
-    draw.line((1320, 351, 1320, 682), fill=(79, 145, 160, 190), width=2)
+    draw.line((1320, 351, 1320, 682), fill=(73, 94, 116, 190), width=2)
 
     # Best figures gets the same full-width highlight-card treatment as batting high score.
     draw.rounded_rectangle((1105, 713, 1518, 775), radius=12,
-                           fill=(12, 35, 47, 180), outline=(47, 111, 130, 145), width=1)
+                           fill=(19, 26, 36, 205), outline=(65, 82, 101, 145), width=1)
     draw.text((1121, 722), "BEST FIGURES", font=load_font(16, True),
-              fill=(190, 232, 240, 255))
+              fill=(157, 172, 190, 255))
     draw.text((1121, 741), f"{best[0]}/{-best[1]}", font=load_font(25, True),
               fill=cyan)
 
