@@ -1441,7 +1441,12 @@ def make_stats_image_experience(
             for value, color in zip(parts, (coral, violet, mint)):
                 seg = width_total*value/total
                 if seg > 0:
-                    sd.rectangle((round(cursor), bar_y1, round(cursor+seg)-2, bar_y1+30), fill=color + (255,))
+                    seg_x0 = round(cursor)
+                    seg_x1 = round(cursor + seg) - 2
+                    # Very small split segments can be narrower than the 2px separator.
+                    # Skip those instead of passing an inverted rectangle to Pillow.
+                    if seg_x1 >= seg_x0:
+                        sd.rectangle((seg_x0, bar_y1, seg_x1, bar_y1+30), fill=color + (255,))
                 cursor += seg
             seg_layer.putalpha(Image.composite(seg_layer.getchannel("A"), Image.new("L", (W, H), 0), mask))
             image = Image.alpha_composite(image.convert("RGBA"), seg_layer).convert("RGB")
