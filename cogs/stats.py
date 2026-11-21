@@ -1605,7 +1605,8 @@ def make_form_graph_image(member, graph_rows, avatar=None):
         # Show DNB for matches without batting/bowling instead of plotting a false zero.
         for i, item in enumerate(graph_rows):
             if not participated(item, key):
-                dnb_y = bottom - 22
+                # Keep batting and bowling DNB labels on separate rows when both apply.
+                dnb_y = bottom - (42 if key == "bowl" else 18)
                 txt(xs[i], dnb_y, "DNB", 13, color, "mm")
                 continue
             value = float(item[key])
