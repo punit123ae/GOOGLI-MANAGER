@@ -479,6 +479,50 @@ class PointsTable(commands.Cog):
         )
         return False
 
+    def team_home_channel_id(self, guild_id, team_name):
+        """Channel id of the team's home stadium (+setstadium), or None."""
+        try:
+            conn = sqlite3.connect(GROUP_DB)
+            try:
+                row = conn.execute(
+                    "SELECT channel_id FROM team_home_stadiums WHERE guild_id=? AND team_name=? COLLATE NOCASE",
+                    (guild_id, str(team_name)),
+                ).fetchone()
+            finally:
+                conn.close()
+            return int(row[0]) if row else None
+        except Exception:
+            return None
+
+    def team_standing(self, guild_id, team_name):
+        """A team's place in its group for the active stage, or None when it has no group yet.
+
+        {"group", "rank", "of", "won", "lost", "points", "history"} - used by the team profile image.
+        """
+        try:
+            stage = get_active_stage(guild_id)
+            conn = sqlite3.connect(GROUP_DB)
+            try:
+                keys = [str(r[0]) for r in conn.execute(
+                    "SELECT group_key FROM team_groups WHERE guild_id=? AND team_name=? COLLATE NOCASE",
+                    (guild_id, str(team_name)))]
+            finally:
+                conn.close()
+            if not keys:
+                return None
+            group_key = next((k for k in keys if stage and k.split("::", 1)[0] == stage[0]), keys[-1])
+            group_name, rows = self._group_data(guild_id, group_key)
+            for position, item in enumerate(rows, start=1):
+                if item["team_name"].casefold() == str(team_name).casefold():
+                    return {
+                        "group": group_name, "rank": position, "of": len(rows),
+                        "won": item["matches_won"], "lost": item["matches_lost"],
+                        "points": item["points"], "history": list(item["history"]),
+                    }
+        except Exception as exc:
+            print(f"[points] team_standing failed: {type(exc).__name__}: {exc}")
+        return None
+
     def _group_data(self, guild_id, group_key):
         group_conn = sqlite3.connect(GROUP_DB)
         group_conn.row_factory = sqlite3.Row

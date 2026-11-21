@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import io
 import re
 import sqlite3
@@ -7,6 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import discord
+from .teaminfo_image import render_team_pages
 from discord.ext import commands
 
 from .teams1 import TeamCore, ConfirmDeleteAllView, TeamApprovalView, TeamListView, JoinRequestView, LeaveTeamConfirmView, CAPTAIN_EMOJI, VICE_CAPTAIN_EMOJI
@@ -53,89 +53,6 @@ def _field_entry(rec):
         f"`{caught}` caught • `{dropped}` dropped • eff `{eff:.1f}%`",
     )
 
-
-
-def _plain_text(text):
-    """Strip Discord markdown for image text, but keep real underscores in names (lemon_0088)."""
-    import re
-    text = re.sub(r"\\([_*`~|>])", r"\1", str(text))   # un-escape \_ \* etc.
-    return text.replace("`", "").replace("**", "").replace("__", "")
-
-
-def _render_test_teaminfo_page(embed, page_number, page_count):
-    import io
-    import re
-    from PIL import Image, ImageDraw, ImageFont
-
-    image = Image.new("RGB", (1200, 675), "#F4F7FB")
-    draw = ImageDraw.Draw(image)
-
-    def font(size, bold=False):
-        path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            return ImageFont.load_default()
-
-    title_font, body_font = font(34, True), font(19)
-    label_font, small_font = font(16, True), font(14, True)
-    draw.rounded_rectangle((24, 20, 1176, 655), radius=26, fill="#FFFFFF")
-    draw.rounded_rectangle((24, 20, 1176, 142), radius=26, fill="#10243A")
-    draw.rectangle((24, 112, 1176, 142), fill="#10243A")
-    draw.rectangle((24, 138, 1176, 145), fill="#22B8CF")
-    title = re.sub(r"^[^A-Za-z0-9]+", "", embed.title or "TEAM PROFILE")
-    draw.text((60, 54), title[:48], font=title_font, fill="#FFFFFF")
-    draw.text((1000, 72), f"{page_number}/{page_count}", font=small_font, fill="#B8DCE8")
-
-    y, left, right = 178, 60, 1140
-    fields = list(embed.fields)
-    if fields:
-        player_fields = [f for f in fields if str(f.name).lower().startswith("players")]
-        card_fields = [f for f in fields if f not in player_fields]
-        # Small cards (Captain / Vice-Captain ...) sit side by side along the top.
-        for index, field in enumerate(card_fields):
-            name = _plain_text(str(field.name))
-            value = _plain_text(str(field.value))
-            card_x = left if index % 2 == 0 else 610
-            draw.rounded_rectangle((card_x, y, card_x + 470, y + 84), radius=16, fill="#F0F5FA")
-            draw.text((card_x + 20, y + 12), name.upper(), font=small_font, fill="#087F9C")
-            draw.text((card_x + 20, y + 40), value[:34], font=body_font, fill="#183047")
-            if index % 2 == 1 or index == len(card_fields) - 1:
-                y += 100
-        # The roster fills the rest of the page in three columns.
-        for field in player_fields:
-            name = _plain_text(str(field.name))
-            value = _plain_text(str(field.value))
-            box_bottom = 590
-            draw.rounded_rectangle((left, y, right, box_bottom), radius=18, fill="#F0F5FA")
-            draw.text((left + 22, y + 14), name.upper(), font=label_font, fill="#087F9C")
-            roster_font = font(17)
-            lines = value.splitlines()
-            rows_per_column = max(1, (box_bottom - (y + 48) - 26) // 24)
-            capacity = rows_per_column * 3
-            for index, line in enumerate(lines[:capacity]):
-                column, row = divmod(index, rows_per_column)
-                draw.text((left + 26 + column * 355, y + 48 + row * 24), line[:34], font=roster_font, fill="#183047")
-            if len(lines) > capacity:
-                draw.text((left + 26, box_bottom - 26), f"+ {len(lines) - capacity} more players", font=small_font, fill="#60758A")
-    else:
-        lines = _plain_text(embed.description or "").splitlines()
-        if lines:
-            draw.rounded_rectangle((left, y, right, y + 76), radius=16, fill="#E6F5F8")
-            draw.text((left + 22, y + 22), lines[0][:100], font=label_font, fill="#075B70")
-            y += 98
-        for line in lines[2:]:
-            line = line.strip()
-            if not line or y > 565:
-                continue
-            draw.rounded_rectangle((left, y, right, y + 38), radius=10, fill="#F0F5FA")
-            draw.text((left + 18, y + 7), line[:105], font=body_font, fill="#183047")
-            y += 45
-
-    draw.text((left, 610), "KASHMIR TITANS  •  TEAM PROFILE", font=small_font, fill="#718397")
-    output = io.BytesIO()
-    image.save(output, format="PNG", compress_level=3)
-    return output.getvalue()
 
 
 class TestTeamInfoView(discord.ui.View):
@@ -853,10 +770,163 @@ class TeamCommandsB:
             mention_author=False
         )
 
+    @staticmethod
+    async def _fetch_url_bytes(url):
+        """Download a small image (team logo); None when it can't be fetched."""
+        if not str(url or "").startswith(("http://", "https://")):
+            return None
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+                async with session.get(str(url)) as response:
+                    if response.status == 200:
+                        return await response.read()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    async def _fetch_avatar(member):
+        if member is None:
+            return None
+        try:
+            return await asyncio.wait_for(
+                member.display_avatar.replace(size=128, static_format="png").read(), timeout=6
+            )
+        except Exception:
+            return None
+
+    async def _team_profile_data(self, ctx, team, ordered_ids):
+        """Everything the premium team-profile images need, gathered from the bot's own data."""
+        from .lb import _totals
+        from .stats import fantasy_raw_points
+
+        guild = ctx.guild
+        member_ids = list(dict.fromkeys(
+            [int(team["captain_id"])]
+            + ([int(team["vice_captain_id"])] if team["vice_captain_id"] else [])
+            + [int(uid) for uid in ordered_ids]
+        ))
+        try:   # players who used to play for this team still count towards its totals
+            historical = self.db.execute(
+                "SELECT DISTINCT user_id FROM player_team_transfers "
+                "WHERE guild_id=? AND (old_team_id=? OR new_team_id=?)",
+                (int(guild.id), int(team["id"]), int(team["id"])),
+            ).fetchall()
+            total_ids = list(dict.fromkeys(member_ids + [int(row[0]) for row in historical]))
+        except sqlite3.Error:
+            total_ids = member_ids
+        stat_rows = self._team_stat_rows(guild.id, team)
+        fielding = self._team_fielding_totals(guild.id, team)
+        captain_id = int(team["captain_id"])
+        vice_id = int(team["vice_captain_id"]) if team["vice_captain_id"] else None
+
+        members = {uid: guild.get_member(uid) for uid in member_ids}
+        semaphore = asyncio.Semaphore(8)
+
+        async def avatar_of(uid):
+            async with semaphore:
+                return await self._fetch_avatar(members[uid])
+        avatar_list, logo_bytes = await asyncio.gather(
+            asyncio.gather(*(avatar_of(uid) for uid in member_ids)),
+            self._fetch_url_bytes(team["logo_url"]),
+        )
+        avatars = dict(zip(member_ids, avatar_list))
+
+        players = []
+        for uid in member_ids:
+            rows = stat_rows.get(uid, [])
+            t = _totals(rows) if rows else None
+            caught, dropped = fielding.get(uid, (0, 0))
+            member = members[uid]
+            name = member.display_name if member else self._username(guild, uid)
+            batted = bool(t and (t["runs"] > 0 or t["balls_faced"] > 0))
+            bowled = bool(t and (t["balls_bowled"] > 0 or t["wickets"] > 0))
+            best = "—"
+            if bowled:
+                bw = max((r for r in rows if r["balls_bowled"] > 0 or r["wickets"] > 0),
+                         key=lambda r: (r["wickets"], -r["runs_conceded"]))
+                best = f"{bw['wickets']}/{bw['runs_conceded']}"
+            players.append({
+                "uid": uid, "name": str(name), "handle": member.name if member else str(name),
+                "avatar_bytes": avatars.get(uid),
+                "role": "C" if uid == captain_id else ("VC" if uid == vice_id else ""),
+                "matches": len(rows),
+                "runs": t["runs"] if t else 0, "batted": batted,
+                "bat_avg": t["bat_avg"] if batted else 0.0, "strike_rate": t["strike_rate"] if batted else 0.0,
+                "hs": max((r["runs"] for r in rows), default=0),
+                "wickets": t["wickets"] if t else 0, "bowled": bowled,
+                "economy": t["economy"] if bowled else 0.0, "best": best,
+                "catches": int(caught), "dropped": int(dropped),
+                "fantasy": (fantasy_raw_points(rows)[2] if rows else 0.0) + caught * 5 - dropped * 10,
+            })
+        by_uid = {p["uid"]: p for p in players}
+
+        # team totals (whole team history, same rule as the comparison pages)
+        team_rows = [r for uid in total_ids for r in stat_rows.get(uid, [])]
+        tt = _totals(team_rows) if team_rows else None
+        catches = sum(fielding.get(uid, (0, 0))[0] for uid in total_ids)
+        drops = sum(fielding.get(uid, (0, 0))[1] for uid in total_ids)
+        efficiency = catches / (catches + drops) * 100 if catches + drops else 0.0
+        balls = tt["balls_bowled"] if tt else 0
+
+        def top(key, limit=5, predicate=None):
+            pool = [p for p in players if (p[key] > 0 if predicate is None else predicate(p))]
+            return sorted(pool, key=lambda p: (-p[key], p["name"].casefold()))[:limit]
+        sections = [
+            {"title": "BATTING", "color": (255, 128, 94),
+             "tiles": [("RUNS", f"{tt['runs']:,}" if tt else "0"), ("AVERAGE", f"{tt['bat_avg']:.1f}" if tt else "—"),
+                       ("STRIKE RATE", f"{tt['strike_rate']:.1f}" if tt else "—")],
+             "list_title": "TOP RUN SCORERS",
+             "top": [{"player": p, "value": p["runs"], "label": str(p["runs"])} for p in top("runs")]},
+            {"title": "BOWLING", "color": (156, 128, 255),
+             "tiles": [("WICKETS", str(tt["wickets"]) if tt else "0"), ("ECONOMY", f"{tt['economy']:.2f}" if balls else "—"),
+                       ("OVERS", f"{balls // 6}.{balls % 6}" if balls else "0")],
+             "list_title": "TOP WICKET TAKERS",
+             "top": [{"player": p, "value": p["wickets"], "label": str(p["wickets"])} for p in top("wickets")]},
+            {"title": "FIELDING", "color": (62, 224, 172),
+             "tiles": [("CATCHES", str(catches)), ("DROPPED", str(drops)),
+                       ("EFFICIENCY", f"{efficiency:.0f}%" if catches + drops else "—")],
+             "list_title": "TOP FIELDERS",
+             "top": [{"player": p, "value": p["catches"], "label": str(p["catches"])} for p in top("catches")]},
+        ]
+        leaders = []
+        for label, color, key, unit, builder in [
+            ("TOP RUN SCORER", (255, 128, 94), "runs", "RUNS",
+             lambda p: f"AVG {p['bat_avg']:.1f}  •  SR {p['strike_rate']:.1f}"),
+            ("TOP WICKET TAKER", (156, 128, 255), "wickets", "WICKETS",
+             lambda p: f"ECON {p['economy']:.1f}  •  BEST {p['best']}"),
+            ("TOP FIELDER", (62, 224, 172), "catches", "CATCHES",
+             lambda p: f"DROPPED {p['dropped']}"),
+        ]:
+            best_player = (top(key, 1) or [None])[0]
+            leaders.append({
+                "label": label, "color": color, "player": best_player, "unit": unit,
+                "value": best_player[key] if best_player else 0,
+                "sub": builder(best_player) if best_player else "",
+            })
+
+        standing = None
+        points_cog = self.bot.get_cog("PointsTable")
+        if points_cog is not None and hasattr(points_cog, "team_standing"):
+            standing = points_cog.team_standing(guild.id, team["name"])
+        stadium = None
+        if points_cog is not None and hasattr(points_cog, "team_home_channel_id"):
+            channel_id = points_cog.team_home_channel_id(guild.id, team["name"])
+            channel = guild.get_channel(channel_id) if channel_id else None
+            stadium = f"#{channel.name}" if channel else None
+
+        return {
+            "name": str(team["name"]), "guild": guild.name, "logo": logo_bytes,
+            "players": players, "captain": by_uid.get(captain_id), "vice": by_uid.get(vice_id) if vice_id else None,
+            "roster_size": len(ordered_ids), "roster_max": self._max_players(guild.id),
+            "standing": standing, "stadium": stadium, "sections": sections, "leaders": leaders,
+        }
+
     @commands.command(name="testteaminfo")
     @commands.guild_only()
     async def test_team_info(self, ctx, *, team_name: str):
-        """Experimental image-based teaminfo; does not change +teaminfo."""
+        """Premium image-based team profile; does not change +teaminfo."""
         team, error = self._resolve_team(ctx.guild.id, team_name)
         if error == "short":
             await ctx.reply("Enter at least the first **4 letters** of the team name.", mention_author=False)
@@ -869,31 +939,26 @@ class TeamCommandsB:
             await ctx.reply("I couldn't find an approved team matching that name or prefix.", mention_author=False)
             return
 
-        rows = self.db.execute(
-            "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
-            (team["id"],),
-        ).fetchall()
-        ordered_ids = list(dict.fromkeys([team["captain_id"]] + [row["user_id"] for row in rows]))
-        roster = discord.Embed(title=f"🏏 {team['name']} • Roster")
-        roster.add_field(name="Captain", value=f"{self._username(ctx.guild, team['captain_id'])} {CAPTAIN_EMOJI}", inline=True)
-        vice = f"{self._username(ctx.guild, team['vice_captain_id'])} {VICE_CAPTAIN_EMOJI}" if team["vice_captain_id"] else "Not assigned"
-        roster.add_field(name="Vice-Captain", value=vice, inline=True)
-        roster_lines = []
-        for index, uid in enumerate(ordered_ids, start=1):
-            marker = f" {CAPTAIN_EMOJI}" if uid == team["captain_id"] else (f" {VICE_CAPTAIN_EMOJI}" if uid == team["vice_captain_id"] else "")
-            roster_lines.append(f"{index}. {self._username(ctx.guild, uid)}{marker}")
-        roster.add_field(name=f"Players ({len(ordered_ids)}/{self._max_players(ctx.guild.id)})", value="\n".join(roster_lines) or "No players yet.", inline=False)
-
+        loading = await ctx.send("⏳ Building the team profile...")
         try:
-            embeds = [roster] + self._team_comparison_pages(ctx, team, ordered_ids)
-            images = await asyncio.to_thread(
-                lambda: [_render_test_teaminfo_page(page, i + 1, len(embeds)) for i, page in enumerate(embeds)]
-            )
+            rows = self.db.execute(
+                "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
+                (team["id"],),
+            ).fetchall()
+            ordered_ids = list(dict.fromkeys([int(team["captain_id"])] + [int(row["user_id"]) for row in rows]))
+            data = await self._team_profile_data(ctx, team, ordered_ids)
+            images = await asyncio.to_thread(render_team_pages, data)
             view = TestTeamInfoView(ctx, images)
-            view.message = await ctx.send(file=discord.File(io.BytesIO(images[0]), filename="teaminfo.png"), view=view)
+            view.message = await loading.edit(
+                content=None, attachments=[discord.File(io.BytesIO(images[0]), filename="teaminfo.png")], view=view
+            )
         except Exception as exc:
             print(f"[testteaminfo] image generation failed: {type(exc).__name__}: {exc}")
-            await ctx.reply("I couldn't generate the test team-info images. Check the bot logs.", mention_author=False)
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+            await ctx.reply("I couldn't generate the team profile images. Check the bot logs.", mention_author=False)
 
     @commands.command(name="teaminfo")
     @commands.guild_only()
