@@ -1164,8 +1164,8 @@ class TeamCommandsB:
     @commands.guild_only()
     async def backup_team_logos(self, ctx):
         """Recover and permanently save every approved team's logo where Discord still has a cached copy."""
-        if not await self._command_allowed(ctx, "backupteamlogos"):
-            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+        if not (ctx.author.guild_permissions.administrator or ctx.author.guild_permissions.manage_guild):
+            await ctx.reply("Only server administrators or members with Manage Server can use this command.", mention_author=False)
             return
         teams = self.db.execute(
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY team_number, id",
