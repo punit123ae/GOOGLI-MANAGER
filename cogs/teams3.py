@@ -297,7 +297,8 @@ class TeamCommandsB:
             pass
         await ctx.reply(f"Team **{name}** has been disbanded and removed from the database.", mention_author=False)
 
-    @commands.command(name="setteamapproval")    @commands.guild_only()
+    @commands.command(name="setteamapproval")
+    @commands.guild_only()
     async def set_team_approval(self, ctx, channel: discord.TextChannel):
         if not await self._command_allowed(ctx, "setteamapproval"):
             await ctx.reply("You are not allowed to use this command.", mention_author=False)
@@ -596,7 +597,8 @@ class TeamCommandsB:
         role_setting = self.db.execute(
             "SELECT role_id FROM team_role_settings WHERE team_id=?", (team["id"],)
         ).fetchone()
-        if not role_setting:            await ctx.reply(
+        if not role_setting:
+            await ctx.reply(
                 f"No team role is configured for **{team['name']}**. Use `+setteamrole` first. No players were added.",
                 mention_author=False
             )
@@ -1506,7 +1508,8 @@ class TeamCommandsB:
 
         silent = len(member_ids) - len(ranked)
         note = f" • {silent} player(s) have no records" if silent > 0 else ""
-        embed.set_footer(text=f"{YOU_EMOJI} = you{note}")        return embed
+        embed.set_footer(text=f"{YOU_EMOJI} = you{note}")
+        return embed
 
     def _team_comparison_pages(self, ctx, team, ordered_ids):
         from .lb import _totals
