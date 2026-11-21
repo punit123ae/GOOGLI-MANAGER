@@ -324,7 +324,54 @@ def _footer(page, data, number, total):
     _text(d, (1540, 872), f"{_tag(data['name'])}  •  {number}/{total}", 13, DIM, "ra")
 
 
-# --------------------------------------------------------------------------- page 1: overview
+# --------------------------------------------------------------------------- page 1: roster
+
+def _page_roster(data, theme, avatars, total_pages):
+    page = _Page(theme)
+    accent = theme["accent"]
+    page.card((50, 126, 1550, 852), 26)
+    d = _chrome(page, data, 1, total_pages, "ROSTER")
+    # Leadership cards mirror the roster-first layout of the normal +teaminfo embed.
+    leadership = [
+        ((76, 148, 790, 252), data.get("captain"), "CAPTAIN"),
+        ((810, 148, 1524, 252), data.get("vice"), "VICE-CAPTAIN"),
+    ]
+    for box, who, label in leadership:
+        x1, y1, x2, y2 = box
+        d.rounded_rectangle(box, radius=18, fill=(18, 29, 54), outline=(40, 58, 92), width=2)
+        d.rounded_rectangle((x1, y1+14, x1+8, y2-14), radius=4, fill=accent)
+        _text(d, (x1+24, y1+18), label, 13, accent)
+        if who:
+            badge = _round_image(avatars.get(("p", who["uid"])), 58, ring=accent, ring_w=3, initial=who["name"][:1])
+            _paste(page.image, badge, (x1+24, y1+39))
+            _text(d, (x1+98, y1+70), _clip(d, who["name"], x2-x1-125, 25, "head"), 25, WHITE, "lm", "head")
+        else:
+            _text(d, (x1+24, y1+72), "NOT ASSIGNED", 20, DIM, "lm")
+    players = list(data.get("players", []))
+    _text(d, (82, 278), f"PLAYERS  •  {len(players)}", 17, accent, kind="bold")
+    left_x, right_x = 82, 824
+    row_h = 40
+    start_y = 310
+    for index, who in enumerate(players):
+        column = 0 if index < 13 else 1
+        row = index if column == 0 else index - 13
+        x = left_x if column == 0 else right_x
+        y = start_y + row * row_h
+        d.rounded_rectangle((x, y, x+694, y+34), radius=10,
+                            fill=(18, 29, 54) if row % 2 == 0 else (14, 24, 46))
+        _text(d, (x+14, y+17), f"{index+1:02d}", 14, accent, "lm")
+        badge = _round_image(avatars.get(("p", who["uid"])), 28, ring=None, initial=who["name"][:1])
+        _paste(page.image, badge, (x+52, y+3))
+        role = "  •  CAPTAIN" if who.get("role") == "C" else ("  •  VICE-CAPTAIN" if who.get("role") == "VC" else "")
+        _text(d, (x+92, y+17), _clip(d, who["name"] + role, 560, 17), 17,
+              accent if role else WHITE, "lm")
+    if not players:
+        _text(d, (800, 520), "NO PLAYERS IN THIS TEAM YET", 26, DIM, "mm")
+    _footer(page, data, 1, total_pages)
+    return page.image
+
+
+# --------------------------------------------------------------------------- overview
 
 def _player_card(page, box, who, label, accent, avatar_img, stripe_color=None):
     x1, y1, x2, y2 = box
@@ -548,12 +595,12 @@ def _page_squad(data, theme, avatars, number, total_pages, players, first_rank):
 # --------------------------------------------------------------------------- public entry point
 
 def render_team_pages(data):
-    """data -> list of PNG bytes (squad pages first, then overview and team stats)."""
+    """data -> roster first, then overview, team stats and squad pages."""
     theme = _theme(data)
     players = list(data.get("players", []))
     ranked = sorted(players, key=lambda p: (-p["fantasy"], p["name"].casefold()))
     chunks = [ranked[i:i+ROWS_PER_SQUAD_PAGE] for i in range(0, len(ranked), ROWS_PER_SQUAD_PAGE)] or [[]]
-    total_pages = 2 + len(chunks)
+    total_pages = 3 + len(chunks)
 
     avatars = {}
     for who in players:
@@ -572,16 +619,13 @@ def render_team_pages(data):
         if who is not None:
             avatars.setdefault(("p", who["uid"]), _open(who.get("avatar_bytes")))
 
-    images = []
+    images = [_page_roster(data, theme, avatars, total_pages)]
+    images.append(_page_overview(data, theme, avatars, 2, total_pages))
+    images.append(_page_stats(data, theme, avatars, 3, total_pages))
     rank = 1
     for index, chunk in enumerate(chunks):
-        images.append(_page_squad(data, theme, avatars, 1 + index, total_pages, chunk, rank))
+        images.append(_page_squad(data, theme, avatars, 4 + index, total_pages, chunk, rank))
         rank += len(chunk)
-
-    overview_page = len(chunks) + 1
-    stats_page = overview_page + 1
-    images.append(_page_overview(data, theme, avatars, overview_page, total_pages))
-    images.append(_page_stats(data, theme, avatars, stats_page, total_pages))
     pages = []
     for image in images:
         out = io.BytesIO()
