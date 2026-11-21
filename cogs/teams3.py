@@ -835,24 +835,50 @@ class TeamCommandsB:
 
     @staticmethod
     async def _fetch_url_bytes(url):
-        """Download a team logo, including Discord CDN-hosted uploads."""
-        if not str(url or "").startswith(("http://", "https://")):
+        """Fetch and validate team-logo bytes, including Discord CDN images."""
+        if not str(url or "").strip().startswith(("http://", "https://")):
+            print("[teaminfo] team logo URL is missing or is not HTTP(S)")
             return None
         try:
             import aiohttp
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; TeamProfileBot/1.0)"}
+            from PIL import Image
+
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; TeamProfileBot/1.0)",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            }
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=12),
+                timeout=aiohttp.ClientTimeout(total=18, connect=8),
                 headers=headers,
             ) as session:
-                async with session.get(str(url), allow_redirects=True) as response:
-                    if response.status == 200:
-                        content_type = response.headers.get("Content-Type", "")
-                        if content_type.startswith("image/"):
-                            payload = await response.read()
-                            return payload if payload and len(payload) <= 8 * 1024 * 1024 else None
+                async with session.get(str(url).strip(), allow_redirects=True) as response:
+                    if response.status != 200:
+                        print(f"[teaminfo] team logo download returned HTTP {response.status}")
+                        return None
+                    chunks = []
+                    size = 0
+                    async for chunk in response.content.iter_chunked(65536):
+                        size += len(chunk)
+                        if size > 8 * 1024 * 1024:
+                            print("[teaminfo] team logo exceeded the 8 MB limit")
+                            return None
+                        chunks.append(chunk)
+                    payload = b"".join(chunks)
+                    if not payload:
+                        print("[teaminfo] team logo response was empty")
+                        return None
+                    # Do not rely solely on Content-Type: some image hosts send
+                    # application/octet-stream for perfectly valid image files.
+                    try:
+                        with Image.open(io.BytesIO(payload)) as image:
+                            image.verify()
+                    except Exception as exc:
+                        content_type = response.headers.get("Content-Type", "unknown")
+                        print(f"[teaminfo] downloaded logo is not a supported image ({content_type}): {type(exc).__name__}")
+                        return None
+                    return payload
         except Exception as exc:
-            print(f"[testteaminfo] team logo download failed: {type(exc).__name__}: {exc}")
+            print(f"[teaminfo] team logo download failed: {type(exc).__name__}: {exc}")
         return None
 
     @staticmethod
@@ -921,7 +947,7 @@ class TeamCommandsB:
             t = _totals(rows) if rows else None
             caught, dropped = fielding.get(uid, (0, 0))
             member = members[uid]
-            name = member.display_name if member else self._username(guild, uid)
+            name = member.name if member else self._username(guild, uid)
             batted = bool(t and (t["runs"] > 0 or t["balls_faced"] > 0))
             bowled = bool(t and (t["balls_bowled"] > 0 or t["wickets"] > 0))
             best = "—"
