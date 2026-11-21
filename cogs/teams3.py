@@ -835,10 +835,14 @@ class TeamCommandsB:
 
     @staticmethod
     async def _fetch_url_bytes(url):
-        """Fetch and validate team-logo bytes, including Discord CDN images."""
-        if not str(url or "").strip().startswith(("http://", "https://")):
-            print("[teaminfo] team logo URL is missing or is not HTTP(S)")
+        """Fetch and validate team-logo bytes, with diagnostics for +teaminfo."""
+        clean_url = str(url or "").strip()
+        if not clean_url.startswith(("http://", "https://")):
+            print(f"[teaminfo][logo:1] URL missing/invalid (value_present={bool(clean_url)})", flush=True)
             return None
+
+        parsed_url = urlparse(clean_url)
+        print(f"[teaminfo][logo:1] Starting download host={parsed_url.netloc!r} path={parsed_url.path!r}", flush=True)
         try:
             import aiohttp
             from PIL import Image
@@ -851,34 +855,48 @@ class TeamCommandsB:
                 timeout=aiohttp.ClientTimeout(total=18, connect=8),
                 headers=headers,
             ) as session:
-                async with session.get(str(url).strip(), allow_redirects=True) as response:
+                async with session.get(clean_url, allow_redirects=True) as response:
+                    content_type = response.headers.get("Content-Type", "unknown")
+                    print(
+                        f"[teaminfo][logo:2] HTTP status={response.status} "
+                        f"content_type={content_type!r} final_url={urlparse(str(response.url)).netloc!r}",
+                        flush=True,
+                    )
                     if response.status != 200:
-                        print(f"[teaminfo] team logo download returned HTTP {response.status}")
+                        print(f"[teaminfo][logo:ERROR] Download returned HTTP {response.status}", flush=True)
                         return None
                     chunks = []
                     size = 0
                     async for chunk in response.content.iter_chunked(65536):
                         size += len(chunk)
                         if size > 8 * 1024 * 1024:
-                            print("[teaminfo] team logo exceeded the 8 MB limit")
+                            print("[teaminfo][logo:ERROR] Response exceeded 8 MB", flush=True)
                             return None
                         chunks.append(chunk)
                     payload = b"".join(chunks)
+                    print(f"[teaminfo][logo:3] Download complete bytes={len(payload)}", flush=True)
                     if not payload:
-                        print("[teaminfo] team logo response was empty")
+                        print("[teaminfo][logo:ERROR] Response body was empty", flush=True)
                         return None
-                    # Do not rely solely on Content-Type: some image hosts send
-                    # application/octet-stream for perfectly valid image files.
                     try:
                         with Image.open(io.BytesIO(payload)) as image:
+                            print(
+                                f"[teaminfo][logo:4] Pillow detected format={image.format!r} "
+                                f"size={image.size} mode={image.mode}",
+                                flush=True,
+                            )
                             image.verify()
                     except Exception as exc:
-                        content_type = response.headers.get("Content-Type", "unknown")
-                        print(f"[teaminfo] downloaded logo is not a supported image ({content_type}): {type(exc).__name__}")
+                        print(
+                            f"[teaminfo][logo:ERROR] Pillow rejected download "
+                            f"(content_type={content_type!r}): {type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
                         return None
+                    print("[teaminfo][logo:5] Download and validation succeeded", flush=True)
                     return payload
         except Exception as exc:
-            print(f"[teaminfo] team logo download failed: {type(exc).__name__}: {exc}")
+            print(f"[teaminfo][logo:ERROR] Download exception: {type(exc).__name__}: {exc}", flush=True)
         return None
 
     @staticmethod
@@ -935,9 +953,19 @@ class TeamCommandsB:
         async def avatar_of(uid):
             async with semaphore:
                 return await self._fetch_avatar(members[uid])
+        print(
+            f"[teaminfo][logo:DATA] Team={team['name']!r} "
+            f"logo_url_present={bool(team['logo_url'])} url_host={urlparse(str(team['logo_url'] or '')).netloc!r}",
+            flush=True,
+        )
         avatar_list, logo_bytes = await asyncio.gather(
             asyncio.gather(*(avatar_of(uid) for uid in member_ids)),
             self._fetch_url_bytes(team["logo_url"]),
+        )
+        print(
+            f"[teaminfo][logo:DATA] Downloader returned "
+            f"{len(logo_bytes) if logo_bytes else 0} bytes",
+            flush=True,
         )
         avatars = dict(zip(member_ids, avatar_list))
 
