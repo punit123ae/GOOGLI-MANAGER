@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import discord
+from PIL import Image
 from .teaminfo_image import render_team_pages
 from discord.ext import commands
 
@@ -988,14 +989,25 @@ class TeamCommandsB:
 
     @staticmethod
     async def _fetch_avatar(member):
+        """Avatar PNG bytes; retries, then falls back to a larger size and the default avatar."""
         if member is None:
             return None
-        try:
-            return await asyncio.wait_for(
-                member.display_avatar.replace(size=128, static_format="png").read(), timeout=6
-            )
-        except Exception:
-            return None
+        attempts = (
+            lambda: member.display_avatar.replace(size=128, static_format="png"),
+            lambda: member.display_avatar.replace(size=256, static_format="png"),
+            lambda: member.display_avatar.replace(size=128, format="png"),
+            lambda: member.default_avatar.replace(size=128, format="png"),
+        )
+        for index, make in enumerate(attempts):
+            try:
+                payload = await asyncio.wait_for(make().read(), timeout=12)
+                if payload and Image.open(io.BytesIO(payload)).verify() is None:
+                    return payload
+            except Exception as exc:
+                print(f"[teaminfo][avatar] attempt {index+1} failed for {getattr(member, 'id', '?')}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+                await asyncio.sleep(0.4 * (index + 1))
+        return None
 
     async def _team_profile_data(self, ctx, team, ordered_ids):
         """Everything the premium team-profile images need, gathered from the bot's own data."""
@@ -1022,7 +1034,7 @@ class TeamCommandsB:
         captain_id = int(team["captain_id"])
         vice_id = int(team["vice_captain_id"]) if team["vice_captain_id"] else None
 
-        semaphore = asyncio.Semaphore(8)
+        semaphore = asyncio.Semaphore(4)
 
         async def resolve_member(uid):
             member = guild.get_member(uid)
@@ -1030,8 +1042,16 @@ class TeamCommandsB:
                 return member
             try:
                 async with semaphore:
-                    return await asyncio.wait_for(guild.fetch_member(uid), timeout=8)
+                    return await asyncio.wait_for(guild.fetch_member(uid), timeout=10)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
+                pass
+            try:   # left the server: the global user still has an avatar
+                user = self.bot.get_user(uid)
+                if user is None:
+                    async with semaphore:
+                        user = await asyncio.wait_for(self.bot.fetch_user(uid), timeout=10)
+                return user
+            except (discord.NotFound, discord.HTTPException, asyncio.TimeoutError):
                 return None
 
         resolved_members = await asyncio.gather(*(resolve_member(uid) for uid in member_ids))

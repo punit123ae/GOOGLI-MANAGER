@@ -4,6 +4,8 @@ Persistent fielding stats (per server, per player) stored in the bot's existing
 SQLite database (bot.db), plus per-channel tracking switches that survive restarts.
 """
 
+import asyncio
+import io
 import re
 import sqlite3
 import time
@@ -1002,6 +1004,91 @@ class CatchTracker(commands.Cog):
             mention_author=False,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    @commands.command(name="testfdstats")
+    async def test_fdstats(self, ctx, *, who: str = None):
+        """Owner-only DM preview: image version of +fdstats. Usage: +testfdstats [user id or name]"""
+        if ctx.guild is not None:
+            return
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("This command is restricted to the bot owner.")
+            return
+        needle = (who or str(ctx.author.id)).strip().strip("<@!>").casefold()
+        found = None
+        for guild in self.bot.guilds:
+            member = guild.get_member(int(needle)) if needle.isdigit() else next(
+                (m for m in guild.members
+                 if needle in (m.name.casefold(), m.display_name.casefold())), None)
+            if member is None:
+                continue
+            chances = sum(self._get_stats(guild.id, member.id))
+            if found is None or chances > found[2]:
+                found = (guild, member, chances)
+        if found is None:
+            await ctx.send("I couldn't find that user in any server I share with them.")
+            return
+        loading = await ctx.send("⏳ Building the fielding image...")
+        try:
+            data = await self._fielding_image_data(*found[:2])
+            from .fielding_image import render_fielding_image
+            png = await asyncio.to_thread(render_fielding_image, data)
+            await loading.delete()
+            await ctx.send(
+                f"{found[1].display_name} • {found[0].name}",
+                file=discord.File(io.BytesIO(png), filename="fielding.png"),
+            )
+        except Exception as exc:
+            print(f"[testfdstats] failed: {type(exc).__name__}: {exc}", flush=True)
+            await ctx.send("I couldn't generate the fielding image. Check the bot logs.")
+
+    async def _fielding_image_data(self, guild, member):
+        try:
+            avatar = await asyncio.wait_for(
+                member.display_avatar.replace(size=256, static_format="png").read(), timeout=12)
+        except Exception:
+            avatar = None
+        caught, dropped = self._get_stats(guild.id, member.id)
+        try:
+            from .lb import _team_rosters
+            rosters = _team_rosters(guild.id)
+        except Exception:
+            rosters = {}
+        team = next((t for t in rosters.values() if member.id in t["members"]), None)
+        pool = team["members"] if team else [
+            int(r[0]) for r in self.bot.db.execute(
+                "SELECT user_id FROM fielding_stats WHERE guild_id=?", (guild.id,)).fetchall()]
+        stats = {uid: self._get_stats(guild.id, uid) for uid in pool}
+        ranked = _rank_fielders(stats)
+        title = _fielder_title(ranked, member.id)
+        team_c = sum(c for c, _ in stats.values())
+        team_d = sum(d for _, d in stats.values())
+        color = None
+        if team:
+            for role in member.roles:
+                if role.color.value and team["name"].casefold() in role.name.casefold():
+                    color = role.color.to_rgb()
+                    break
+        recent = []
+        for ts, opps, taken, drp, match_id in reversed(self._recent_matches(guild.id, member.id)):
+            recent.append({"taken": taken, "dropped": drp, "label": time.strftime("%d %b", time.gmtime(ts))})
+        top = []
+        for uid, c, d in ranked[:5]:
+            m = guild.get_member(uid)
+            top.append({"name": m.display_name if m else f"Unknown ({str(uid)[-4:]})",
+                        "caught": c, "eff": _efficiency(c, d), "me": uid == member.id})
+        return {
+            "name": member.display_name, "avatar_bytes": avatar,
+            "team_name": team["name"] if team else None, "team_color": color,
+            "caught": caught, "dropped": dropped, "chances": caught + dropped,
+            "eff": _efficiency(caught, dropped), "fantasy": caught*5 - dropped*10,
+            "drop_runs": (lambda r: r if r[0] else None)(self._drop_cost(guild.id, member.id)),
+            "rank": (title[1], title[2]) if title else None,
+            "title": _TITLE_TEXT[title[0]].title() + " " + team["name"] if title and team else None,
+            "min_chances": MIN_LABEL_CHANCES,
+            "share": caught / team_c * 100 if team and team_c else None,
+            "team_eff": _efficiency(team_c, team_d) if team else None,
+            "recent": recent, "top": top,
+        }
 
     @commands.command(name="syncfielding")
     @commands.guild_only()

@@ -232,9 +232,9 @@ class _Page:
 
     def __init__(self, theme):
         self.theme = theme
-        self.image = _background(theme["accent"]).copy()
+        self.image = _background(theme.get("bg", theme["accent"])).copy()
         self.cards = []
-        self._watermark()
+        self._marked = False
 
     def card(self, box, radius=22, tint=None):
         self.cards.append((box, radius, tint))
@@ -248,32 +248,58 @@ class _Page:
             fill = (9, 16, 32, 216) if tint is None else _mix((9, 16, 32), tint, 0.18) + (222,)
             ld.rounded_rectangle(box, radius=radius, fill=fill, outline=edge, width=1)
         self.image = Image.alpha_composite(self.image.convert("RGBA"), layer).convert("RGB")
+        if not self._marked:   # watermark sits above the glass but below all content
+            self._marked = True
+            self._watermark()
         self.d = ImageDraw.Draw(self.image)
         self.cards = []
         return self.d
 
 
     def _watermark(self):
+        """Team logo exactly centred, fitted without distortion, softly translucent."""
         logo = self.theme.get("logo")
         if logo is None:
             return
-        mark = ImageOps.fit(logo, (620, 620), method=Image.Resampling.LANCZOS)
-        mark.putalpha(mark.getchannel("A").point(lambda v: int(v*0.16)))
-        self.image.paste(mark, (W-600, H-540), mark)
+        size = 560
+        src = ImageOps.contain(logo.convert("RGBA"), (size, size), method=Image.Resampling.LANCZOS)
+        alpha = src.getchannel("A").point(lambda v: int(v*0.13))
+        src.putalpha(alpha)
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        layer.paste(src, ((W-src.width)//2, (H-src.height)//2))
+        self.image = Image.alpha_composite(self.image.convert("RGBA"), layer).convert("RGB")
+
+
+def _luma(color):
+    return 0.2126*color[0] + 0.7152*color[1] + 0.0722*color[2]
 
 
 def _visible_accent(color):
-    """Keep dark team-role colours vivid enough for numbers, badges and accents."""
+    """Text/badge colour that stays readable on the dark canvas.
+
+    Dark colours are lifted (black/grey become a clean silver) while the
+    background keeps the real team colour.
+    """
     color = tuple(max(0, min(255, int(channel))) for channel in color)
     h, saturation, value = colorsys.rgb_to_hsv(*(channel / 255 for channel in color))
-    luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
-    if luminance < 112:
-        # Black/near-grey has no useful hue to preserve, so use the safe default.
+    if _luma(color) < 150:
         if saturation < 0.18:
-            return DEFAULT_ACCENT
-        saturation = max(saturation, 0.68)
-        value = max(value, 0.88)
-        return tuple(int(round(channel * 255)) for channel in colorsys.hsv_to_rgb(h, saturation, value))
+            grey = int(min(235, 205 + _luma(color) * 0.2))
+            return (grey, grey + 3, min(255, grey + 12))
+        saturation = min(max(saturation, 0.55), 0.85)
+        value = max(value, 0.95)
+        lifted = tuple(int(round(channel * 255)) for channel in colorsys.hsv_to_rgb(h, saturation, value))
+        if _luma(lifted) < 150:
+            lifted = _mix(lifted, (255, 255, 255), 0.35)
+        return lifted
+    return color
+
+
+def _backdrop_color(color):
+    """Real role colour for the background, tamed only if it would glare (white/pastel)."""
+    color = tuple(max(0, min(255, int(channel))) for channel in color)
+    if _luma(color) > 170:
+        return _mix(color, (0, 0, 0), 0.45)
     return color
 
 
@@ -294,7 +320,7 @@ def _theme(data):
     role_color = data.get("team_color")
     raw_accent = tuple(int(channel) for channel in role_color) if role_color else accent_from_logo(logo)
     accent = _visible_accent(raw_accent)
-    return {"accent": accent, "accent2": _lighten(accent, 0.35), "logo": logo}
+    return {"accent": accent, "accent2": _lighten(accent, 0.35), "bg": _backdrop_color(raw_accent), "logo": logo}
 
 
 def _tag(name):
