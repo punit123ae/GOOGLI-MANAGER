@@ -835,68 +835,97 @@ class TeamCommandsB:
 
     @staticmethod
     async def _fetch_url_bytes(url):
-        """Fetch and validate team-logo bytes, with diagnostics for +teaminfo."""
+        """Fetch and validate an image URL, including signed Discord CDN URLs."""
         clean_url = str(url or "").strip()
         if not clean_url.startswith(("http://", "https://")):
-            print(f"[teaminfo][logo:1] URL missing/invalid (value_present={bool(clean_url)})", flush=True)
             return None
-
-        parsed_url = urlparse(clean_url)
-        print(f"[teaminfo][logo:1] Starting download host={parsed_url.netloc!r} path={parsed_url.path!r}", flush=True)
         try:
             import aiohttp
             from PIL import Image
-
             headers = {
                 "User-Agent": "Mozilla/5.0 (compatible; TeamProfileBot/1.0)",
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             }
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=18, connect=8),
                 headers=headers,
             ) as session:
                 async with session.get(clean_url, allow_redirects=True) as response:
-                    content_type = response.headers.get("Content-Type", "unknown")
                     print(
-                        f"[teaminfo][logo:2] HTTP status={response.status} "
-                        f"content_type={content_type!r} final_url={urlparse(str(response.url)).netloc!r}",
+                        f"[teaminfo][logo] HTTP {response.status} "
+                        f"host={urlparse(str(response.url)).netloc!r}",
                         flush=True,
                     )
                     if response.status != 200:
-                        print(f"[teaminfo][logo:ERROR] Download returned HTTP {response.status}", flush=True)
                         return None
-                    chunks = []
-                    size = 0
-                    async for chunk in response.content.iter_chunked(65536):
-                        size += len(chunk)
-                        if size > 8 * 1024 * 1024:
-                            print("[teaminfo][logo:ERROR] Response exceeded 8 MB", flush=True)
-                            return None
-                        chunks.append(chunk)
-                    payload = b"".join(chunks)
-                    print(f"[teaminfo][logo:3] Download complete bytes={len(payload)}", flush=True)
-                    if not payload:
-                        print("[teaminfo][logo:ERROR] Response body was empty", flush=True)
+                    payload = await response.content.read(8 * 1024 * 1024 + 1)
+                    if not payload or len(payload) > 8 * 1024 * 1024:
                         return None
                     try:
                         with Image.open(io.BytesIO(payload)) as image:
-                            print(
-                                f"[teaminfo][logo:4] Pillow detected format={image.format!r} "
-                                f"size={image.size} mode={image.mode}",
-                                flush=True,
-                            )
                             image.verify()
-                    except Exception as exc:
-                        print(
-                            f"[teaminfo][logo:ERROR] Pillow rejected download "
-                            f"(content_type={content_type!r}): {type(exc).__name__}: {exc}",
-                            flush=True,
-                        )
+                    except Exception:
                         return None
-                    print("[teaminfo][logo:5] Download and validation succeeded", flush=True)
                     return payload
         except Exception as exc:
-            print(f"[teaminfo][logo:ERROR] Download exception: {type(exc).__name__}: {exc}", flush=True)
+            print(f"[teaminfo][logo] download failed: {type(exc).__name__}: {exc}", flush=True)
+            return None
+
+    async def _team_logo_bytes(self, ctx, team):
+        """Use a saved SQLite copy first; otherwise try original and Discord's cached proxy URL."""
+        try:
+            saved = team["logo_data"]
+        except (KeyError, IndexError):
+            saved = None
+        if saved:
+            print(f"[teaminfo][logo] Using saved copy for {team['name']!r} ({len(saved)} bytes)", flush=True)
+            return bytes(saved)
+
+        candidates = [team["logo_url"]]
+        # Discord's message embed may expose a proxy URL that still works even when
+        # the original attachment URL stored in the DB has expired.
+        channel_id = team["approval_channel_id"]
+        message_id = team["approval_message_id"]
+        if channel_id and message_id:
+            channel = ctx.guild.get_channel(int(channel_id))
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(int(channel_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    channel = None
+            if channel is not None:
+                try:
+                    message = await channel.fetch_message(int(message_id))
+                    for embed in message.embeds:
+                        thumbnail = embed.thumbnail
+                        proxy_url = getattr(thumbnail, "proxy_url", None)
+                        image_url = getattr(thumbnail, "url", None)
+                        if proxy_url:
+                            candidates.insert(0, proxy_url)
+                        if image_url:
+                            candidates.append(image_url)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+
+        seen = set()
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            payload = await self._fetch_url_bytes(candidate)
+            if payload:
+                try:
+                    self.db.execute(
+                        "UPDATE registered_teams SET logo_data=? WHERE id=?",
+                        (sqlite3.Binary(payload), int(team["id"])),
+                    )
+                    self.db.commit()
+                    print(f"[teaminfo][logo] Saved permanent DB copy for {team['name']!r}", flush=True)
+                except sqlite3.Error as exc:
+                    print(f"[teaminfo][logo] Could not save DB copy: {exc}", flush=True)
+                return payload
+        print(f"[teaminfo][logo] No recoverable image URL for {team['name']!r}", flush=True)
         return None
 
     @staticmethod
@@ -960,7 +989,7 @@ class TeamCommandsB:
         )
         avatar_list, logo_bytes = await asyncio.gather(
             asyncio.gather(*(avatar_of(uid) for uid in member_ids)),
-            self._fetch_url_bytes(team["logo_url"]),
+            self._team_logo_bytes(ctx, team),
         )
         print(
             f"[teaminfo][logo:DATA] Downloader returned "
