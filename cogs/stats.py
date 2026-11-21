@@ -1215,11 +1215,11 @@ def make_stats_image_experience(
 
         catch_total = int(catches_caught or 0) + int(catches_dropped or 0)
         catch_efficiency = (100 * int(catches_caught or 0) / catch_total) if catch_total else 0.0
-        # Seven compact KPI tiles, including catch efficiency instead of consistency.
+        # Seven compact KPI tiles: batting and bowling averages plus catches taken.
         kpis = [
             ("MATCHES", t["matches"], blue), ("RUNS", t["runs"], teal),
             ("WICKETS", t["wickets"], violet), ("BAT AVG", fmt(t["bat_avg"]), amber),
-            ("STRIKE RATE", fmt(t["strike_rate"]), blue), ("ECONOMY", fmt(t["economy"]), teal),
+            ("BOWL AVG", fmt(t["bowl_avg"]), blue), ("CATCHES TAKEN", int(catches_caught or 0), teal),
             ("EFFICIENCY", f"{catch_efficiency:.1f}%", amber),
         ]
         kpi_gap, kpi_w = 10, 204
