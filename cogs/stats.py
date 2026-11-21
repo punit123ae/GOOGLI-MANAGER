@@ -1380,21 +1380,31 @@ def make_stats_image_experience(
             for i, m in enumerate(chart):
                 cx = 80 + col_w*(i+0.5)
                 runs_value, wk = int(m.get("runs", 0)), int(m.get("wickets", 0))
-                run_h = max(4, round(max_bar*runs_value/run_max))
-                wk_h = max(4, round(max_bar*wk/wk_max))
+                did_bat = int(m.get("balls_faced", 0)) > 0
+                did_bowl = int(m.get("balls_bowled", 0)) > 0
+                run_h = max(4, round(max_bar*runs_value/run_max)) if did_bat else 0
+                wk_h = max(4, round(max_bar*wk/wk_max)) if did_bowl else 0
                 run_col = tier_color(runs_value)
                 wk_col = violet if wk > 0 else track
-                ld.rounded_rectangle((*L(cx-30, base_y-run_h), *L(cx-2, base_y)), radius=7*SS, fill=run_col + (255,))
-                ld.rounded_rectangle((*L(cx+2, base_y-wk_h), *L(cx+30, base_y)), radius=7*SS, fill=wk_col + (255,))
-                bars.append((cx, runs_value, wk, run_h, wk_h))
+                if did_bat:
+                    ld.rounded_rectangle((*L(cx-30, base_y-run_h), *L(cx-2, base_y)), radius=7*SS, fill=run_col + (255,))
+                if did_bowl:
+                    ld.rounded_rectangle((*L(cx+2, base_y-wk_h), *L(cx+30, base_y)), radius=7*SS, fill=wk_col + (255,))
+                bars.append((cx, runs_value, wk, run_h, wk_h, did_bat, did_bowl))
             layer = layer.resize((region[2]-region[0], region[3]-region[1]), Image.Resampling.LANCZOS)
             canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             canvas.paste(layer, (region[0], region[1]))
             image = Image.alpha_composite(image.convert("RGBA"), canvas).convert("RGB")
             d = ImageDraw.Draw(image)
-            for i, (cx, runs_value, wk, run_h, wk_h) in enumerate(bars):
-                txt(cx-16, base_y-run_h-3, runs_value, 17, white, "mb")
-                txt(cx+16, base_y-wk_h-3, wk, 17, violet if wk > 0 else dim, "mb")
+            for i, (cx, runs_value, wk, run_h, wk_h, did_bat, did_bowl) in enumerate(bars):
+                if did_bat:
+                    txt(cx-16, base_y-run_h-3, runs_value, 17, white, "mb")
+                else:
+                    txt(cx-16, base_y-12, "DNB", 12, muted, "mb")
+                if did_bowl:
+                    txt(cx+16, base_y-wk_h-3, wk, 17, violet if wk > 0 else dim, "mb")
+                else:
+                    txt(cx+16, base_y-12, "DNB", 12, muted, "mb")
                 opp = str(chart[i].get("opponent") or "").strip()
                 words = [w for w in opp.replace("-", " ").split() if w]
                 tag = ("".join(w[0] for w in words[:3]) if len(words) > 1 else opp[:3]).upper() or f"#{i+1}"
