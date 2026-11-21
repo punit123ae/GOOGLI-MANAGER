@@ -88,13 +88,16 @@ def _render_test_teaminfo_page(embed, page_number, page_count):
             if name.lower().startswith("players"):
                 draw.rounded_rectangle((left, y, right, 575), radius=18, fill="#F0F5FA")
                 draw.text((left + 22, y + 18), name.upper(), font=label_font, fill="#087F9C")
-                y += 56
-                for line in value.splitlines()[:11]:
-                    draw.text((left + 26, y), line[:75], font=body_font, fill="#183047")
-                    y += 34
-                extra = len(value.splitlines()) - 11
+                roster_font = font(17)
+                for index, line in enumerate(value.splitlines()[:26]):
+                    column = index // 13
+                    row = index % 13
+                    x = left + 26 + column * 530
+                    row_y = y + 56 + row * 25
+                    draw.text((x, row_y), line[:48], font=roster_font, fill="#183047")
+                extra = len(value.splitlines()) - 26
                 if extra > 0:
-                    draw.text((left + 26, y + 4), f"+ {extra} more players", font=small_font, fill="#60758A")
+                    draw.text((left + 26, 552), f"+ {extra} more players", font=small_font, fill="#60758A")
                 break
             card_x = left if y == 178 else 610
             draw.rounded_rectangle((card_x, y, card_x + 500, y + 100), radius=16, fill="#F0F5FA")
