@@ -3208,6 +3208,13 @@ class Stats(commands.Cog):
                 await ctx.reply(message, mention_author=False)
             return
 
+        # Acknowledge immediately while avatars and stats artwork are prepared.
+        pending_switches = getattr(self, "_stats_switch_interactions", {})
+        switch_interaction = pending_switches.get(int(ctx.message.id))
+        loading_message = None
+        if switch_interaction is None:
+            loading_message = await ctx.send("⏳ Preparing player stats...")
+
         avatar = guild_icon = None
 
         try:
@@ -3603,11 +3610,12 @@ class Stats(commands.Cog):
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        else:
+        elif loading_message is not None:
             first_image = io.BytesIO(overall_image)
             first_image.seek(0)
-            await ctx.send(
-                file=discord.File(first_image, filename=f"player_{member.id}_stats.png"),
+            await loading_message.edit(
+                content=None,
+                attachments=[discord.File(first_image, filename=f"player_{member.id}_stats.png")],
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
