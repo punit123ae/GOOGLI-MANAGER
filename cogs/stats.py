@@ -1580,7 +1580,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
         tag = ("".join(w[0] for w in words[:3]) if len(words) > 1 else opp[:3]).upper()
         txt(xs[i], bottom+18, tag or "—", 15, muted, "mt")
         txt(xs[i], bottom+39, f"M{i+1}", 14, dim, "mt")
-        txt(xs[i], bottom+61, f"TOTAL {float(item.get('total', 0)):.1f} FP", 12, gold, "mt")
+        txt(xs[i], bottom+61, f"FP {float(item.get('total', 0)):.1f}", 12, gold, "mt")
     txt(right, bottom+91, "OLDEST → NEWEST", 13, dim, "ra")
 
     # --- summary: average, best match and recent form for each category ---
