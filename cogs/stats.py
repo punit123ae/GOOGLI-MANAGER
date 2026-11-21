@@ -1936,6 +1936,10 @@ class StatsSelect(discord.ui.Select):
             discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview"),
             discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="<:deep_stats:1564906372187947008>", value="deep"),
         ]
+        if has_graph:
+            options.insert(1, discord.SelectOption(
+                label="Form Graph", description="Batting, bowling and fielding form across matches",
+                emoji="📈", value="graph"))
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=options,
@@ -3591,27 +3595,23 @@ class Stats(commands.Cog):
         pending_switches = getattr(self, "_stats_switch_interactions", {})
         switch_interaction = pending_switches.pop(int(ctx.message.id), None)
         if switch_interaction is not None:
+            first_image = io.BytesIO(overall_image)
+            first_image.seek(0)
             await switch_interaction.edit_original_response(
-                embed=embed,
+                content=None,
+                embed=None,
+                attachments=[discord.File(first_image, filename=f"player_{member.id}_stats.png")],
                 view=view,
-                attachments=[],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
-            if design == 6:
-                first_image = io.BytesIO(overall_image)
-                first_image.seek(0)
-                await ctx.send(
-                    file=discord.File(first_image, filename=f"player_{member.id}_stats.png"),
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                await ctx.send(
-                    embed=embed,
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+            first_image = io.BytesIO(overall_image)
+            first_image.seek(0)
+            await ctx.send(
+                file=discord.File(first_image, filename=f"player_{member.id}_stats.png"),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
 
 async def setup(bot):
