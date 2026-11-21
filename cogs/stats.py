@@ -1435,7 +1435,7 @@ def make_stats_image_experience(
             txt(lx_, 848, f"{(100*part/total) if total else 0:.0f}%", 15, dim)
 
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
+    image.save(output, format="PNG", optimize=False, compress_level=2)
     output.seek(0)
     return output
 
@@ -1931,14 +1931,11 @@ def make_recent_matches_image(player_name, rows):
 class StatsSelect(discord.ui.Select):
     def __init__(self, has_graph=False):
         options = [
-            discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview", default=True),
+            discord.SelectOption(label="Image", description="Show the player stats image", emoji="💎", value="image", default=True),
+            discord.SelectOption(label="Form Graph", description="Batting, bowling and fielding form across matches", emoji="📈", value="graph"),
+            discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview"),
             discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="<:deep_stats:1564906372187947008>", value="deep"),
-            discord.SelectOption(label="Image", description="Show the generated stats image", emoji="💎", value="image"),
         ]
-        if has_graph:  # Design 6 page 2
-            options.append(discord.SelectOption(
-                label="Form Graph", description="Batting, bowling and fielding form across matches",
-                emoji="📈", value="graph"))
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
             options=options,
@@ -1955,6 +1952,15 @@ class StatsSelect(discord.ui.Select):
         selected = self.values[0]
         for option in self.options:
             option.default = option.value == selected
+
+        if selected == "image":
+            image = io.BytesIO(view.overall_image)
+            image.seek(0)
+            file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
+            await interaction.response.edit_message(
+                content=None, embed=None, attachments=[file], view=view
+            )
+            return
 
         if selected == "overview":
             await interaction.response.edit_message(
@@ -3210,7 +3216,7 @@ class Stats(commands.Cog):
             pass
 
         try:
-            if ctx.guild.icon:
+            if design != 6 and ctx.guild.icon:
                 guild_icon = await ctx.guild.icon.replace(
                     size=128, static_format="png"
                 ).read()
@@ -3246,13 +3252,27 @@ class Stats(commands.Cog):
                             ranks = lb_cog.player_ranks(ctx.guild.id, competition, member.id)
                         except Exception as exc:  # the card still renders without positions
                             print(f"[stats] Could not load leaderboard positions: {type(exc).__name__}: {exc}")
-                image = await asyncio.to_thread(
-                    make_stats_image_experience, member, rows, design,
-                    avatar=avatar, fielding_points=fielding_points,
-                    catches_caught=catches_caught,
-                    catches_dropped=catches_dropped,
-                    recent_matches=recent_match_cards, ranks=ranks,
-                )
+                if design == 6:
+                    graph_rows = self.get_form_graph_rows(ctx.guild.id, member, rows, competition)
+                    image, graph_buffer = await asyncio.gather(
+                        asyncio.to_thread(
+                            make_stats_image_experience, member, rows, design,
+                            avatar=avatar, fielding_points=fielding_points,
+                            catches_caught=catches_caught,
+                            catches_dropped=catches_dropped,
+                            recent_matches=recent_match_cards, ranks=ranks,
+                        ),
+                        asyncio.to_thread(make_form_graph_image, member, graph_rows, avatar=avatar),
+                    )
+                    graph_image = graph_buffer.getvalue()
+                else:
+                    image = await asyncio.to_thread(
+                        make_stats_image_experience, member, rows, design,
+                        avatar=avatar, fielding_points=fielding_points,
+                        catches_caught=catches_caught,
+                        catches_dropped=catches_dropped,
+                        recent_matches=recent_match_cards, ranks=ranks,
+                    )
             elif design == 3:
                 recent_match_cards = []
                 for recent_row in reversed(rows[-5:]):
@@ -3317,15 +3337,7 @@ class Stats(commands.Cog):
         image.seek(0)
         overall_image = image.getvalue()
 
-        graph_image = None
-        if design == 6:
-            try:
-                graph_rows = self.get_form_graph_rows(ctx.guild.id, member, rows, competition)
-                graph_image = (await asyncio.to_thread(
-                    make_form_graph_image, member, graph_rows, avatar=avatar
-                )).getvalue()
-            except Exception as exc:  # page 1 still works without the graph
-                print(f"[stats] Could not build the form graph: {type(exc).__name__}: {exc}")
+        graph_image = locals().get("graph_image")
 
         t = totals(rows)
         batting_points, bowling_points, total_points = fantasy_raw_points(rows, t)
@@ -3575,7 +3587,7 @@ class Stats(commands.Cog):
             cog=self, ctx=ctx, has_last_gate=has_last_gate, graph_image=graph_image,
         )
 
-        # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
+        # First response is the stats image; the menu switches between Image, Form Graph, Overview and Deep Stats.
         pending_switches = getattr(self, "_stats_switch_interactions", {})
         switch_interaction = pending_switches.pop(int(ctx.message.id), None)
         if switch_interaction is not None:
@@ -3586,11 +3598,20 @@ class Stats(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
-            await ctx.send(
-                embed=embed,
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            if design == 6:
+                first_image = io.BytesIO(overall_image)
+                first_image.seek(0)
+                await ctx.send(
+                    file=discord.File(first_image, filename=f"player_{member.id}_stats.png"),
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await ctx.send(
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
 
 async def setup(bot):
