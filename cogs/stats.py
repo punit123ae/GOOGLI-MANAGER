@@ -2,6 +2,7 @@ import asyncio
 import io
 import re
 import sqlite3
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1297,14 +1298,25 @@ def make_stats_image_experience(
         def rank_text(key):
             if not key or key not in ranks:
                 return None
-            return f"#{ranks[key]}" if ranks[key] else "NQ"      # NQ = not qualified yet
+            raw = str(ranks[key]).strip()
+            if not raw or raw.upper() in {"NQ", "NA", "N/A", "NONE"}:
+                return "NQ"
+            # Leaderboard providers may return either 4 or "#4".
+            return raw if raw.startswith("#") else f"#{raw}"
+
+        def rank_number(label):
+            if not label:
+                return None
+            raw = str(label).strip().lstrip("#").strip()
+            return int(raw) if raw.isdigit() else None
 
         def rank_pill(right, cy, key, accent):
             label = rank_text(key)
             if label is None:
                 return
             pill_w = 84
-            top3 = label != "NQ" and int(label[1:]) <= 3
+            numeric_rank = rank_number(label)
+            top3 = numeric_rank is not None and numeric_rank <= 3
             if label == "NQ":
                 d.rounded_rectangle((right-pill_w, cy-17, right, cy+17), radius=17, outline=dim, width=2)
                 txt(right-pill_w/2, cy, label, 19, dim, "mm")
@@ -1327,7 +1339,7 @@ def make_stats_image_experience(
             hero_rank = rank_text(hero_key)
             if hero_rank:
                 txt(x+462, card_y1+82, "LEADERBOARD", 14, muted, "ra")
-                hero_color = gold if hero_rank != "NQ" and int(hero_rank[1:]) <= 3 else (accent if hero_rank != "NQ" else dim)
+                hero_color = gold if (rank_number(hero_rank) is not None and rank_number(hero_rank) <= 3) else (accent if hero_rank != "NQ" else dim)
                 txt(x+462, card_y1+104, hero_rank, 64, hero_color, "ra")
             for i, (label, value, key) in enumerate(stat_rows):
                 ry = card_y1 + 214 + i*57
@@ -3436,6 +3448,8 @@ class Stats(commands.Cog):
             )
             return
         except Exception as exc:
+            print(f"[stats] Stats image generation failed: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc()
             await self._drop_loading_message(loading_message)
             await ctx.reply(
                 f"❌ Could not generate the stats image "
