@@ -1,4 +1,5 @@
 import asyncio
+import io
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -50,6 +51,124 @@ def _field_entry(rec):
         (-caught, -eff),
         f"`{caught}` caught • `{dropped}` dropped • eff `{eff:.1f}%`",
     )
+
+
+
+def _render_test_teaminfo_page(embed, page_number, page_count):
+    import io
+    import re
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.new("RGB", (1200, 675), "#F4F7FB")
+    draw = ImageDraw.Draw(image)
+
+    def font(size, bold=False):
+        path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            return ImageFont.load_default()
+
+    title_font, body_font = font(34, True), font(19)
+    label_font, small_font = font(16, True), font(14, True)
+    draw.rounded_rectangle((24, 20, 1176, 655), radius=26, fill="#FFFFFF")
+    draw.rounded_rectangle((24, 20, 1176, 142), radius=26, fill="#10243A")
+    draw.rectangle((24, 112, 1176, 142), fill="#10243A")
+    draw.rectangle((24, 138, 1176, 145), fill="#22B8CF")
+    title = re.sub(r"^[^A-Za-z0-9]+", "", embed.title or "TEAM PROFILE")
+    draw.text((60, 54), title[:48], font=title_font, fill="#FFFFFF")
+    draw.text((1000, 72), f"{page_number}/{page_count}", font=small_font, fill="#B8DCE8")
+
+    y, left, right = 178, 60, 1140
+    fields = list(embed.fields)
+    if fields:
+        for field in fields:
+            name = re.sub(r"[\x60*_]", "", str(field.name))
+            value = re.sub(r"[\x60*_]", "", str(field.value))
+            if name.lower().startswith("players"):
+                draw.rounded_rectangle((left, y, right, 575), radius=18, fill="#F0F5FA")
+                draw.text((left + 22, y + 18), name.upper(), font=label_font, fill="#087F9C")
+                y += 56
+                for line in value.splitlines()[:11]:
+                    draw.text((left + 26, y), line[:75], font=body_font, fill="#183047")
+                    y += 34
+                extra = len(value.splitlines()) - 11
+                if extra > 0:
+                    draw.text((left + 26, y + 4), f"+ {extra} more players", font=small_font, fill="#60758A")
+                break
+            card_x = left if y == 178 else 610
+            draw.rounded_rectangle((card_x, y, card_x + 500, y + 100), radius=16, fill="#F0F5FA")
+            draw.text((card_x + 20, y + 15), name.upper(), font=small_font, fill="#087F9C")
+            draw.text((card_x + 20, y + 48), value[:36], font=body_font, fill="#183047")
+            if card_x != left:
+                y += 124
+    else:
+        lines = re.sub(r"[\x60*_]", "", embed.description or "").splitlines()
+        if lines:
+            draw.rounded_rectangle((left, y, right, y + 76), radius=16, fill="#E6F5F8")
+            draw.text((left + 22, y + 22), lines[0][:100], font=label_font, fill="#075B70")
+            y += 98
+        for line in lines[2:]:
+            line = line.strip()
+            if not line or y > 565:
+                continue
+            draw.rounded_rectangle((left, y, right, y + 38), radius=10, fill="#F0F5FA")
+            draw.text((left + 18, y + 7), line[:105], font=body_font, fill="#183047")
+            y += 45
+
+    draw.text((left, 610), "KASHMIR TITANS  •  TEAM PROFILE", font=small_font, fill="#718397")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+class TestTeamInfoView(discord.ui.View):
+    def __init__(self, ctx, pages):
+        super().__init__(timeout=120)
+        self.owner_id = ctx.author.id
+        self.pages = pages
+        self.index = 0
+        self.message = None
+        self._sync()
+
+    def _sync(self):
+        self.previous.disabled = self.index == 0
+        self.next.disabled = self.index >= len(self.pages) - 1
+        self.counter.label = f"{self.index + 1}/{len(self.pages)}"
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Only the person who ran this command can turn the pages.", ephemeral=True)
+            return False
+        return True
+
+    async def _show(self, interaction, index):
+        self.index = max(0, min(index, len(self.pages) - 1))
+        self._sync()
+        file = discord.File(io.BytesIO(self.pages[self.index]), filename="teaminfo.png")
+        await interaction.response.edit_message(attachments=[file], view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        await self._show(interaction, self.index - 1)
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True)
+    async def counter(self, interaction, button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        await self._show(interaction, self.index + 1)
+
+    async def on_timeout(self):
+        self.clear_items()
+        self.pages = []
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
 
 class TeamCommandsB:
     """Command mixin; methods are registered by TeamRegistration in teams1.py."""
@@ -717,6 +836,46 @@ class TeamCommandsB:
             view=LeaveTeamConfirmView(self, ctx.author.id, team["id"], ctx.guild.id, team["name"]),
             mention_author=False
         )
+
+    @commands.command(name="testteaminfo")
+    @commands.guild_only()
+    async def test_team_info(self, ctx, *, team_name: str):
+        """Experimental image-based teaminfo; does not change +teaminfo."""
+        team, error = self._resolve_team(ctx.guild.id, team_name)
+        if error == "short":
+            await ctx.reply("Enter at least the first **4 letters** of the team name.", mention_author=False)
+            return
+        if error == "multiple":
+            names = "\n".join(f"• {row['name']}" for row in team[:20])
+            await ctx.reply("More than one team matches that prefix. Type more letters:\n" + names, mention_author=False)
+            return
+        if not team:
+            await ctx.reply("I couldn't find an approved team matching that name or prefix.", mention_author=False)
+            return
+
+        rows = self.db.execute(
+            "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
+            (team["id"],),
+        ).fetchall()
+        ordered_ids = list(dict.fromkeys([team["captain_id"]] + [row["user_id"] for row in rows]))
+        roster = discord.Embed(title=f"🏏 {team['name']} • Roster")
+        roster.add_field(name="Captain", value=f"{self._username(ctx.guild, team['captain_id'])} {CAPTAIN_EMOJI}", inline=True)
+        vice = f"{self._username(ctx.guild, team['vice_captain_id'])} {VICE_CAPTAIN_EMOJI}" if team["vice_captain_id"] else "Not assigned"
+        roster.add_field(name="Vice-Captain", value=vice, inline=True)
+        roster_lines = []
+        for index, uid in enumerate(ordered_ids, start=1):
+            marker = f" {CAPTAIN_EMOJI}" if uid == team["captain_id"] else (f" {VICE_CAPTAIN_EMOJI}" if uid == team["vice_captain_id"] else "")
+            roster_lines.append(f"{index}. {self._username(ctx.guild, uid)}{marker}")
+        roster.add_field(name=f"Players ({len(ordered_ids)}/{self._max_players(ctx.guild.id)})", value="\n".join(roster_lines) or "No players yet.", inline=False)
+
+        try:
+            embeds = [roster] + self._team_comparison_pages(ctx, team, ordered_ids)
+            images = [_render_test_teaminfo_page(page, i + 1, len(embeds)) for i, page in enumerate(embeds)]
+            view = TestTeamInfoView(ctx, images)
+            view.message = await ctx.send(file=discord.File(io.BytesIO(images[0]), filename="teaminfo.png"), view=view)
+        except Exception as exc:
+            print(f"[testteaminfo] image generation failed: {type(exc).__name__}: {exc}")
+            await ctx.reply("I couldn't generate the test team-info images. Check the bot logs.", mention_author=False)
 
     @commands.command(name="teaminfo")
     @commands.guild_only()
