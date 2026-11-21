@@ -862,9 +862,23 @@ class TeamCommandsB:
                     if not payload or len(payload) > 8 * 1024 * 1024:
                         return None
                     try:
+                        # Fully decode and re-encode every downloaded logo as PNG.
+                        # Discord's media proxy can return formats/modes that pass
+                        # verify() but fail later when the profile renderer converts them.
                         with Image.open(io.BytesIO(payload)) as image:
-                            image.verify()
-                    except Exception:
+                            image.load()
+                            normalized = image.convert("RGBA")
+                            output = io.BytesIO()
+                            normalized.save(output, format="PNG", optimize=True)
+                            payload = output.getvalue()
+                        if not payload:
+                            return None
+                    except Exception as exc:
+                        print(
+                            f"[teaminfo][logo] Image decode/normalization failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            flush=True,
+                        )
                         return None
                     return payload
         except Exception as exc:
@@ -878,8 +892,39 @@ class TeamCommandsB:
         except (KeyError, IndexError):
             saved = None
         if saved:
-            print(f"[teaminfo][logo] Using saved copy for {team['name']!r} ({len(saved)} bytes)", flush=True)
-            return bytes(saved)
+            try:
+                from PIL import Image
+                raw_saved = bytes(saved)
+                with Image.open(io.BytesIO(raw_saved)) as image:
+                    image.load()
+                    normalized = image.convert("RGBA")
+                    output = io.BytesIO()
+                    normalized.save(output, format="PNG", optimize=True)
+                payload = output.getvalue()
+                # Repair old/non-normalized backups in place.
+                if payload != raw_saved:
+                    self.db.execute(
+                        "UPDATE registered_teams SET logo_data=? WHERE id=?",
+                        (sqlite3.Binary(payload), int(team["id"])),
+                    )
+                    self.db.commit()
+                print(
+                    f"[teaminfo][logo] Using valid saved copy for {team['name']!r} "
+                    f"({len(payload)} bytes, PNG)",
+                    flush=True,
+                )
+                return payload
+            except Exception as exc:
+                print(
+                    f"[teaminfo][logo] Saved copy for {team['name']!r} is invalid; "
+                    f"will recover again: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                self.db.execute(
+                    "UPDATE registered_teams SET logo_data=NULL WHERE id=?",
+                    (int(team["id"]),),
+                )
+                self.db.commit()
 
         candidates = [team["logo_url"]]
         # Discord's message embed may expose a proxy URL that still works even when
