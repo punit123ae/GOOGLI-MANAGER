@@ -1977,11 +1977,19 @@ class StatsSelect(discord.ui.Select):
             )
             return
 
-        if selected == "graph" and view.graph_image:
+        if selected == "graph" and view.graph_rows is not None:
+            # Generate the graph only when requested; do not delay the initial stats card.
+            if view.graph_image is None:
+                await interaction.response.defer()
+                graph_buffer = await asyncio.to_thread(
+                    make_form_graph_image, view.graph_member,
+                    view.graph_rows, avatar=view.graph_avatar,
+                )
+                view.graph_image = graph_buffer.getvalue()
             image = io.BytesIO(view.graph_image)
             image.seek(0)
             file = discord.File(image, filename=f"player_{view.member_id}_form_graph.png")
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=None, embed=None, attachments=[file], view=view
             )
             return
@@ -2032,9 +2040,13 @@ class StatsCompetitionSelect(discord.ui.Select):
 
 class StatsView(discord.ui.View):
     def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed,
-                 cog=None, ctx=None, has_last_gate=False, graph_image=None):
+                 cog=None, ctx=None, has_last_gate=False, graph_image=None,
+                 graph_rows=None, graph_member=None, graph_avatar=None):
         super().__init__(timeout=600)
         self.graph_image = graph_image
+        self.graph_rows = graph_rows
+        self.graph_member = graph_member
+        self.graph_avatar = graph_avatar
         self.requester_id = requester_id
         self.member_id = member_id
         self.overall_image = overall_image
@@ -2042,7 +2054,7 @@ class StatsView(discord.ui.View):
         self.deep_embed = deep_embed
         self.cog = cog
         self.ctx = ctx
-        self.add_item(StatsSelect(has_graph=bool(graph_image)))
+        self.add_item(StatsSelect(has_graph=graph_rows is not None or bool(graph_image)))
         if has_last_gate and cog is not None and ctx is not None:
             self.add_item(StatsCompetitionSelect())
 
@@ -3263,18 +3275,16 @@ class Stats(commands.Cog):
                         except Exception as exc:  # the card still renders without positions
                             print(f"[stats] Could not load leaderboard positions: {type(exc).__name__}: {exc}")
                 if design == 6:
+                    # Keep graph data ready, but defer its expensive Pillow rendering
+                    # until the user actually selects Form Graph.
                     graph_rows = self.get_form_graph_rows(ctx.guild.id, member, rows, competition)
-                    image, graph_buffer = await asyncio.gather(
-                        asyncio.to_thread(
-                            make_stats_image_experience, member, rows, design,
-                            avatar=avatar, fielding_points=fielding_points,
-                            catches_caught=catches_caught,
-                            catches_dropped=catches_dropped,
-                            recent_matches=recent_match_cards, ranks=ranks,
-                        ),
-                        asyncio.to_thread(make_form_graph_image, member, graph_rows, avatar=avatar),
+                    image = await asyncio.to_thread(
+                        make_stats_image_experience, member, rows, design,
+                        avatar=avatar, fielding_points=fielding_points,
+                        catches_caught=catches_caught,
+                        catches_dropped=catches_dropped,
+                        recent_matches=recent_match_cards, ranks=ranks,
                     )
-                    graph_image = graph_buffer.getvalue()
                 else:
                     image = await asyncio.to_thread(
                         make_stats_image_experience, member, rows, design,
@@ -3595,6 +3605,9 @@ class Stats(commands.Cog):
         view = StatsView(
             ctx.author.id, member.id, overall_image, embed, deep_embed,
             cog=self, ctx=ctx, has_last_gate=has_last_gate, graph_image=graph_image,
+            graph_rows=graph_rows if design == 6 else None,
+            graph_member=member if design == 6 else None,
+            graph_avatar=avatar if design == 6 else None,
         )
 
         # First response is the stats image; the menu switches between Image, Form Graph, Overview and Deep Stats.
