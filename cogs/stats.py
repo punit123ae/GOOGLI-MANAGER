@@ -1967,13 +1967,13 @@ class StatsSelect(discord.ui.Select):
 
         if selected == "overview":
             await interaction.response.edit_message(
-                content=None, embed=view.overview_embed, attachments=[], view=view
+                content=None, embed=view.overview_embed, view=view
             )
             return
 
         if selected == "deep":
             await interaction.response.edit_message(
-                content=None, embed=view.deep_embed, attachments=[], view=view
+                content=None, embed=view.deep_embed, view=view
             )
             return
 
