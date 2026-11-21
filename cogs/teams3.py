@@ -103,6 +103,69 @@ class TestTeamInfoView(discord.ui.View):
                 pass
 
 
+
+class TeamInfoMixedView(discord.ui.View):
+    """Original roster embed followed by the image-based profile pages."""
+    def __init__(self, ctx, roster_embed, image_pages):
+        super().__init__(timeout=120)
+        self.owner_id = ctx.author.id
+        self.roster_embed = roster_embed
+        self.image_pages = image_pages
+        self.index = 0
+        self.message = None
+        self._sync()
+
+    @property
+    def page_count(self):
+        return 1 + len(self.image_pages)
+
+    def _sync(self):
+        self.previous.disabled = self.index == 0
+        self.next.disabled = self.index >= self.page_count - 1
+        self.counter.label = f"{self.index + 1}/{self.page_count}"
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can turn the pages.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _show(self, interaction, index):
+        self.index = max(0, min(index, self.page_count - 1))
+        self._sync()
+        if self.index == 0:
+            await interaction.response.edit_message(
+                embed=self.roster_embed, attachments=[], view=self
+            )
+        else:
+            file = discord.File(io.BytesIO(self.image_pages[self.index - 1]), filename="teaminfo.png")
+            await interaction.response.edit_message(embed=None, attachments=[file], view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        await self._show(interaction, self.index - 1)
+
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True)
+    async def counter(self, interaction, button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        await self._show(interaction, self.index + 1)
+
+    async def on_timeout(self):
+        self.clear_items()
+        self.image_pages = []
+        self.roster_embed = None
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+
 class TeamCommandsB:
     """Command mixin; methods are registered by TeamRegistration in teams1.py."""
 
@@ -1028,22 +1091,51 @@ class TeamCommandsB:
             await ctx.reply("I couldn't find an approved team matching that name or prefix.", mention_author=False)
             return
 
+        other_rows = self.db.execute(
+            "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
+            (team["id"],),
+        ).fetchall()
+        ordered_ids = list(dict.fromkeys(
+            [int(team["captain_id"])] + [int(row["user_id"]) for row in other_rows]
+        ))
+
+        # Keep the original +teaminfo roster embed as page one.
+        roster_embed = discord.Embed(
+            title=f"🏏 {team['name']} • Roster",
+            color=discord.Color.from_rgb(55, 150, 255),
+        )
+        roster_embed.add_field(
+            name="Captain",
+            value=f"{self._username(ctx.guild, team['captain_id'])} {CAPTAIN_EMOJI}",
+            inline=True,
+        )
+        vice = (
+            f"{self._username(ctx.guild, team['vice_captain_id'])} {VICE_CAPTAIN_EMOJI}"
+            if team["vice_captain_id"] else "Not assigned"
+        )
+        roster_embed.add_field(name="Vice-Captain", value=vice, inline=True)
+        roster = []
+        for index, uid in enumerate(ordered_ids, start=1):
+            emoji = (
+                f" {CAPTAIN_EMOJI}" if uid == team["captain_id"]
+                else (f" {VICE_CAPTAIN_EMOJI}" if uid == team["vice_captain_id"] else "")
+            )
+            roster.append(f"{index}. {self._username(ctx.guild, uid)}{emoji}")
+        roster_embed.add_field(
+            name=f"Players ({len(ordered_ids)}/{self._max_players(ctx.guild.id)})",
+            value="\n".join(roster) if roster else "No players yet.",
+            inline=False,
+        )
+        if team["logo_url"]:
+            roster_embed.set_thumbnail(url=team["logo_url"])
+
         loading = await ctx.send("⏳ Building the team profile...")
         try:
-            player_rows = self.db.execute(
-                "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
-                (team["id"],),
-            ).fetchall()
-            ordered_ids = list(dict.fromkeys(
-                [int(team["captain_id"])] + [int(row["user_id"]) for row in player_rows]
-            ))
             data = await self._team_profile_data(ctx, team, ordered_ids)
             images = await asyncio.to_thread(render_team_pages, data)
-            view = TestTeamInfoView(ctx, images)
+            view = TeamInfoMixedView(ctx, roster_embed, images[1:])
             view.message = await loading.edit(
-                content=None,
-                attachments=[discord.File(io.BytesIO(images[0]), filename="teaminfo.png")],
-                view=view,
+                content=None, embed=roster_embed, attachments=[], view=view
             )
         except Exception as exc:
             print(f"[teaminfo] image generation failed: {type(exc).__name__}: {exc}")
