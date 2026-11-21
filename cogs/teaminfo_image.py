@@ -278,7 +278,16 @@ def _visible_accent(color):
 
 
 def _theme(data):
-    logo = _open(data.get("logo"))
+    logo_bytes = data.get("logo")
+    print(
+        f"[teaminfo][logo:6] Renderer received bytes={len(logo_bytes) if logo_bytes else 0}",
+        flush=True,
+    )
+    logo = _open(logo_bytes)
+    if logo is None:
+        print("[teaminfo][logo:ERROR] Renderer could not open logo bytes; using fallback badge", flush=True)
+    else:
+        print(f"[teaminfo][logo:7] Renderer opened logo size={logo.size} mode={logo.mode}", flush=True)
     # Prefer the actual Discord team-role colour; use the logo only when no
     # usable team role colour is configured for this team. Brighten dark colours
     # so text, numbers and decorative accents remain readable on the dark canvas.
