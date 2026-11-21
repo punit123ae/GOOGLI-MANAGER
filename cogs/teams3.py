@@ -1,4 +1,5 @@
 import asyncio
+import asyncio
 import io
 import re
 import sqlite3
@@ -54,6 +55,13 @@ def _field_entry(rec):
 
 
 
+def _plain_text(text):
+    """Strip Discord markdown for image text, but keep real underscores in names (lemon_0088)."""
+    import re
+    text = re.sub(r"\\([_*`~|>])", r"\1", str(text))   # un-escape \_ \* etc.
+    return text.replace("`", "").replace("**", "").replace("__", "")
+
+
 def _render_test_teaminfo_page(embed, page_number, page_count):
     import io
     import re
@@ -82,31 +90,36 @@ def _render_test_teaminfo_page(embed, page_number, page_count):
     y, left, right = 178, 60, 1140
     fields = list(embed.fields)
     if fields:
-        for field in fields:
-            name = re.sub(r"[\x60*_]", "", str(field.name))
-            value = re.sub(r"[\x60*_]", "", str(field.value))
-            if name.lower().startswith("players"):
-                draw.rounded_rectangle((left, y, right, 575), radius=18, fill="#F0F5FA")
-                draw.text((left + 22, y + 18), name.upper(), font=label_font, fill="#087F9C")
-                roster_font = font(17)
-                for index, line in enumerate(value.splitlines()[:26]):
-                    column = index // 13
-                    row = index % 13
-                    x = left + 26 + column * 530
-                    row_y = y + 56 + row * 25
-                    draw.text((x, row_y), line[:48], font=roster_font, fill="#183047")
-                extra = len(value.splitlines()) - 26
-                if extra > 0:
-                    draw.text((left + 26, 552), f"+ {extra} more players", font=small_font, fill="#60758A")
-                break
-            card_x = left if y == 178 else 610
-            draw.rounded_rectangle((card_x, y, card_x + 500, y + 100), radius=16, fill="#F0F5FA")
-            draw.text((card_x + 20, y + 15), name.upper(), font=small_font, fill="#087F9C")
-            draw.text((card_x + 20, y + 48), value[:36], font=body_font, fill="#183047")
-            if card_x != left:
-                y += 124
+        player_fields = [f for f in fields if str(f.name).lower().startswith("players")]
+        card_fields = [f for f in fields if f not in player_fields]
+        # Small cards (Captain / Vice-Captain ...) sit side by side along the top.
+        for index, field in enumerate(card_fields):
+            name = _plain_text(str(field.name))
+            value = _plain_text(str(field.value))
+            card_x = left if index % 2 == 0 else 610
+            draw.rounded_rectangle((card_x, y, card_x + 470, y + 84), radius=16, fill="#F0F5FA")
+            draw.text((card_x + 20, y + 12), name.upper(), font=small_font, fill="#087F9C")
+            draw.text((card_x + 20, y + 40), value[:34], font=body_font, fill="#183047")
+            if index % 2 == 1 or index == len(card_fields) - 1:
+                y += 100
+        # The roster fills the rest of the page in three columns.
+        for field in player_fields:
+            name = _plain_text(str(field.name))
+            value = _plain_text(str(field.value))
+            box_bottom = 590
+            draw.rounded_rectangle((left, y, right, box_bottom), radius=18, fill="#F0F5FA")
+            draw.text((left + 22, y + 14), name.upper(), font=label_font, fill="#087F9C")
+            roster_font = font(17)
+            lines = value.splitlines()
+            rows_per_column = max(1, (box_bottom - (y + 48) - 26) // 24)
+            capacity = rows_per_column * 3
+            for index, line in enumerate(lines[:capacity]):
+                column, row = divmod(index, rows_per_column)
+                draw.text((left + 26 + column * 355, y + 48 + row * 24), line[:34], font=roster_font, fill="#183047")
+            if len(lines) > capacity:
+                draw.text((left + 26, box_bottom - 26), f"+ {len(lines) - capacity} more players", font=small_font, fill="#60758A")
     else:
-        lines = re.sub(r"[\x60*_]", "", embed.description or "").splitlines()
+        lines = _plain_text(embed.description or "").splitlines()
         if lines:
             draw.rounded_rectangle((left, y, right, y + 76), radius=16, fill="#E6F5F8")
             draw.text((left + 22, y + 22), lines[0][:100], font=label_font, fill="#075B70")
@@ -121,7 +134,7 @@ def _render_test_teaminfo_page(embed, page_number, page_count):
 
     draw.text((left, 610), "KASHMIR TITANS  •  TEAM PROFILE", font=small_font, fill="#718397")
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
+    image.save(output, format="PNG", compress_level=3)
     return output.getvalue()
 
 
@@ -873,7 +886,9 @@ class TeamCommandsB:
 
         try:
             embeds = [roster] + self._team_comparison_pages(ctx, team, ordered_ids)
-            images = [_render_test_teaminfo_page(page, i + 1, len(embeds)) for i, page in enumerate(embeds)]
+            images = await asyncio.to_thread(
+                lambda: [_render_test_teaminfo_page(page, i + 1, len(embeds)) for i, page in enumerate(embeds)]
+            )
             view = TestTeamInfoView(ctx, images)
             view.message = await ctx.send(file=discord.File(io.BytesIO(images[0]), filename="teaminfo.png"), view=view)
         except Exception as exc:

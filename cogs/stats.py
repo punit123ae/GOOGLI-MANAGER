@@ -1631,9 +1631,11 @@ def make_form_graph_image(member, graph_rows, avatar=None):
         avg = sum(sv)/len(sv) if sv else 0.0
         best_i, best_value = max(active, key=lambda pair: pair[1]) if active else (0, 0.0)
         txt(x0, 778, label, 22, color)
-        txt(x0, 806, f"{avg:.1f}" if active else "—", 54, white)
-        txt(x0+170, 826, "AVG / MATCH", 14, muted)
-        txt(x0+170, 846, f"BEST {best_value:.1f}  •  M{best_i+1}" if active else "NO MATCHES PLAYED", 15, white)
+        avg_text = f"{avg:.1f}" if active else "—"
+        txt(x0, 806, avg_text, 54, white)
+        text_x = x0 + max(170, d.textlength(avg_text, font=F(54, True)) + 22)   # never touch the big number
+        txt(text_x, 826, "AVG / MATCH", 14, muted)
+        txt(text_x, 846, f"BEST {best_value:.1f}  •  M{best_i+1}" if active else "NO MATCHES PLAYED", 15, white)
         if len(active) >= 4:
             recent_matches = [(i, value) for i, value in active if i >= max(0, n-3)]
             earlier_matches = [(i, value) for i, value in active if i < max(0, n-3)]
@@ -2029,10 +2031,15 @@ class StatsSelect(discord.ui.Select):
             # Generate the graph only when requested; do not delay the initial stats card.
             if view.graph_image is None:
                 await interaction.response.defer()
-                graph_buffer = await asyncio.to_thread(
-                    make_form_graph_image, view.graph_member,
-                    view.graph_rows, avatar=view.graph_avatar,
-                )
+                try:
+                    graph_buffer = await asyncio.to_thread(
+                        make_form_graph_image, view.graph_member,
+                        view.graph_rows, avatar=view.graph_avatar,
+                    )
+                except Exception as exc:
+                    print(f"[stats] Could not build the form graph: {type(exc).__name__}: {exc}")
+                    await interaction.followup.send("❌ Could not build the form graph right now.", ephemeral=True)
+                    return
                 view.graph_image = graph_buffer.getvalue()
             image = io.BytesIO(view.graph_image)
             image.seek(0)
@@ -2109,6 +2116,13 @@ class StatsView(discord.ui.View):
 
     async def on_timeout(self):
         """Release per-request image/data references when this menu expires."""
+        message = getattr(self, "message", None)
+        if message is not None:
+            try:
+                await message.edit(view=None)     # no dead dropdown left on the message
+            except Exception:
+                pass
+        self.message = None
         self.clear_items()
         self.overall_image = None
         self.graph_image = None
@@ -2585,6 +2599,16 @@ class Stats(commands.Cog):
             return 0, 0, 0
         caught, dropped = (int(row[0]), int(row[1])) if row else (0, 0)
         return caught, dropped, caught * 5 - dropped * 10
+
+    @staticmethod
+    async def _drop_loading_message(message):
+        """Remove the temporary "Preparing player stats..." message (best effort)."""
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
     def get_form_graph_rows(self, guild_id, member, rows, competition="MAIN TOURNAMENT", limit=20):
         """Per-match fantasy points (batting, bowling, fielding) for the Design 6 form graph, oldest first."""
@@ -3403,6 +3427,7 @@ class Stats(commands.Cog):
                     avatar=avatar,
                 )
         except FileNotFoundError:
+            await self._drop_loading_message(loading_message)
             await ctx.reply(
                 "❌ Design 2 background is missing. Ask a server "
                 "administrator to upload `stats_design2_bg.png` "
@@ -3411,6 +3436,7 @@ class Stats(commands.Cog):
             )
             return
         except Exception as exc:
+            await self._drop_loading_message(loading_message)
             await ctx.reply(
                 f"❌ Could not generate the stats image "
                 f"({type(exc).__name__}).",
@@ -3420,8 +3446,6 @@ class Stats(commands.Cog):
 
         image.seek(0)
         overall_image = image.getvalue()
-
-        graph_image = locals().get("graph_image")
 
         t = totals(rows)
         batting_points, bowling_points, total_points = fantasy_raw_points(rows, t)
@@ -3668,7 +3692,7 @@ class Stats(commands.Cog):
         ).fetchone() is not None
         view = StatsView(
             ctx.author.id, member.id, overall_image, embed, deep_embed,
-            cog=self, ctx=ctx, has_last_gate=has_last_gate, graph_image=graph_image,
+            cog=self, ctx=ctx, has_last_gate=has_last_gate,
             graph_rows=graph_rows if design == 6 else None,
             graph_member=member if design == 6 else None,
             graph_avatar=avatar if design == 6 else None,
@@ -3680,7 +3704,7 @@ class Stats(commands.Cog):
         if switch_interaction is not None:
             first_image = io.BytesIO(overall_image)
             first_image.seek(0)
-            await switch_interaction.edit_original_response(
+            view.message = await switch_interaction.edit_original_response(
                 content=None,
                 embed=None,
                 attachments=[discord.File(first_image, filename=f"player_{member.id}_stats.png")],
@@ -3690,7 +3714,7 @@ class Stats(commands.Cog):
         elif loading_message is not None:
             first_image = io.BytesIO(overall_image)
             first_image.seek(0)
-            await loading_message.edit(
+            view.message = await loading_message.edit(
                 content=None,
                 attachments=[discord.File(first_image, filename=f"player_{member.id}_stats.png")],
                 view=view,
