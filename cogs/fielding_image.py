@@ -122,3 +122,145 @@ def render_fielding_image(data):
     out = io.BytesIO()
     page.image.save(out, "PNG", compress_level=3)
     return out.getvalue()
+
+
+# --------------------------------------------------------------------------- design 2
+
+def _gauge(size, pct, color, track, width):
+    """Half-circle gauge (open at the bottom), supersampled for clean edges."""
+    ss = 3
+    layer = Image.new("RGBA", (size*ss, size*ss//2 + width*ss), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    box = (width*ss//2, width*ss//2, size*ss - width*ss//2, size*ss - width*ss//2)
+    ld.arc(box, start=180, end=360, fill=track + (255,), width=width*ss)
+    if pct > 0:
+        ld.arc(box, start=180, end=180 + 180*min(1.0, pct), fill=color + (255,), width=width*ss)
+    return layer.resize((size, (size//2) + width), Image.Resampling.LANCZOS)
+
+
+def _tier(eff, chances, min_chances):
+    if chances < min_chances:
+        return "NEW FIELDER", (150, 170, 205)
+    if eff >= 85:
+        return "ELITE HANDS", (62, 224, 140)
+    if eff >= 70:
+        return "SAFE HANDS", (90, 200, 255)
+    if eff >= 50:
+        return "WORK IN PROGRESS", (255, 196, 80)
+    return "BUTTERFINGERS", (255, 96, 120)
+
+
+def _versus(d, x, y, w, label, mine, theirs, unit, tone):
+    """My value vs the team average as two stacked bars on a shared scale."""
+    top = max(mine, theirs, 1e-9)
+    _text(d, (x, y), label, 15, MUTED)
+    for i, (value, fill, tag) in enumerate(((mine, tone, "YOU"), (theirs, (96, 116, 160), "TEAM"))):
+        by = y + 28 + i*30
+        d.rounded_rectangle((x+58, by, x+w-110, by+18), radius=9, fill=(26, 38, 64))
+        d.rounded_rectangle((x+58, by, x+58+max(8, int((w-168)*value/top)), by+18), radius=9, fill=fill)
+        _text(d, (x, by+9), tag, 13, DIM, "lm")
+        _text(d, (x+w, by+9), f"{value:.1f}{unit}", 17, WHITE, "rm")
+
+
+def render_fielding_image_v2(data):
+    color = tuple(data.get("team_color") or DEFAULT_ACCENT)
+    accent = _visible_accent(color)
+    theme = {"accent": accent, "accent2": _lighten(accent, 0.35), "bg": _backdrop_color(color), "logo": None}
+    page = _Page(theme)
+    tier, tier_color = _tier(data["eff"], data["chances"], data["min_chances"])
+
+    page.card((50, 22, 1550, 118), 26)
+    page.card((50, 138, 600, 600), 26)
+    page.card((620, 138, 1090, 600), 26)
+    page.card((1110, 138, 1550, 600), 26)
+    page.card((50, 620, 1550, 868), 26)
+    d = page.seal()
+
+    avatar = _open(data.get("avatar_bytes"))
+    _paste(page.image, _round_image(avatar, 70, ring=tier_color, ring_w=4, initial=data["name"][:1]), (74, 32))
+    _text(d, (170, 36), f"FIELDING REPORT  •  {(data.get('team_name') or 'FREE AGENT').upper()}", 15, accent)
+    _text(d, (170, 62), data["name"].upper(), _fit(d, data["name"].upper(), 820, 38, 22, "head"), WHITE, kind="head")
+    width = int(d.textlength(tier, font=font(22))) + 44
+    _pill(d, 1550 - 28 - width, 44, tier, 22, fill=tier_color, fg=INK, pad=22, h=44)
+    if data.get("rank"):
+        rank = f"#{data['rank'][0]} OF {data['rank'][1]}"
+        _pill(d, 1550 - 28 - width - 16 - int(d.textlength(rank, font=font(22))) - 44, 44, rank, 22,
+              outline=accent, fg=WHITE, pad=22, h=44)
+
+    # --- hero gauge
+    eff = data["eff"]
+    gauge_color = WIN if eff >= 50 or not data["chances"] else LOSS
+    _paste(page.image, _gauge(440, eff/100, gauge_color, (30, 44, 72), 36), (105, 190))
+    _text(d, (325, 380), f"{eff:.0f}%", 104, WHITE, "mm", "head")
+    _text(d, (325, 450), "CATCH SUCCESS RATE", 17, MUTED, "mm")
+    d.line((100, 492, 550, 492), fill=(40, 58, 94), width=2)
+    for i, (value, label, tone) in enumerate((
+        (data["caught"], "CAUGHT", WIN), (data["dropped"], "DROPPED", LOSS), (data["chances"], "CHANCES", WHITE),
+    )):
+        cx = 175 + i*150
+        _text(d, (cx, 538), value, 46, tone, "mm", "head")
+        _text(d, (cx, 578), label, 14, MUTED, "mm")
+
+    # --- fantasy breakdown + versus team
+    _text(d, (650, 158), "FANTASY IMPACT", 17, accent)
+    plus, minus = data["caught"]*5, data["dropped"]*10
+    net = plus - minus
+    _text(d, (650, 190), f"{net:+d}", 76, WIN if net >= 0 else LOSS, kind="head")
+    _text(d, (650, 280), "net points from fielding", 16, MUTED)
+    span = max(plus + minus, 1)
+    d.rounded_rectangle((650, 312, 1060, 340), radius=14, fill=(26, 38, 64))
+    plus_w = int(410*plus/span)
+    if plus:
+        d.rounded_rectangle((650, 312, 650+max(14, plus_w), 340), radius=14, fill=WIN)
+    if minus:
+        d.rounded_rectangle((1060-max(14, 410-plus_w), 312, 1060, 340), radius=14, fill=LOSS)
+    _text(d, (650, 352), f"+{plus}  catches (x5)", 15, WIN)
+    _text(d, (1060, 352), f"-{minus}  drops (x10)", 15, LOSS, "ra")
+    if data.get("team_eff") is not None:
+        _versus(d, 650, 388, 410, "SUCCESS RATE vs TEAM AVERAGE", eff, data["team_eff"], "%", gauge_color)
+        _versus(d, 650, 474, 410, "CATCHES vs TEAM PER FIELDER", data["caught"], data.get("team_avg") or 0, "", accent)
+    else:
+        _text(d, (855, 470), "Not on a team yet", 20, DIM, "mm")
+    if data.get("drop_runs"):
+        drops, cost = data["drop_runs"]
+        _text(d, (650, 572), f"{drops} tracked drop(s) cost {cost} runs", 15, LOSS)
+
+    # --- recent form: pips per match
+    _text(d, (1136, 158), "RECENT FORM", 17, accent)
+    recent = data.get("recent") or []
+    if not recent:
+        _text(d, (1330, 380), "No match records yet", 20, DIM, "mm")
+    for i, r in enumerate(reversed(recent[-5:])):
+        y = 200 + i*78
+        d.rounded_rectangle((1132, y, 1528, y+66), radius=16, fill=(18, 28, 50), outline=(40, 58, 94))
+        _text(d, (1152, y+33), r["label"], 18, WHITE, "lm")
+        px = 1262
+        for _ in range(min(r["taken"], 6)):
+            d.ellipse((px, y+21, px+24, y+45), fill=WIN)
+            px += 28
+        for _ in range(min(r["dropped"], 4)):
+            d.ellipse((px, y+21, px+24, y+45), fill=LOSS)
+            px += 28
+        if not r["taken"] and not r["dropped"]:
+            _text(d, (1262, y+33), "no chances", 15, DIM, "lm")
+
+    # --- leaderboard strip
+    _text(d, (76, 640), _clip(d, f"TEAM FIELDING LEADERS  •  {data.get('team_name') or 'SERVER'}".upper(), 900, 17), 17, accent)
+    rows = (data.get("top") or [])[:5]
+    if not rows:
+        _text(d, (800, 770), "No ranked fielders yet", 20, DIM, "mm")
+    cell = 1440 // 5
+    for i, row in enumerate(rows):
+        x = 70 + i*(cell+0)
+        box = (x, 676, x+cell-14, 848)
+        fill = (28, 42, 72) if row["me"] else (16, 25, 46)
+        d.rounded_rectangle(box, radius=20, fill=fill, outline=accent if row["me"] else (40, 58, 94), width=2 if row["me"] else 1)
+        _text(d, (x+22, 696), f"#{i+1}", 30, accent, kind="head")
+        _text(d, (x+22, 744), _clip(d, row["name"], cell-60, 22), 22, WHITE)
+        _text(d, (x+22, 784), f"{row['caught']} catches", 18, MUTED)
+        d.rounded_rectangle((x+22, 820, x+cell-36, 828), radius=4, fill=(30, 44, 72))
+        d.rounded_rectangle((x+22, 820, x+22+max(6, int((cell-58)*row["eff"]/100)), 828), radius=4,
+                            fill=WIN if row["eff"] >= 50 else LOSS)
+    out = io.BytesIO()
+    page.image.save(out, "PNG", compress_level=3)
+    return out.getvalue()

@@ -114,6 +114,37 @@ _TITLE_COLOR = {
 }
 
 
+class _FdDesignView(discord.ui.View):
+    """Flip between the two fielding image designs (owner only)."""
+
+    def __init__(self, ctx, pngs):
+        super().__init__(timeout=300)
+        self.ctx, self.pngs, self.index, self.message = ctx, pngs, 0, None
+
+    async def _show(self, interaction, index):
+        self.index = index
+        await interaction.response.edit_message(
+            content=f"Design **{index + 1} / {len(self.pngs)}**",
+            attachments=[discord.File(io.BytesIO(self.pngs[index]), filename="fielding.png")],
+            view=self,
+        )
+
+    @discord.ui.button(label="Design 1", style=discord.ButtonStyle.secondary)
+    async def first(self, interaction, button):
+        await self._show(interaction, 0)
+
+    @discord.ui.button(label="Design 2", style=discord.ButtonStyle.primary)
+    async def second(self, interaction, button):
+        await self._show(interaction, 1)
+
+    async def on_timeout(self):
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
+
+
 class PagedEmbedView(discord.ui.View):
     """Previous / next buttons for a fixed list of embeds, usable only by the requester."""
 
@@ -1030,12 +1061,14 @@ class CatchTracker(commands.Cog):
         loading = await ctx.send("⏳ Building the fielding image...")
         try:
             data = await self._fielding_image_data(*found[:2])
-            from .fielding_image import render_fielding_image
-            png = await asyncio.to_thread(render_fielding_image, data)
+            from .fielding_image import render_fielding_image, render_fielding_image_v2
+            pngs = [await asyncio.to_thread(render_fielding_image, data),
+                    await asyncio.to_thread(render_fielding_image_v2, data)]
+            view = _FdDesignView(ctx, pngs)
             await loading.delete()
-            await ctx.send(
-                f"{found[1].display_name} • {found[0].name}",
-                file=discord.File(io.BytesIO(png), filename="fielding.png"),
+            view.message = await ctx.send(
+                f"{found[1].display_name} • {found[0].name} • **Design 1 / 2**",
+                file=discord.File(io.BytesIO(pngs[0]), filename="fielding.png"), view=view,
             )
         except Exception as exc:
             print(f"[testfdstats] failed: {type(exc).__name__}: {exc}", flush=True)
@@ -1085,6 +1118,7 @@ class CatchTracker(commands.Cog):
             "rank": (title[1], title[2]) if title else None,
             "title": _TITLE_TEXT[title[0]].title() + " " + team["name"] if title and team else None,
             "min_chances": MIN_LABEL_CHANCES,
+            "team_avg": (team_c / max(1, sum(1 for c, d in stats.values() if c + d > 0))) if team else None,
             "share": caught / team_c * 100 if team and team_c else None,
             "team_eff": _efficiency(team_c, team_d) if team else None,
             "recent": recent, "top": top,
