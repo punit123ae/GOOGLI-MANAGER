@@ -1932,7 +1932,6 @@ class StatsSelect(discord.ui.Select):
     def __init__(self, has_graph=False):
         options = [
             discord.SelectOption(label="Image", description="Show the player stats image", emoji="💎", value="image", default=True),
-            discord.SelectOption(label="Form Graph", description="Batting, bowling and fielding form across matches", emoji="📈", value="graph"),
             discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview"),
             discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="<:deep_stats:1564906372187947008>", value="deep"),
         ]
