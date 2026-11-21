@@ -1514,7 +1514,16 @@ def make_form_graph_image(member, graph_rows, avatar=None):
         return out
 
     # --- axes ---
-    values = [float(item[key]) for item in graph_rows for _l, key, _c in series]
+    def participated(item, key):
+        if key == "bat":
+            return bool(item.get("did_bat", True))
+        if key == "bowl":
+            return bool(item.get("did_bowl", True))
+        return True
+
+    values = [float(item[key]) for item in graph_rows for _l, key, _c in series if participated(item, key)]
+    if not values:
+        values = [0.0]
     lo, hi = min(0.0, min(values)), max(10.0, max(values))
     step = next(s for s in (10, 20, 25, 50, 100, 200, 500, 1000) if (hi-lo)/s <= 6)
     lo = step * (int(lo // step))
@@ -1545,12 +1554,26 @@ def make_form_graph_image(member, graph_rows, avatar=None):
         return ((px-region[0])*SS, (py-region[1])*SS)
     pts = {}
     for _label, key, color in reversed(series):          # bat drawn last so it sits on top
-        pts[key] = [(xs[i], y_of(float(item[key]))) for i, item in enumerate(graph_rows)]
-        line = [L(*p) for p in pts[key]]
-        if len(line) > 1:
-            ld.line(line, fill=color + (255,), width=5*SS, joint="curve")
-        for px, py in line:
-            ld.ellipse((px-7*SS, py-7*SS, px+7*SS, py+7*SS), fill=(8, 16, 30, 255), outline=color + (255,), width=3*SS)
+        pts[key] = [(xs[i], y_of(float(item[key]))) if participated(item, key) else None
+                    for i, item in enumerate(graph_rows)]
+        # Draw separate runs so DNB matches do not get connected as zero-point performances.
+        runs = []
+        current_run = []
+        for point in pts[key]:
+            if point is None:
+                if current_run:
+                    runs.append(current_run)
+                    current_run = []
+            else:
+                current_run.append(point)
+        if current_run:
+            runs.append(current_run)
+        for run in runs:
+            line = [L(*p) for p in run]
+            if len(line) > 1:
+                ld.line(line, fill=color + (255,), width=5*SS, joint="curve")
+            for px, py in line:
+                ld.ellipse((px-7*SS, py-7*SS, px+7*SS, py+7*SS), fill=(8, 16, 30, 255), outline=color + (255,), width=3*SS)
     layer = layer.resize((region[2]-region[0], region[3]-region[1]), Image.Resampling.LANCZOS)
     canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     canvas.paste(layer, (region[0], region[1]))
@@ -1558,7 +1581,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     d = ImageDraw.Draw(image)
 
     # --- value labels: show the fantasy points for every category in every match ---
-    placed = [(x-10, y-10, x+10, y+10) for key in pts for x, y in pts[key]]
+    placed = [(x-10, y-10, x+10, y+10) for key in pts for point in pts[key] if point is not None for x, y in [point]]
 
     def put_label(px, py, text, color, prefer_up):
         w_ = 18 + 8*len(text)
@@ -1577,11 +1600,16 @@ def make_form_graph_image(member, graph_rows, avatar=None):
             txt(cx_, cy, text, 17, color, "mm")
             return
     for _label, key, color in series:
-        series_values = [float(item[key]) for item in graph_rows]
-        best_i = max(range(n), key=lambda i: series_values[i])
-        # Label every match; the collision-aware placer moves chips around nearby points.
-        for i in range(n):
-            put_label(pts[key][i][0], pts[key][i][1], f"{series_values[i]:.1f}".rstrip("0").rstrip("."), color, prefer_up=((i + best_i) % 2 == 0))
+        active = [(i, float(item[key])) for i, item in enumerate(graph_rows) if participated(item, key)]
+        best_i = max(active, key=lambda pair: pair[1])[0] if active else 0
+        # Show DNB for matches without batting/bowling instead of plotting a false zero.
+        for i, item in enumerate(graph_rows):
+            if not participated(item, key):
+                dnb_y = bottom - 22
+                txt(xs[i], dnb_y, "DNB", 13, color, "mm")
+                continue
+            value = float(item[key])
+            put_label(pts[key][i][0], pts[key][i][1], f"{value:.1f}".rstrip("0").rstrip("."), color, prefer_up=((i + best_i) % 2 == 0))
 
     # --- x axis: opponent tag + match number ---
     for i, item in enumerate(graph_rows):
@@ -1596,18 +1624,27 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     # --- summary: average, best match and recent form for each category ---
     col_w = 1500/3
     for idx, (label, key, color) in enumerate(series):
-        sv = [float(item[key]) for item in graph_rows]
+        active = [(i, float(item[key])) for i, item in enumerate(graph_rows) if participated(item, key)]
+        sv = [value for _i, value in active]
         x0 = 80 + idx*col_w
-        avg = sum(sv)/n
-        best_i = max(range(n), key=lambda i: sv[i])
+        avg = sum(sv)/len(sv) if sv else 0.0
+        best_i, best_value = max(active, key=lambda pair: pair[1]) if active else (0, 0.0)
         txt(x0, 778, label, 22, color)
-        txt(x0, 806, f"{avg:.1f}", 54, white)
+        txt(x0, 806, f"{avg:.1f}" if active else "—", 54, white)
         txt(x0+170, 826, "AVG / MATCH", 14, muted)
-        txt(x0+170, 846, f"BEST {sv[best_i]:.1f}  •  M{best_i+1}", 15, white)
-        if n >= 4:
-            recent_avg = sum(sv[-3:])/3
-            earlier_avg = sum(sv[:-3])/(n-3)
-            delta = recent_avg - earlier_avg
+        txt(x0+170, 846, f"BEST {best_value:.1f}  •  M{best_i+1}" if active else "NO MATCHES PLAYED", 15, white)
+        if len(active) >= 4:
+            recent_matches = [(i, value) for i, value in active if i >= max(0, n-3)]
+            earlier_matches = [(i, value) for i, value in active if i < max(0, n-3)]
+            if recent_matches and earlier_matches:
+                recent_avg = sum(value for _i, value in recent_matches)/len(recent_matches)
+                earlier_avg = sum(value for _i, value in earlier_matches)/len(earlier_matches)
+                delta = recent_avg - earlier_avg
+            else:
+                delta = None
+        else:
+            delta = None
+        if delta is not None:
             up = delta >= 0
             tri_x, tri_y, tri_c = x0+330, 822, mint if up else red
             tri = [(tri_x, tri_y-10), (tri_x-10, tri_y+8), (tri_x+10, tri_y+8)] if up else [(tri_x, tri_y+10), (tri_x-10, tri_y-8), (tri_x+10, tri_y-8)]
@@ -2571,6 +2608,8 @@ class Stats(commands.Cog):
                 "bat": bat, "bowl": bowl, "field": caught*5 - dropped*10,
                 "total": bat + bowl + caught*5 - dropped*10,
                 "runs": row["runs"], "wickets": row["wickets"],
+                "did_bat": int(row["balls_faced"] or 0) > 0,
+                "did_bowl": int(row["balls_bowled"] or 0) > 0,
             })
         return graph_rows
 
