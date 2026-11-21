@@ -297,8 +297,7 @@ class TeamCommandsB:
             pass
         await ctx.reply(f"Team **{name}** has been disbanded and removed from the database.", mention_author=False)
 
-    @commands.command(name="setteamapproval")
-    @commands.guild_only()
+    @commands.command(name="setteamapproval")    @commands.guild_only()
     async def set_team_approval(self, ctx, channel: discord.TextChannel):
         if not await self._command_allowed(ctx, "setteamapproval"):
             await ctx.reply("You are not allowed to use this command.", mention_author=False)
@@ -597,8 +596,7 @@ class TeamCommandsB:
         role_setting = self.db.execute(
             "SELECT role_id FROM team_role_settings WHERE team_id=?", (team["id"],)
         ).fetchone()
-        if not role_setting:
-            await ctx.reply(
+        if not role_setting:            await ctx.reply(
                 f"No team role is configured for **{team['name']}**. Use `+setteamrole` first. No players were added.",
                 mention_author=False
             )
@@ -858,8 +856,21 @@ class TeamCommandsB:
                     )
                     if response.status != 200:
                         return None
-                    payload = await response.content.read(8 * 1024 * 1024 + 1)
-                    if not payload or len(payload) > 8 * 1024 * 1024:
+                    # Read the entire response body. StreamReader.read(n) may return
+                    # fewer than n bytes as soon as some data is available, which can
+                    # leave Discord CDN images truncated even when the response is 200.
+                    max_bytes = 8 * 1024 * 1024
+                    if response.content_length is not None and response.content_length > max_bytes:
+                        print("[teaminfo][logo] Image response exceeds 8 MB limit", flush=True)
+                        return None
+                    body = bytearray()
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        body.extend(chunk)
+                        if len(body) > max_bytes:
+                            print("[teaminfo][logo] Image response exceeded 8 MB while downloading", flush=True)
+                            return None
+                    payload = bytes(body)
+                    if not payload:
                         return None
                     try:
                         # Fully decode and re-encode every downloaded logo as PNG.
@@ -897,8 +908,7 @@ class TeamCommandsB:
                 raw_saved = bytes(saved)
                 with Image.open(io.BytesIO(raw_saved)) as image:
                     image.load()
-                    normalized = image.convert("RGBA")
-                    output = io.BytesIO()
+                    normalized = image.convert("RGBA")                    output = io.BytesIO()
                     normalized.save(output, format="PNG", optimize=True)
                 payload = output.getvalue()
                 # Repair old/non-normalized backups in place.
@@ -1197,8 +1207,7 @@ class TeamCommandsB:
             view.message = await loading.edit(
                 content=None, attachments=[discord.File(io.BytesIO(images[0]), filename="teaminfo.png")], view=view
             )
-        except Exception as exc:
-            print(f"[testteaminfo] image generation failed: {type(exc).__name__}: {exc}")
+        except Exception as exc:            print(f"[testteaminfo] image generation failed: {type(exc).__name__}: {exc}")
             try:
                 await loading.delete()
             except Exception:
@@ -1497,8 +1506,7 @@ class TeamCommandsB:
 
         silent = len(member_ids) - len(ranked)
         note = f" • {silent} player(s) have no records" if silent > 0 else ""
-        embed.set_footer(text=f"{YOU_EMOJI} = you{note}")
-        return embed
+        embed.set_footer(text=f"{YOU_EMOJI} = you{note}")        return embed
 
     def _team_comparison_pages(self, ctx, team, ordered_ids):
         from .lb import _totals
