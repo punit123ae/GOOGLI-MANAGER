@@ -1049,7 +1049,7 @@ def _design6_background(W=1600, H=900):
 
 def make_stats_image_experience(
     member, rows, design, avatar=None, fielding_points=0,
-    catches_caught=0, catches_dropped=0, recent_matches=None,
+    catches_caught=0, catches_dropped=0, recent_matches=None, ranks=None,
 ):
     """Render three genuinely different player experiences, not recolours of one template."""
     W, H = 1600, 900
@@ -1062,6 +1062,7 @@ def make_stats_image_experience(
     team = str(get_player_team_name(member) or "NO TEAM CONNECTED").upper()[:38]
     guild = str(getattr(getattr(member, "guild", None), "name", "KASHMIR TITANS")).upper()[:38]
     role = classify_player(t, rows)
+    ranks = dict(ranks or {})
     recent = list(recent_matches or [])[:10 if design == 6 else 5]
     fifties = sum(50 <= r["runs"] < 100 for r in rows)
     hundreds = sum(r["runs"] >= 100 for r in rows)
@@ -1273,43 +1274,74 @@ def make_stats_image_experience(
         ]:
             txt(hx, 38, label, 15, muted)
             txt(hx, 62, value, 52, color)
+            if label == "FANTASY" and ranks.get("fantasy"):
+                txt(hx+118, 38, f"#{ranks['fantasy']}", 16, gold, "ra")
 
         # ---------------- the three big category cards ----------------
+        # Every row can carry the player's current leaderboard position (+lb) as a pill.
         batting_rows = [
-            ("AVERAGE", fmt(t["bat_avg"])), ("STRIKE RATE", fmt(t["strike_rate"])),
-            ("HIGH SCORE", best_bat), ("BALLS FACED", t["balls_faced"]),
-            ("50s / 100s", f"{fifties} / {hundreds}"),
+            ("AVERAGE", fmt(t["bat_avg"]), "bat_avg"), ("STRIKE RATE", fmt(t["strike_rate"]), "strike_rate"),
+            ("HIGH SCORE", best_bat, "highest"), ("FIFTIES", fifties, "fifties"),
+            ("HUNDREDS", hundreds, "hundreds"),
         ]
         bowling_rows = [
-            ("AVERAGE", fmt(t["bowl_avg"])), ("ECONOMY", fmt(t["economy"])),
-            ("STRIKE RATE", fmt(t["bowl_sr"])), ("BEST FIGURES", f"{best_bowl[0]}/{-best_bowl[1]}"),
-            ("OVERS", fmt(t["overs"])),
+            ("AVERAGE", fmt(t["bowl_avg"]), "bowl_avg"), ("ECONOMY", fmt(t["economy"]), "economy"),
+            ("STRIKE RATE", fmt(t["bowl_sr"]), "bowl_sr"), ("BEST FIGURES", f"{best_bowl[0]}/{-best_bowl[1]}", "best_figures"),
+            ("OVERS", fmt(t["overs"]), "overs"),
         ]
         fielding_rows = [
-            ("DROPPED", int(catches_dropped or 0)), ("TOTAL CHANCES", catch_total),
-            ("SUCCESS RATE", f"{catch_efficiency:.0f}%"), ("FANTASY PTS", fmt(fielding_points, 1)),
+            ("DROPPED", int(catches_dropped or 0), "fld_dropped"), ("TOTAL CHANCES", catch_total, None),
+            ("FANTASY PTS", fmt(fielding_points, 1), None), ("SUCCESS RATE", f"{catch_efficiency:.0f}%", "fld_eff"),
         ]
-        for x, title, accent, hero_label, hero_value, sub, stat_rows in [
-            (cat_x[0], "BATTING", coral, "TOTAL RUNS", t["runs"], f"{t['matches']} INNINGS", batting_rows),
-            (cat_x[1], "BOWLING", violet, "TOTAL WICKETS", t["wickets"], f"{bowling_innings} INNINGS", bowling_rows),
-            (cat_x[2], "FIELDING", mint, "CATCHES TAKEN", int(catches_caught or 0), f"{catch_total} CHANCES", fielding_rows),
+
+        def rank_text(key):
+            if not key or key not in ranks:
+                return None
+            return f"#{ranks[key]}" if ranks[key] else "NQ"      # NQ = not qualified yet
+
+        def rank_pill(right, cy, key, accent):
+            label = rank_text(key)
+            if label is None:
+                return
+            pill_w = 84
+            top3 = label != "NQ" and int(label[1:]) <= 3
+            if label == "NQ":
+                d.rounded_rectangle((right-pill_w, cy-17, right, cy+17), radius=17, outline=dim, width=2)
+                txt(right-pill_w/2, cy, label, 19, dim, "mm")
+            elif top3:
+                d.rounded_rectangle((right-pill_w, cy-17, right, cy+17), radius=17, fill=gold)
+                txt(right-pill_w/2, cy, label, 22, (22, 28, 44), "mm")
+            else:
+                d.rounded_rectangle((right-pill_w, cy-17, right, cy+17), radius=17, outline=accent, width=2)
+                txt(right-pill_w/2, cy, label, 22, accent, "mm")
+
+        for x, title, accent, hero_label, hero_value, hero_key, sub, stat_rows in [
+            (cat_x[0], "BATTING", coral, "TOTAL RUNS", t["runs"], "runs", f"{t['matches']} INNINGS", batting_rows),
+            (cat_x[1], "BOWLING", violet, "TOTAL WICKETS", t["wickets"], "wickets", f"{bowling_innings} INNINGS", bowling_rows),
+            (cat_x[2], "FIELDING", mint, "CATCHES TAKEN", int(catches_caught or 0), "fld_caught", f"{catch_total} CHANCES", fielding_rows),
         ]:
             txt(x+28, card_y1+22, title, 34, accent)
             txt(x+462, card_y1+30, sub, 17, muted, "ra")
             txt(x+28, card_y1+76, hero_label, 17, muted)
             txt(x+28, card_y1+96, hero_value, 92, white)
-            for i, (label, value) in enumerate(stat_rows):
+            hero_rank = rank_text(hero_key)
+            if hero_rank:
+                txt(x+462, card_y1+82, "LEADERBOARD", 14, muted, "ra")
+                hero_color = gold if hero_rank != "NQ" and int(hero_rank[1:]) <= 3 else (accent if hero_rank != "NQ" else dim)
+                txt(x+462, card_y1+104, hero_rank, 64, hero_color, "ra")
+            for i, (label, value, key) in enumerate(stat_rows):
                 ry = card_y1 + 214 + i*57
                 d.line((x+28, ry-6, x+462, ry-6), fill=divider, width=1)
                 txt(x+28, ry+14, label, 21, muted, "lm")
-                txt(x+462, ry+14, value, 34, white, "rm")
-        # fielding card: success bar in the free fifth row
-        bar_x, bar_y = cat_x[2]+28, card_y1 + 214 + 4*57 + 8
-        d.rounded_rectangle((bar_x, bar_y, bar_x+434, bar_y+18), radius=9, fill=track)
+                txt(x+(366 if rank_text(key) else 462), ry+14, value, 34, white, "rm")
+                rank_pill(x+462, ry+14, key, accent)
+        # fielding card: green success bar in the free fifth row
+        bar_x, bar_y = cat_x[2]+28, card_y1 + 214 + 4*57 + 12
+        d.rounded_rectangle((bar_x, bar_y, bar_x+434, bar_y+22), radius=11, fill=track)
         if catch_efficiency > 0:
-            d.rounded_rectangle((bar_x, bar_y, bar_x+max(18, int(434*catch_efficiency/100)), bar_y+18), radius=9, fill=mint)
+            d.rounded_rectangle((bar_x, bar_y, bar_x+max(22, int(434*catch_efficiency/100)), bar_y+22), radius=11, fill=mint)
 
-        # ---------------- MATCH FORM (bars + wicket pips) ----------------
+        # ---------------- MATCH FORM (a runs bar and a wickets bar for every innings) ----------------
         txt(78, 672, "MATCH FORM", 26, white)
         chart = recent[:10]                      # newest -> oldest
         txt(290, 680, f"LAST {len(chart)} INNINGS  •  NEWEST → OLDEST" if chart else "", 13, muted)
@@ -1322,54 +1354,51 @@ def make_stats_image_experience(
                 if runs_value >= floor:
                     color = c
             return color
-        lx = 650
+        lx = 658
+        txt(lx-12, 683, "RUNS", 13, muted, "rm")
         for label, color, _floor in tiers:
             d.rounded_rectangle((lx, 676, lx+14, 690), radius=3, fill=color)
             txt(lx+20, 683, label, 13, muted, "lm")
-            lx += 56 if len(label) < 4 else 66
-        txt(1030, 683, "● WICKETS", 13, violet, "rm")
+            lx += 50 if len(label) < 4 else 60
+        d.rounded_rectangle((lx+14, 676, lx+28, 690), radius=3, fill=violet)
+        txt(lx+34, 683, "WICKETS", 13, violet, "lm")
 
         if chart:
-            base_y, max_bar = 812, 78
+            base_y, max_bar = 832, 96
             run_max = max(50, max(int(m.get("runs", 0)) for m in chart))
+            wk_max = max(5, max(int(m.get("wickets", 0)) for m in chart))
             col_w = 920 / len(chart)
             SS = 3
-            region = (60, 700, 1040, 875)
+            region = (60, 700, 1040, 878)
             layer = Image.new("RGBA", ((region[2]-region[0])*SS, (region[3]-region[1])*SS), (0, 0, 0, 0))
             ld = ImageDraw.Draw(layer)
 
             def L(px, py):
                 return ((px-region[0])*SS, (py-region[1])*SS)
             ld.line((*L(80, base_y+2), *L(1020, base_y+2)), fill=divider + (255,), width=2*SS)
-            centers = []
+            bars = []
             for i, m in enumerate(chart):
                 cx = 80 + col_w*(i+0.5)
-                centers.append(cx)
-                runs_value = int(m.get("runs", 0))
-                bar_h = max(4, round(max_bar*runs_value/run_max)) if runs_value > 0 else 4
-                color = tier_color(runs_value)
-                ld.rounded_rectangle((*L(cx-21, base_y-bar_h), *L(cx+21, base_y)), radius=7*SS, fill=color + (255,))
-                wk = int(m.get("wickets", 0))
-                for k in range(max(5, min(wk, 5))):
-                    px_ = cx + (k-2)*11
-                    filled = k < wk
-                    ld.ellipse((*L(px_-4.5, 829-4.5), *L(px_+4.5, 829+4.5)),
-                               fill=(violet + (255,)) if filled else (track + (255,)))
+                runs_value, wk = int(m.get("runs", 0)), int(m.get("wickets", 0))
+                run_h = max(4, round(max_bar*runs_value/run_max))
+                wk_h = max(4, round(max_bar*wk/wk_max))
+                run_col = tier_color(runs_value)
+                wk_col = violet if wk > 0 else track
+                ld.rounded_rectangle((*L(cx-30, base_y-run_h), *L(cx-2, base_y)), radius=7*SS, fill=run_col + (255,))
+                ld.rounded_rectangle((*L(cx+2, base_y-wk_h), *L(cx+30, base_y)), radius=7*SS, fill=wk_col + (255,))
+                bars.append((cx, runs_value, wk, run_h, wk_h))
             layer = layer.resize((region[2]-region[0], region[3]-region[1]), Image.Resampling.LANCZOS)
             canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             canvas.paste(layer, (region[0], region[1]))
             image = Image.alpha_composite(image.convert("RGBA"), canvas).convert("RGB")
             d = ImageDraw.Draw(image)
-            for i, m in enumerate(chart):
-                runs_value = int(m.get("runs", 0))
-                bar_h = max(4, round(max_bar*runs_value/run_max)) if runs_value > 0 else 4
-                txt(centers[i], base_y-bar_h-4, runs_value, 19, white, "mb")
-                opp = str(m.get("opponent") or "").strip()
+            for i, (cx, runs_value, wk, run_h, wk_h) in enumerate(bars):
+                txt(cx-16, base_y-run_h-3, runs_value, 17, white, "mb")
+                txt(cx+16, base_y-wk_h-3, wk, 17, violet if wk > 0 else dim, "mb")
+                opp = str(chart[i].get("opponent") or "").strip()
                 words = [w for w in opp.replace("-", " ").split() if w]
                 tag = ("".join(w[0] for w in words[:3]) if len(words) > 1 else opp[:3]).upper() or f"#{i+1}"
-                txt(centers[i], 850, tag, 14, muted, "mt")
-                if int(m.get("wickets", 0)) > 0:
-                    txt(centers[i]+37, 829, int(m.get("wickets", 0)), 13, violet, "lm")
+                txt(cx, base_y+10, tag, 14, muted, "mt")
         else:
             txt(550, 780, "NOT ENOUGH RECENT MATCH DATA", 18, muted, "mm")
 
@@ -2996,12 +3025,20 @@ class Stats(commands.Cog):
                         "runs_conceded": recent_row["runs_conceded"],
                         "balls_bowled": recent_row["balls_bowled"],
                     })
+                ranks = {}
+                if design == 6:
+                    lb_cog = self.bot.get_cog("LeaderboardCog")
+                    if lb_cog is not None:
+                        try:
+                            ranks = lb_cog.player_ranks(ctx.guild.id, competition, member.id)
+                        except Exception as exc:  # the card still renders without positions
+                            print(f"[stats] Could not load leaderboard positions: {type(exc).__name__}: {exc}")
                 image = await asyncio.to_thread(
                     make_stats_image_experience, member, rows, design,
                     avatar=avatar, fielding_points=fielding_points,
                     catches_caught=catches_caught,
                     catches_dropped=catches_dropped,
-                    recent_matches=recent_match_cards,
+                    recent_matches=recent_match_cards, ranks=ranks,
                 )
             elif design == 3:
                 recent_match_cards = []

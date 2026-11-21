@@ -959,6 +959,41 @@ class LeaderboardCog(commands.Cog):
                 mention_author=False,
             )
 
+    def player_ranks(self, guild_id: int, competition: str, user_id: int) -> dict[str, int | None]:
+        """Leaderboard position of one player for every statistic, exactly as +lb ranks them.
+
+        {metric_key: rank}; the value is None when the player does not qualify
+        (for example under the minimum-wickets rule). Used by the +stats card.
+        """
+        last_gate = competition == "THE LAST GATE"
+        rows_by_user = self._rows(guild_id, competition)
+        fielding = self._fielding_rows(guild_id, competition)
+
+        def position(key, computed):
+            computed.sort(key=lambda item: (_sort_key(key, item[1]), item[0]))
+            for place, (uid, _value_) in enumerate(computed, start=1):
+                if int(uid) == int(user_id):
+                    return place
+            return None
+
+        ranks: dict[str, int | None] = {}
+        for key in ("runs", "bat_avg", "strike_rate", "highest", "fifties", "hundreds",
+                    "wickets", "bowl_avg", "bowl_sr", "economy", "best_figures", "overs", "fantasy"):
+            computed = []
+            for uid, rows in rows_by_user.items():
+                if not _eligible(key, rows, last_gate):
+                    continue
+                value = _value(key, rows)
+                if key == "fantasy":
+                    value += _fielding_fantasy_points(fielding.get(uid))
+                computed.append((uid, value))
+            ranks[key] = position(key, computed)
+        for key in ("fld_caught", "fld_dropped", "fld_eff"):
+            computed = [(uid, _fielding_value(key, rec)) for uid, rec in fielding.items()
+                        if _fielding_eligible(key, rec)]
+            ranks[key] = position(key, computed)
+        return ranks
+
     def _rows(self, guild_id: int, competition: str = "MAIN TOURNAMENT") -> dict[int, list[dict]]:
         db = getattr(self.bot, "db", None)
         if db is None:
