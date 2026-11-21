@@ -1061,8 +1061,8 @@ class CatchTracker(commands.Cog):
         loading = await ctx.send("⏳ Building the fielding image...")
         try:
             data = await self._fielding_image_data(*found[:2])
-            from .fielding_image import render_fielding_image, render_fielding_image_v2
-            pngs = [await asyncio.to_thread(render_fielding_image, data),
+            from .fielding_image import render_fielding_image_v3, render_fielding_image_v2
+            pngs = [await asyncio.to_thread(render_fielding_image_v3, data),
                     await asyncio.to_thread(render_fielding_image_v2, data)]
             view = _FdDesignView(ctx, pngs)
             await loading.delete()

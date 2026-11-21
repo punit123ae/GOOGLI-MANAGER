@@ -264,3 +264,143 @@ def render_fielding_image_v2(data):
     out = io.BytesIO()
     page.image.save(out, "PNG", compress_level=3)
     return out.getvalue()
+
+
+# --------------------------------------------------------------------------- design 3 (hero style)
+
+def _tile3(d, x, y, label, value, color):
+    _text(d, (x, y), label, 14, MUTED)
+    _text(d, (x, y+18), value, 52, color, kind="head")
+
+
+def render_fielding_image_v3(data):
+    color = tuple(data.get("team_color") or DEFAULT_ACCENT)
+    accent = _visible_accent(color)
+    accent2 = _lighten(accent, 0.35)
+    theme = {"accent": accent, "accent2": accent2, "bg": _backdrop_color(color), "logo": None}
+    page = _Page(theme)
+    tier, tier_color = _tier(data["eff"], data["chances"], data["min_chances"])
+
+    for box in ((50, 26, 1550, 336), (50, 356, 790, 596), (810, 356, 1550, 596),
+                (50, 616, 530, 852), (560, 616, 1040, 852), (1070, 616, 1550, 852)):
+        page.card(box, 26)
+    d = page.seal()
+
+    avatar = _open(data.get("avatar_bytes"))
+    recent = data.get("recent") or []
+    eff = data["eff"]
+    tone = WIN if eff >= 50 or not data["chances"] else LOSS
+
+    # ---- hero
+    d.rounded_rectangle((50, 26, 60, 336), radius=5, fill=accent)
+    _paste(page.image, _round_image(avatar, 226, ring=tier_color, ring_w=7, initial=data["name"][:1]), (92, 66))
+    _text(d, (362, 50), "FIELDING PROFILE", 17, accent)
+    name = data["name"].upper()
+    _text(d, (362, 74), _clip(d, name, 640, 84, "head"), _fit(d, name, 640, 84, 40, "head"), WHITE, kind="head")
+    x = 362
+    for label, fill, fg, outline in (
+        ((data.get("team_name") or "FREE AGENT").upper(), None, WHITE, accent),
+        (tier, tier_color, INK, None),
+        *([(f"RANK #{data['rank'][0]} OF {data['rank'][1]}", accent, INK, None)] if data.get("rank") else []),
+    ):
+        x += _pill(d, x, 196, _clip(d, label, 300, 20), 20, fill=fill, fg=fg, outline=outline, pad=18, h=40) + 12
+    if data.get("share") is not None:
+        _text(d, (364, 262), f"{data['share']:.1f}% of all team catches", 20, MUTED)
+    elif data["chances"] < data["min_chances"]:
+        _text(d, (364, 262), f"Needs {data['min_chances']}+ chances to be ranked", 20, MUTED)
+
+    _paste(page.image, _donut(196, eff/100, tone, (30, 44, 72), 16), (1018, 60))
+    _text(d, (1116, 150), f"{eff:.0f}%", 44, WHITE, "mm", "head")
+    _text(d, (1116, 188), "SUCCESS", 14, MUTED, "mm")
+    net = data["caught"]*5 - data["dropped"]*10
+    for i, (label, value, tint) in enumerate((
+        ("CAUGHT", data["caught"], WIN), ("DROPPED", data["dropped"], LOSS),
+        ("CHANCES", data["chances"], WHITE), ("FANTASY", f"{net:+d}", accent2),
+    )):
+        _tile3(d, 1250 + (i % 2)*145, 70 + (i // 2)*98, label, str(value), tint)
+    _text(d, (1010, 282), "FORM", 15, MUTED, "lm")
+    for i, r in enumerate(recent[-5:]):
+        cx = 1100 + i*44
+        clean = r["dropped"] == 0
+        d.ellipse((cx-17, 265, cx+17, 299), fill=WIN if clean else LOSS)
+        _text(d, (cx, 282), r["taken"], 17, INK, "mm")
+
+    # ---- fantasy impact
+    plus, minus = data["caught"]*5, data["dropped"]*10
+    d.rounded_rectangle((50, 376, 58, 576), radius=4, fill=WIN if net >= 0 else LOSS)
+    _text(d, (82, 376), "FANTASY IMPACT", 17, accent, kind="bold")
+    _text(d, (82, 410), f"{net:+d}", 110, WIN if net >= 0 else LOSS, kind="head")
+    _text(d, (82, 536), "net points from fielding", 18, MUTED)
+    span = max(plus + minus, 1)
+    bx, bw = 400, 360
+    for i, (label, value, fill, per) in enumerate((("CATCHES x5", plus, WIN, "+"), ("DROPS x10", minus, LOSS, "-"))):
+        y = 420 + i*84
+        _text(d, (bx, y), label, 15, MUTED)
+        _text(d, (bx+bw, y), f"{per}{value}", 24, fill, "ra", "head")
+        d.rounded_rectangle((bx, y+36, bx+bw, y+52), radius=8, fill=(26, 38, 64))
+        if value:
+            d.rounded_rectangle((bx, y+36, bx+max(14, int(bw*value/span)), y+52), radius=8, fill=fill)
+
+    # ---- versus team
+    _text(d, (842, 376), "VS TEAM AVERAGE", 17, accent)
+    if data.get("team_eff") is not None:
+        _versus(d, 842, 404, 660, "SUCCESS RATE", eff, data["team_eff"], "%", tone)
+        _versus(d, 842, 480, 660, "CATCHES PER FIELDER", data["caught"], data.get("team_avg") or 0, "", accent)
+    else:
+        _text(d, (1180, 480), "Not on a team yet", 22, DIM, "mm")
+    if data.get("drop_runs"):
+        _text(d, (842, 574), f"{data['drop_runs'][0]} tracked drop(s) cost {data['drop_runs'][1]} runs", 16, LOSS)
+
+    # ---- recent matches (grouped bars)
+    d.ellipse((76, 640, 88, 652), fill=WIN)
+    _text(d, (100, 636), "RECENT MATCHES", 17, WIN)
+    if not recent:
+        _text(d, (290, 740), "No match records yet", 20, DIM, "mm")
+    else:
+        slot = 420 // max(5, len(recent))
+        top = max([max(r["taken"], r["dropped"]) for r in recent] + [1])
+        for i, r in enumerate(recent[-5:]):
+            cx = 80 + slot*i + slot//2
+            for j, (val, tint) in enumerate(((r["taken"], WIN), (r["dropped"], LOSS))):
+                bx2 = cx - 28 + j*30
+                h = int(90*val/top)
+                d.rounded_rectangle((bx2, 800-h, bx2+24, 800), radius=6, fill=tint if val else (36, 52, 84))
+                _text(d, (bx2+12, 794-h), val, 15, WHITE, "ms")
+            _text(d, (cx, 812), r["label"], 13, MUTED, "ma")
+
+    # ---- team leaders
+    d.ellipse((586, 640, 598, 652), fill=(156, 128, 255))
+    _text(d, (610, 636), "TEAM LEADERS", 17, (156, 128, 255))
+    rows = (data.get("top") or [])[:3]
+    if not rows:
+        _text(d, (800, 740), "No ranked fielders yet", 20, DIM, "mm")
+    for i, row in enumerate(rows):
+        y = 676 + i*56
+        if row["me"]:
+            d.rounded_rectangle((576, y-4, 1024, y+48), radius=14, fill=(28, 42, 72), outline=accent, width=1)
+        _paste(page.image, _round_image(None, 40, ring=None, initial=row["name"][:1]), (592, y))
+        _text(d, (646, y+20), _clip(d, row["name"], 220, 21), 21, WHITE, "lm")
+        _text(d, (1006, y+20), f"{row['caught']} CT", 20, accent2, "rm", "head")
+        d.rounded_rectangle((870, y+34, 1000, y+40), radius=3, fill=(30, 44, 72))
+        d.rounded_rectangle((870, y+34, 870+max(5, int(130*row['eff']/100)), y+40), radius=3,
+                            fill=WIN if row["eff"] >= 50 else LOSS)
+
+    # ---- highlights
+    d.ellipse((1096, 640, 1108, 652), fill=(255, 196, 80))
+    _text(d, (1120, 636), "HIGHLIGHTS", 17, (255, 196, 80))
+    best = max(recent, key=lambda r: (r["taken"], -r["dropped"]), default=None)
+    clean = sum(1 for r in recent if r["dropped"] == 0 and r["taken"] > 0)
+    for i, (label, value, sub, tint) in enumerate((
+        ("BEST MATCH", f"{best['taken']} catches" if best else "—", best["label"] if best else "", WIN),
+        ("CLEAN MATCHES", f"{clean} of {len(recent)}" if recent else "—", "no drops", accent2),
+        ("RUNS COST BY DROPS", str(data["drop_runs"][1]) if data.get("drop_runs") else "0", "from tracked drops", LOSS),
+    )):
+        y = 676 + i*56
+        _text(d, (1096, y), label, 13, MUTED)
+        _text(d, (1096, y+16), value, 26, tint, kind="head")
+        _text(d, (1520, y+30), sub, 14, DIM, "rm")
+    _text(d, (60, 880), f"GOOGLI MANAGER  •  FIELDING PROFILE  •  {data['name'].upper()}"[:80], 13, DIM, "lm")
+
+    out = io.BytesIO()
+    page.image.save(out, "PNG", compress_level=3)
+    return out.getvalue()
