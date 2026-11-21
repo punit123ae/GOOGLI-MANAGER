@@ -772,17 +772,24 @@ class TeamCommandsB:
 
     @staticmethod
     async def _fetch_url_bytes(url):
-        """Download a small image (team logo); None when it can't be fetched."""
+        """Download a team logo, including Discord CDN-hosted uploads."""
         if not str(url or "").startswith(("http://", "https://")):
             return None
         try:
             import aiohttp
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-                async with session.get(str(url)) as response:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; TeamProfileBot/1.0)"}
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=12),
+                headers=headers,
+            ) as session:
+                async with session.get(str(url), allow_redirects=True) as response:
                     if response.status == 200:
-                        return await response.read()
-        except Exception:
-            pass
+                        content_type = response.headers.get("Content-Type", "")
+                        if content_type.startswith("image/"):
+                            payload = await response.read()
+                            return payload if payload and len(payload) <= 8 * 1024 * 1024 else None
+        except Exception as exc:
+            print(f"[testteaminfo] team logo download failed: {type(exc).__name__}: {exc}")
         return None
 
     @staticmethod
@@ -821,8 +828,20 @@ class TeamCommandsB:
         captain_id = int(team["captain_id"])
         vice_id = int(team["vice_captain_id"]) if team["vice_captain_id"] else None
 
-        members = {uid: guild.get_member(uid) for uid in member_ids}
         semaphore = asyncio.Semaphore(8)
+
+        async def resolve_member(uid):
+            member = guild.get_member(uid)
+            if member is not None:
+                return member
+            try:
+                async with semaphore:
+                    return await asyncio.wait_for(guild.fetch_member(uid), timeout=8)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
+                return None
+
+        resolved_members = await asyncio.gather(*(resolve_member(uid) for uid in member_ids))
+        members = dict(zip(member_ids, resolved_members))
 
         async def avatar_of(uid):
             async with semaphore:
@@ -910,17 +929,23 @@ class TeamCommandsB:
         points_cog = self.bot.get_cog("PointsTable")
         if points_cog is not None and hasattr(points_cog, "team_standing"):
             standing = points_cog.team_standing(guild.id, team["name"])
-        stadium = None
-        if points_cog is not None and hasattr(points_cog, "team_home_channel_id"):
-            channel_id = points_cog.team_home_channel_id(guild.id, team["name"])
-            channel = guild.get_channel(channel_id) if channel_id else None
-            stadium = f"#{channel.name}" if channel else None
+
+        team_color = None
+        role_setting = self.db.execute(
+            "SELECT role_id FROM team_role_settings WHERE team_id=? AND enabled=1",
+            (int(team["id"]),),
+        ).fetchone()
+        if role_setting:
+            team_role = guild.get_role(int(role_setting["role_id"]))
+            if team_role is not None and team_role.color.value:
+                team_color = team_role.color.to_rgb()
 
         return {
             "name": str(team["name"]), "guild": guild.name, "logo": logo_bytes,
+            "team_color": team_color,
             "players": players, "captain": by_uid.get(captain_id), "vice": by_uid.get(vice_id) if vice_id else None,
             "roster_size": len(ordered_ids), "roster_max": self._max_players(guild.id),
-            "standing": standing, "stadium": stadium, "sections": sections, "leaders": leaders,
+            "standing": standing, "sections": sections, "leaders": leaders,
         }
 
     @commands.command(name="testteaminfo")
