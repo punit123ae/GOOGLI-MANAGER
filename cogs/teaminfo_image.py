@@ -262,12 +262,29 @@ class _Page:
         self.image.paste(mark, (W-600, H-540), mark)
 
 
+def _visible_accent(color):
+    """Keep dark team-role colours vivid enough for numbers, badges and accents."""
+    color = tuple(max(0, min(255, int(channel))) for channel in color)
+    h, saturation, value = colorsys.rgb_to_hsv(*(channel / 255 for channel in color))
+    luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+    if luminance < 112:
+        # Black/near-grey has no useful hue to preserve, so use the safe default.
+        if saturation < 0.18:
+            return DEFAULT_ACCENT
+        saturation = max(saturation, 0.68)
+        value = max(value, 0.88)
+        return tuple(int(round(channel * 255)) for channel in colorsys.hsv_to_rgb(h, saturation, value))
+    return color
+
+
 def _theme(data):
     logo = _open(data.get("logo"))
     # Prefer the actual Discord team-role colour; use the logo only when no
-    # usable team role colour is configured for this team.
+    # usable team role colour is configured for this team. Brighten dark colours
+    # so text, numbers and decorative accents remain readable on the dark canvas.
     role_color = data.get("team_color")
-    accent = tuple(int(channel) for channel in role_color) if role_color else accent_from_logo(logo)
+    raw_accent = tuple(int(channel) for channel in role_color) if role_color else accent_from_logo(logo)
+    accent = _visible_accent(raw_accent)
     return {"accent": accent, "accent2": _lighten(accent, 0.35), "logo": logo}
 
 
@@ -316,6 +333,7 @@ def _player_card(page, box, who, label, accent, avatar_img):
         _text(d, ((x1+x2)/2, (y1+y2)/2 - 12), label, 22, DIM, "mm")
         _text(d, ((x1+x2)/2, (y1+y2)/2 + 18), "NOT ASSIGNED", 18, DIM, "mm")
         return
+    d.rounded_rectangle((x1, y1+20, x1+10, y2-20), radius=5, fill=accent)
     badge = _round_image(avatar_img, 168, ring=accent, ring_w=6, initial=who["name"][:1])
     _paste(page.image, badge, (x1+26, y1+(y2-y1-badge.size[1])//2))
     tx = x1 + 242
@@ -333,7 +351,7 @@ def _player_card(page, box, who, label, accent, avatar_img):
         _text(d, (tx + i*col, y1+188), value, 32, WHITE, kind="head")
 
 
-def _page_overview(data, theme, avatars, total_pages):
+def _page_overview(data, theme, avatars, number, total_pages):
     page = _Page(theme)
     accent, accent2 = theme["accent"], theme["accent2"]
     standing = data.get("standing")
@@ -396,6 +414,7 @@ def _page_overview(data, theme, avatars, total_pages):
     for box, leader in zip(leader_boxes, leaders):
         x1, y1, x2, y2 = box
         color = leader["color"]
+        d.rounded_rectangle((x1, y1+18, x1+10, y2-18), radius=5, fill=color)
         d.rounded_rectangle((x1+26, y1+22, x1+38, y1+34), radius=4, fill=color)
         _text(d, (x1+50, y1+17), leader["label"], 16, color)
         if leader.get("player") is None:
@@ -410,19 +429,19 @@ def _page_overview(data, theme, avatars, total_pages):
         width = d.textlength(str(leader["value"]), font=font(64, "head"))
         _text(d, (tx+width+10, y1+142), leader["unit"], 18, MUTED)
         _text(d, (x1+26, y1+196), leader["sub"], 17, MUTED, kind="reg")
-    _footer(page, data, 1, total_pages)
+    _footer(page, data, number, total_pages)
     return page.image
 
 
-# --------------------------------------------------------------------------- page 2: team stats
+# --------------------------------------------------------------------------- team stats
 
-def _page_stats(data, theme, avatars, total_pages):
+def _page_stats(data, theme, avatars, number, total_pages):
     page = _Page(theme)
     accent = theme["accent"]
     columns = [(50 + i*510, 132, 530 + i*510, 852) for i in range(3)]
     for box in columns:
         page.card(box, 26)
-    _chrome(page, data, 2, total_pages, "TEAM STATS")      # seals the header and the three columns together
+    _chrome(page, data, number, total_pages, "TEAM STATS")      # seals the header and the three columns together
     d = page.d
     sections = data["sections"]
     for box, section in zip(columns, sections):
@@ -453,7 +472,7 @@ def _page_stats(data, theme, avatars, total_pages):
             fill_w = max(10, int(bar_w * item["value"] / peak)) if item["value"] > 0 else 0
             if fill_w:
                 d.rounded_rectangle((bar_x, ry+38, bar_x+fill_w, ry+48), radius=5, fill=color if i == 0 else _darken(color, 0.25))
-    _footer(page, data, 2, total_pages)
+    _footer(page, data, number, total_pages)
     return page.image
 
 
@@ -529,7 +548,7 @@ def _page_squad(data, theme, avatars, number, total_pages, players, first_rank):
 # --------------------------------------------------------------------------- public entry point
 
 def render_team_pages(data):
-    """data -> list of PNG bytes (overview, stats, then the squad pages)."""
+    """data -> list of PNG bytes (squad pages first, then overview and team stats)."""
     theme = _theme(data)
     players = list(data.get("players", []))
     ranked = sorted(players, key=lambda p: (-p["fantasy"], p["name"].casefold()))
@@ -553,14 +572,16 @@ def render_team_pages(data):
         if who is not None:
             avatars.setdefault(("p", who["uid"]), _open(who.get("avatar_bytes")))
 
-    images = [
-        _page_overview(data, theme, avatars, total_pages),
-        _page_stats(data, theme, avatars, total_pages),
-    ]
+    images = []
     rank = 1
     for index, chunk in enumerate(chunks):
-        images.append(_page_squad(data, theme, avatars, 3 + index, total_pages, chunk, rank))
+        images.append(_page_squad(data, theme, avatars, 1 + index, total_pages, chunk, rank))
         rank += len(chunk)
+
+    overview_page = len(chunks) + 1
+    stats_page = overview_page + 1
+    images.append(_page_overview(data, theme, avatars, overview_page, total_pages))
+    images.append(_page_stats(data, theme, avatars, stats_page, total_pages))
     pages = []
     for image in images:
         out = io.BytesIO()
