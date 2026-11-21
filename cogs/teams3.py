@@ -1160,6 +1160,44 @@ class TeamCommandsB:
                 pass
             await ctx.send("I couldn't generate the team profile images. Check the bot logs.")
 
+    @commands.command(name="backupteamlogos")
+    @commands.guild_only()
+    async def backup_team_logos(self, ctx):
+        """Recover and permanently save every approved team's logo where Discord still has a cached copy."""
+        if not await self._command_allowed(ctx, "backupteamlogos"):
+            await ctx.reply("You are not allowed to use this command.", mention_author=False)
+            return
+        teams = self.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved' ORDER BY team_number, id",
+            (ctx.guild.id,),
+        ).fetchall()
+        if not teams:
+            await ctx.reply("There are no approved teams to back up.", mention_author=False)
+            return
+
+        status = await ctx.reply(
+            f"⏳ Checking and backing up logos for **{len(teams)}** approved teams...",
+            mention_author=False,
+        )
+        saved = []
+        unavailable = []
+        for team in teams:
+            payload = await self._team_logo_bytes(ctx, team)
+            if payload:
+                saved.append(team["name"])
+            else:
+                unavailable.append(team["name"])
+            await asyncio.sleep(0.15)
+
+        lines = [
+            f"**Logo backup finished:** {len(saved)}/{len(teams)} recovered and saved.",
+        ]
+        if unavailable:
+            lines.append("\n**Could not recover yet:**\n" + "\n".join(f"• {name}" for name in unavailable[:30]))
+            if len(unavailable) > 30:
+                lines.append(f"\n…and {len(unavailable) - 30} more.")
+        await status.edit(content="\n".join(lines))
+
     @commands.command(name="teaminfo")
     @commands.guild_only()
     async def team_info(self, ctx, *, team_name: str):
