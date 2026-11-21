@@ -264,7 +264,10 @@ class _Page:
 
 def _theme(data):
     logo = _open(data.get("logo"))
-    accent = accent_from_logo(logo)
+    # Prefer the actual Discord team-role colour; use the logo only when no
+    # usable team role colour is configured for this team.
+    role_color = data.get("team_color")
+    accent = tuple(int(channel) for channel in role_color) if role_color else accent_from_logo(logo)
     return {"accent": accent, "accent2": _lighten(accent, 0.35), "logo": logo}
 
 
@@ -358,10 +361,6 @@ def _page_overview(data, theme, avatars, total_pages):
     cx = 362
     for label, fill, fg, outline in chips:
         cx += _pill(d, cx, 196, label, 19, fill=fill, fg=fg, outline=outline) + 12
-    if data.get("stadium"):
-        _text(d, (364, 252), "HOME GROUND", 13, DIM)
-        _text(d, (364, 270), _clip(d, data["stadium"], 560, 24), 24, WHITE)
-
     played = (standing["won"] + standing["lost"]) if standing else 0
     won = standing["won"] if standing else 0
     lost = standing["lost"] if standing else 0
