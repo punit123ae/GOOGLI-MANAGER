@@ -1459,14 +1459,6 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     W, H = 1600, 900
     F = load_stats_display_font
     image = _design6_background(W, H).copy()
-    # Reuse the exact creator-credit artwork (including its avatar) baked into
-    # the Design 2 background, positioned in the open space above the legend.
-    try:
-        credit = _cached_design2_background().crop((0, 820, 500, 900))
-        credit = credit.resize((300, 48), Image.Resampling.LANCZOS)
-        image.paste(credit, (1220, 137))
-    except Exception:
-        pass
     coral, violet, mint, gold = (255, 128, 94), (156, 128, 255), (62, 224, 172), (255, 206, 90)
     red = (255, 96, 128)
     white, muted, edge = (244, 248, 255), (150, 168, 196), (48, 74, 116)
