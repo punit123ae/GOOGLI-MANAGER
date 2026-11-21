@@ -1027,30 +1027,31 @@ class TeamCommandsB:
         if not team:
             await ctx.reply("I couldn't find an approved team matching that name or prefix.", mention_author=False)
             return
-        other_rows = self.db.execute("SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at", (team["id"],)).fetchall()
-        ordered_ids = list(dict.fromkeys([team["captain_id"]] + [r["user_id"] for r in other_rows]))
-        embed = discord.Embed(title=f"🏏 {team['name']} • Roster", color=discord.Color.from_rgb(55, 150, 255))
-        embed.add_field(name="Captain", value=f"{self._username(ctx.guild, team['captain_id'])} {CAPTAIN_EMOJI}", inline=True)
-        vice = f"{self._username(ctx.guild, team['vice_captain_id'])} {VICE_CAPTAIN_EMOJI}" if team["vice_captain_id"] else "Not assigned"
-        embed.add_field(name="Vice-Captain", value=vice, inline=True)
-        roster = []
-        for index, uid in enumerate(ordered_ids, start=1):
-            emoji = f" {CAPTAIN_EMOJI}" if uid == team["captain_id"] else (f" {VICE_CAPTAIN_EMOJI}" if uid == team["vice_captain_id"] else "")
-            roster.append(f"{index}. {self._username(ctx.guild, uid)}{emoji}")
-        embed.add_field(name=f"Players ({len(ordered_ids)}/{self._max_players(ctx.guild.id)})", value="\n".join(roster) if roster else "No players yet.", inline=False)
-        if team["logo_url"]:
-            embed.set_thumbnail(url=team["logo_url"])
 
-        # Pages 2-4: batting, bowling and fielding comparison of the team's players.
-        # If anything is unavailable, fall back to the plain roster page.
+        loading = await ctx.send("⏳ Building the team profile...")
         try:
-            from .fielding import PagedEmbedView
-            pages = [embed] + self._team_comparison_pages(ctx, team, ordered_ids)
-            view = PagedEmbedView(ctx, pages)
-            view.message = await ctx.send(embed=embed, view=view)
+            player_rows = self.db.execute(
+                "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
+                (team["id"],),
+            ).fetchall()
+            ordered_ids = list(dict.fromkeys(
+                [int(team["captain_id"])] + [int(row["user_id"]) for row in player_rows]
+            ))
+            data = await self._team_profile_data(ctx, team, ordered_ids)
+            images = await asyncio.to_thread(render_team_pages, data)
+            view = TestTeamInfoView(ctx, images)
+            view.message = await loading.edit(
+                content=None,
+                attachments=[discord.File(io.BytesIO(images[0]), filename="teaminfo.png")],
+                view=view,
+            )
         except Exception as exc:
-            print(f"[teaminfo] comparison pages failed: {type(exc).__name__}: {exc}")
-            await ctx.send(embed=embed)
+            print(f"[teaminfo] image generation failed: {type(exc).__name__}: {exc}")
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+            await ctx.send("I couldn't generate the team profile images. Check the bot logs.")
 
     # ------------------------------------------------------------------ team comparison
     def _team_match_time(self, source_message_id, imported_at=0):
