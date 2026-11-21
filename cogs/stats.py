@@ -50,7 +50,10 @@ def parse_raw_stats(content):
 
 def fmt(value, digits=2):
     if isinstance(value, float):
-        return f"{value:.{digits}f}".rstrip("0").rstrip(".") or "0"
+        text = f"{value:.{digits}f}"
+        if "." in text:  # never strip zeros from a whole number such as "930"
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
     return str(value)
 
 
@@ -1006,6 +1009,51 @@ def make_stats_image_new_design(member, rows, design, avatar=None):
 
 
 
+def _pad_layer(layer, offset, size):
+    """Place a small RGBA layer onto a transparent full-size canvas at `offset`."""
+    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+    canvas.paste(layer, offset)
+    return canvas
+
+
+@lru_cache(maxsize=2)
+def _design6_background(W=1600, H=900):
+    """Deep-navy backdrop: gradient, soft colour glows, light beams, faint grid and vignette."""
+    from PIL import ImageFilter
+    base = Image.composite(
+        Image.new("RGB", (W, H), (9, 24, 52)), Image.new("RGB", (W, H), (4, 9, 20)),
+        Image.linear_gradient("L").resize((W, H)),
+    ).convert("RGBA")
+
+    def glow(cx, cy, rx, ry, color, alpha, blur):
+        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).ellipse((cx-rx, cy-ry, cx+rx, cy+ry), fill=color + (alpha,))
+        return layer.filter(ImageFilter.GaussianBlur(blur))
+    for args in [(1380, 90, 380, 220, (40, 110, 255), 120, 120),
+                 (150, 800, 360, 200, (30, 190, 150), 60, 110),
+                 (520, 480, 520, 190, (30, 120, 210), 48, 100)]:
+        base = Image.alpha_composite(base, glow(*args))
+
+    beams = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(beams)
+    bd.polygon([(0, 0), (170, 0), (40, H), (0, H)], fill=(80, 150, 255, 46))
+    bd.polygon([(210, 0), (240, 0), (110, H), (80, H)], fill=(190, 242, 60, 30))
+    bd.polygon([(1330, 0), (1600, 0), (1600, 120), (1480, H), (1380, H)], fill=(60, 130, 255, 22))
+    base = Image.alpha_composite(base, beams.filter(ImageFilter.GaussianBlur(7)))
+
+    grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grid)
+    for gx in range(0, W, 50):
+        gd.line((gx, 0, gx, H), fill=(255, 255, 255, 7))
+    for gy in range(0, H, 50):
+        gd.line((0, gy, W, gy), fill=(255, 255, 255, 7))
+    base = Image.alpha_composite(base, grid)
+
+    vignette = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    vignette.putalpha(Image.radial_gradient("L").resize((W, H)).point(lambda v: int(max(0, v-110)*1.1)))
+    return Image.alpha_composite(base, vignette).convert("RGB")
+
+
 def make_stats_image_experience(
     member, rows, design, avatar=None, fielding_points=0,
     catches_caught=0, catches_dropped=0, recent_matches=None,
@@ -1021,7 +1069,7 @@ def make_stats_image_experience(
     team = str(get_player_team_name(member) or "NO TEAM CONNECTED").upper()[:38]
     guild = str(getattr(getattr(member, "guild", None), "name", "KASHMIR TITANS")).upper()[:38]
     role = classify_player(t, rows)
-    recent = list(recent_matches or [])[-5:]
+    recent = list(recent_matches or [])[:10 if design == 6 else 5]
     fifties = sum(50 <= r["runs"] < 100 for r in rows)
     hundreds = sum(r["runs"] >= 100 for r in rows)
     three_w = sum(3 <= r["wickets"] < 5 for r in rows)
@@ -1195,142 +1243,194 @@ def make_stats_image_experience(
             txt(80, 760, "NO RECENT MATCH DATA", 16, muted)
 
     else:
-        # ANALYTICS: clean white canvas with subtle cool-grey cards and restrained accents.
-        image = Image.new("RGB", (W, H), (247, 250, 253))
-        d = ImageDraw.Draw(image)
-        navy, panel_bg, panel_alt = (255, 255, 255), (255, 255, 255), (239, 245, 250)
-        ink, white, muted = (28, 43, 60), (28, 43, 60), (103, 119, 137)
-        blue, teal, amber, violet = (43, 123, 205), (17, 153, 130), (204, 137, 42), (119, 103, 190)
-        edge = (211, 222, 233)
-        txt(55, 25, "PLAYER PERFORMANCE LAB", 19, blue)
-        txt(1545, 25, "KT  /  ANALYTICS REPORT", 15, muted, "ra")
-        panel((50, 70, 1550, 180), panel_bg, edge, 16)
-        portrait(75, 88, 72, blue)
-        txt(180, 93, name, 30, white)
-        txt(183, 137, team+"  •  "+role, 14, muted)
-        txt(1030, 88, "OVERALL RATING", 12, muted)
-        txt(1025, 111, f"{rating}/99", 36, blue)
-        txt(1270, 88, "FANTASY", 12, muted)
-        txt(1265, 113, fmt(fantasy,1), 30, teal)
+        # ANALYTICS: dark glass dashboard on a generated background, with a crisp
+        # straight-segment trend chart (supersampled so lines stay sharp and exact).
+        image = _design6_background(W, H).copy()
+        lime, cyan, amber, blue = (190, 242, 60), (72, 202, 255), (255, 184, 74), (70, 140, 255)
+        white, muted, edge = (240, 246, 255), (135, 156, 184), (42, 70, 112)
+        grid_c, divider = (46, 66, 98), (32, 49, 78)
+        glass_fill = (10, 19, 36, 206)
 
         catch_total = int(catches_caught or 0) + int(catches_dropped or 0)
         catch_efficiency = (100 * int(catches_caught or 0) / catch_total) if catch_total else 0.0
-        # Seven compact KPI tiles: batting and bowling averages plus catches taken.
         kpis = [
-            ("MATCHES", t["matches"], blue), ("RUNS", t["runs"], teal),
-            ("WICKETS", t["wickets"], violet), ("BAT AVG", fmt(t["bat_avg"]), amber),
-            ("BOWL AVG", fmt(t["bowl_avg"]), blue), ("CATCHES TAKEN", int(catches_caught or 0), teal),
+            ("MATCHES", t["matches"], blue), ("RUNS", t["runs"], lime),
+            ("WICKETS", t["wickets"], cyan), ("BAT AVG", fmt(t["bat_avg"]), amber),
+            ("BOWL AVG", fmt(t["bowl_avg"]), blue), ("CATCHES TAKEN", int(catches_caught or 0), lime),
             ("EFFICIENCY", f"{catch_efficiency:.1f}%", amber),
         ]
-        kpi_gap, kpi_w = 10, 204
-        for i, (label, value, color) in enumerate(kpis):
-            xx = 50+i*(kpi_w+kpi_gap)
-            panel((xx, 200, xx+kpi_w, 295), panel_bg, edge, 12, 1)
-            txt(xx+14, 216, label, 11, muted)
-            txt(xx+14, 246, value, 27, color)
+        kpi_gap = 10
+        kpi_boxes = []
+        for i in range(len(kpis)):
+            x1 = 50 + round(i*(1500+kpi_gap)/len(kpis))
+            x2 = 50 + round((i+1)*(1500+kpi_gap)/len(kpis)) - kpi_gap
+            kpi_boxes.append((x1, 200, x2, 295))
 
-        # Broadcast-inspired trend on a white card: crisp typography and restrained neon glow.
-        from PIL import ImageFilter
-        panel((50, 315, 1000, 635), panel_bg, edge, 15)
+        # Every card is drawn once on one translucent layer, then composited.
+        glass = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glass)
+        cards = [((50, 70, 1550, 180), 16), ((50, 315, 1000, 635), 15), ((1025, 315, 1550, 635), 15)]
+        cards += [(b, 12) for b in kpi_boxes]
+        cards += [((x, 655, x+490, 850), 14) for x in (50, 555, 1060)]
+        for box, radius in cards:
+            gd.rounded_rectangle(box, radius=radius, fill=glass_fill, outline=edge, width=1)
+        for (x1, y1, x2, _y2), (_label, _value, color) in zip(kpi_boxes, kpis):
+            gd.rounded_rectangle((x1+14, y1, x2-14, y1+3), radius=2, fill=color + (255,))
+        image = Image.alpha_composite(image.convert("RGBA"), glass).convert("RGB")
+        d = ImageDraw.Draw(image)
+
+        txt(55, 25, "PLAYER PERFORMANCE LAB", 19, lime)
+        txt(1545, 25, f"{guild}  /  ANALYTICS REPORT", 15, muted, "ra")
+        portrait(75, 88, 72, lime)
+        txt(180, 93, name, 30, white)
+        txt(183, 137, team+"  •  "+role, 14, muted)
+        txt(1030, 88, "OVERALL RATING", 12, muted)
+        txt(1025, 111, f"{rating}/99", 36, lime)
+        txt(1270, 88, "FANTASY", 12, muted)
+        txt(1265, 113, fmt(fantasy, 1), 30, cyan)
+        for (x1, y1, _x2, _y2), (label, value, color) in zip(kpi_boxes, kpis):
+            txt(x1+14, 216, label, 11, muted)
+            txt(x1+14, 246, value, 27, color)
+
+        # ---------------- PERFORMANCE TRENDS ----------------
         txt(78, 334, "PERFORMANCE TRENDS", 19, white)
-        txt(78, 365, "LAST FIVE MATCHES  •  BATTING AND BOWLING FORM", 11, muted)
-        d.line((710, 350, 738, 350), fill=teal, width=4)
-        txt(747, 342, "RUNS", 11, teal)
-        d.line((837, 350, 865, 350), fill=blue, width=4)
-        txt(874, 342, "WICKETS", 11, blue)
-        chart = recent[-5:]
-        chart_left, chart_top, chart_w, chart_h = 112, 420, 820, 150
-        for grid_i in range(4):
-            gy = chart_top + int(chart_h*grid_i/3)
-            d.line((chart_left, gy, chart_left+chart_w, gy), fill=(226, 233, 240), width=1)
-        if chart:
-            max_runs = max(10, max(int(item.get("runs", 0)) for item in chart))
-            max_wickets = max(1, max(int(item.get("wickets", 0)) for item in chart))
-            run_points, wicket_points = [], []
-            for i, item in enumerate(chart):
-                px = chart_left + int(chart_w*i/max(1, len(chart)-1))
-                run_value = int(item.get("runs", 0))
-                wicket_value = int(item.get("wickets", 0))
-                run_y = chart_top+chart_h-int(chart_h*run_value/max_runs)
-                wicket_y = chart_top+chart_h-int(chart_h*wicket_value/max_wickets)
-                run_points.append((px, run_y))
-                wicket_points.append((px, wicket_y))
+        chart = recent[:10]                      # newest -> oldest, like the match cards
+        txt(78, 365, f"LAST {len(chart) or 10} MATCHES  •  NEWEST → OLDEST", 11, muted)
+        d.line((655, 350, 683, 350), fill=lime, width=4)
+        txt(692, 342, "RUNS", 11, lime)
+        for dash_x in (770, 786, 802):
+            d.line((dash_x, 350, dash_x+9, 350), fill=cyan, width=4)
+        txt(818, 342, "WICKETS", 11, cyan)
 
-            # Low-opacity fill below the runs curve gives the chart its depth.
-            glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
-            gd = ImageDraw.Draw(glow)
-            area = [(run_points[0][0], chart_top+chart_h)] + run_points + [
-                (run_points[-1][0], chart_top+chart_h)
-            ]
-            gd.polygon(area, fill=(17, 153, 130, 20))
-            # Broad blurred strokes create a soft neon bloom behind each series.
-            if len(run_points) > 1:
-                gd.line(run_points, fill=(17, 153, 130, 150), width=20, joint="curve")
-                gd.line(wicket_points, fill=(43, 123, 205, 145), width=17, joint="curve")
-            for px, py in run_points:
-                gd.ellipse((px-12, py-12, px+12, py+12), fill=(17, 153, 130, 125))
-            for px, py in wicket_points:
-                gd.ellipse((px-10, py-10, px+10, py+10), fill=(43, 123, 205, 115))
-            glow = glow.filter(ImageFilter.GaussianBlur(11))
-            image.paste(Image.alpha_composite(image.convert("RGBA"), glow).convert("RGB"))
+        c_left, c_right, c_top, c_bottom = 125, 925, 428, 566
+        c_w, c_h = c_right - c_left, c_bottom - c_top
+        run_axis_max = 50
+        if chart:
+            run_axis_max = max(50, int(-(-max(int(m.get("runs", 0)) for m in chart) // 10) * 10))
+        wk_axis_max = max(5, max((int(m.get("wickets", 0)) for m in chart), default=0))
+        for tick in (0, 0.5, 1):
+            gy = c_bottom - round(c_h*tick)
+            d.line((c_left, gy, c_right, gy), fill=grid_c, width=1)
+            txt(c_left-12, gy, f"{round(run_axis_max*tick)}", 10, lime, "rm")
+            wk_tick = wk_axis_max*tick
+            txt(c_right+12, gy, f"{wk_tick:g}" if wk_tick == int(wk_tick) else f"{wk_tick:.1f}", 10, cyan, "lm")
+
+        if len(chart) >= 1:
+            inset = 38   # keep first/last points and their labels clear of the axis numbers
+            step = (c_w - 2*inset) / max(1, len(chart)-1)
+            xs = [c_left + (c_w/2 if len(chart) == 1 else inset + step*i) for i in range(len(chart))]
+            run_pts = [(xs[i], c_bottom - c_h*min(1, int(m.get("runs", 0))/run_axis_max)) for i, m in enumerate(chart)]
+            wk_pts = [(xs[i], c_bottom - c_h*min(1, int(m.get("wickets", 0))/wk_axis_max)) for i, m in enumerate(chart)]
+
+            SS = 4
+            pad = 20
+            lw_, lh_ = c_w + 2*pad, c_h + 2*pad
+            layer = Image.new("RGBA", (lw_*SS, lh_*SS), (0, 0, 0, 0))
+            ld = ImageDraw.Draw(layer)
+
+            def to_layer(p):
+                return ((p[0]-c_left+pad)*SS, (p[1]-c_top+pad)*SS)
+
+            run_l = [to_layer(p) for p in run_pts]
+            wk_l = [to_layer(p) for p in wk_pts]
+            if len(run_l) > 1:
+                # Soft area under the runs line: polygon masked by a vertical fade.
+                mask = Image.new("L", layer.size, 0)
+                base_y = (c_bottom-c_top+pad)*SS
+                ImageDraw.Draw(mask).polygon([(run_l[0][0], base_y)] + run_l + [(run_l[-1][0], base_y)], fill=255)
+                fade = Image.linear_gradient("L").rotate(180).resize(layer.size)   # opaque top -> clear bottom
+                fade = fade.point(lambda v: int(v*0.30))
+                area = Image.new("RGBA", layer.size, lime + (255,))
+                area.putalpha(Image.composite(fade, Image.new("L", layer.size, 0), mask))
+                layer = Image.alpha_composite(layer, area)
+                ld = ImageDraw.Draw(layer)
+                ld.line(run_l, fill=lime + (255,), width=3*SS, joint="curve")
+                # dashed straight wicket segments
+                dash, gap_ = 9*SS, 6*SS
+                for (ax, ay), (bx, by) in zip(wk_l, wk_l[1:]):
+                    seg = ((bx-ax)**2 + (by-ay)**2) ** 0.5
+                    if seg == 0:
+                        continue
+                    ux, uy = (bx-ax)/seg, (by-ay)/seg
+                    pos = 0.0
+                    while pos < seg:
+                        end = min(seg, pos+dash)
+                        ld.line((ax+ux*pos, ay+uy*pos, ax+ux*end, ay+uy*end), fill=cyan + (255,), width=3*SS)
+                        pos += dash + gap_
+            for px, py in run_l:
+                ld.ellipse((px-6*SS, py-6*SS, px+6*SS, py+6*SS), fill=(8, 16, 30, 255), outline=lime + (255,), width=3*SS)
+            for px, py in wk_l:
+                ld.ellipse((px-5*SS, py-5*SS, px+5*SS, py+5*SS), fill=(8, 16, 30, 255), outline=cyan + (255,), width=3*SS)
+            layer = layer.resize((lw_, lh_), Image.Resampling.LANCZOS)
+            image = Image.alpha_composite(image.convert("RGBA"), _pad_layer(layer, (c_left-pad, c_top-pad), (W, H))).convert("RGB")
             d = ImageDraw.Draw(image)
 
-            if len(run_points) > 1:
-                d.line(run_points, fill=teal, width=4, joint="curve")
-                d.line(wicket_points, fill=blue, width=4, joint="curve")
+            # Value labels never overlap each other or the markers: try above, then below.
+            placed = [(x-9, y-9, x+9, y+9) for x, y in run_pts + wk_pts]
 
-            for i, (px, py) in enumerate(run_points):
-                # Glowing ring marker and a legible neon value capsule.
-                d.ellipse((px-6, py-6, px+6, py+6), fill=teal, outline=(255, 255, 255), width=2)
-                value = f"{int(chart[i].get('runs', 0))}R"
-                box_y = max(chart_top+3, py-31)
-                d.rounded_rectangle((px-23, box_y-10, px+23, box_y+11), radius=8,
-                                    fill=(255, 255, 255), outline=(17, 153, 130), width=1)
-                txt(px, box_y-7, value, 10, (17, 133, 114), "mt")
-
-            for i, (px, py) in enumerate(wicket_points):
-                d.ellipse((px-5, py-5, px+5, py+5), fill=blue, outline=(255, 255, 255), width=2)
-                value = f"{int(chart[i].get('wickets', 0))}W"
-                box_y = min(chart_top+chart_h-3, py+28)
-                d.rounded_rectangle((px-22, box_y-10, px+22, box_y+11), radius=8,
-                                    fill=(255, 255, 255), outline=(74, 153, 235), width=1)
-                txt(px, box_y-7, value, 10, (43, 123, 205), "mt")
-
-            for i in range(len(chart)):
-                px = chart_left + int(chart_w*i/max(1, len(chart)-1))
-                txt(px, chart_top+chart_h+12, f"M{i+1}", 10, muted, "mt")
+            def put_label(px, py, text, color, prefer_up):
+                w_, h_ = 22 if len(text) <= 2 else 26, 11
+                options = [(-1, 20), (1, 20), (-1, 34), (1, 34)] if prefer_up else [(1, 20), (-1, 20), (1, 34), (-1, 34)]
+                for sign, dist in options:
+                    cy = py + sign*dist
+                    box = (px-w_, cy-h_, px+w_, cy+h_)
+                    if cy-h_ < c_top-20 or cy+h_ > c_bottom+20:
+                        continue
+                    if any(not (box[2] < o[0] or box[0] > o[2] or box[3] < o[1] or box[1] > o[3]) for o in placed):
+                        continue
+                    placed.append(box)
+                    d.rounded_rectangle(box, radius=9, fill=(9, 20, 38), outline=color, width=1)
+                    txt(px, cy, text, 11, color, "mm")
+                    return
+            for i, m in enumerate(chart):
+                put_label(run_pts[i][0], run_pts[i][1], f"{int(m.get('runs', 0))}R", lime, True)
+            for i, m in enumerate(chart):
+                put_label(wk_pts[i][0], wk_pts[i][1], f"{int(m.get('wickets', 0))}W", cyan, False)
+            for i, m in enumerate(chart):
+                opp = str(m.get("opponent") or "").strip()
+                words = [w for w in opp.replace("-", " ").split() if w]
+                tag = ("".join(w[0] for w in words[:3]) if len(words) > 1 else opp[:3]).upper() or f"M{i+1}"
+                txt(xs[i], c_bottom+30, tag, 11, muted, "mt")
+                txt(xs[i], c_bottom+46, f"#{i+1}", 9, (96, 118, 150), "mt")
         else:
-            txt(515, 490, "NOT ENOUGH RECENT MATCH DATA", 14, muted, "mm")
+            txt(c_left + c_w/2, c_top + c_h/2, "NOT ENOUGH RECENT MATCH DATA", 14, muted, "mm")
 
-        # Fantasy contribution retains explicit category names; no generic points label.
-        panel((1025, 315, 1550, 635), panel_bg, edge, 15)
+        # ---------------- FANTASY CONTRIBUTION ----------------
         txt(1055, 337, "FANTASY CONTRIBUTION", 18, white)
         parts = [max(0, bat_pts), max(0, bowl_pts), max(0, float(fielding_points or 0))]
         total = sum(parts)
-        colors = [teal, blue, amber]
+        colors = [lime, cyan, amber]
+        SS = 4
+        ring = Image.new("RGBA", (240*SS, 240*SS), (0, 0, 0, 0))
+        rd = ImageDraw.Draw(ring)
+        ring_box = (10*SS, 10*SS, 230*SS, 230*SS)
+        ring_w = 34*SS
         if total > 0:
-            start_angle = -90
+            start_angle = -90.0
             for value, color in zip(parts, colors):
                 extent = 360*value/total
-                d.pieslice((1070, 395, 1290, 615), start=start_angle, end=start_angle+extent, fill=color)
+                if extent > 0.5:
+                    rd.arc(ring_box, start=start_angle+0.6, end=start_angle+extent-0.6, fill=color + (255,), width=ring_w)
                 start_angle += extent
-            d.ellipse((1125, 450, 1235, 560), fill=panel_bg)
-            txt(1180, 495, fmt(fantasy,0), 22, white, "mm")
-            txt(1180, 522, "FANTASY", 10, muted, "mm")
         else:
-            d.ellipse((1070,395,1290,615), outline=edge, width=24)
-            txt(1180, 500, "0", 18, white, "mm")
-        for i, (label, value, color) in enumerate([
-            ("BATTING", fmt(bat_pts,1), teal),
-            ("BOWLING", fmt(bowl_pts,1), blue),
-            ("FIELDING", fmt(fielding_points,1), amber),
+            rd.arc(ring_box, start=0, end=360, fill=grid_c + (255,), width=ring_w)
+        ring = ring.resize((240, 240), Image.Resampling.LANCZOS)
+        image = Image.alpha_composite(image.convert("RGBA"), _pad_layer(ring, (1060, 385), (W, H))).convert("RGB")
+        d = ImageDraw.Draw(image)
+        txt(1180, 493, fmt(fantasy, 0), 30, white, "mm")
+        txt(1180, 523, "FANTASY", 10, muted, "mm")
+        for i, (label, value, color, part) in enumerate([
+            ("BATTING", bat_pts, lime, parts[0]),
+            ("BOWLING", bowl_pts, cyan, parts[1]),
+            ("FIELDING", fielding_points, amber, parts[2]),
         ]):
-            yy = 415+i*58
+            yy = 420+i*62
             d.ellipse((1325, yy+3, 1339, yy+17), fill=color)
             txt(1350, yy, label, 11, muted)
-            txt(1515, yy+19, value, 18, white, "ra")
+            txt(1350, yy+18, f"{(100*part/total) if total else 0:.0f}% of total", 10, (96, 118, 150))
+            txt(1515, yy+4, fmt(value, 1), 20, white, "ra")
 
-        # Three clear categories: eight batting stats, eight bowling stats and a dedicated fielding panel.
+        # ---------------- BATTING / BOWLING / FIELDING ----------------
         batting_stats = [
             ("INNINGS", t["matches"]), ("RUNS", t["runs"]),
             ("BALLS FACED", t["balls_faced"]), ("AVERAGE", fmt(t["bat_avg"])),
@@ -1345,30 +1445,35 @@ def make_stats_image_experience(
             ("STRIKE RATE", fmt(t["bowl_sr"])),
             ("BEST FIGURES", f"{best_bowl[0]}/{-best_bowl[1]}"),
         ]
-        catch_total = int(catches_caught or 0) + int(catches_dropped or 0)
-        fielding_efficiency = 100 * int(catches_caught or 0) / catch_total if catch_total else 0.0
         fielding_stats = [
             ("CATCHES TAKEN", int(catches_caught or 0)),
             ("CATCHES DROPPED", int(catches_dropped or 0)),
-            ("CATCH EFFICIENCY", f"{fielding_efficiency:.1f}%"),
+            ("CATCH EFFICIENCY", f"{catch_efficiency:.1f}%"),
             ("FANTASY", fmt(fielding_points, 1)),
         ]
         for x, title, accent, stats in [
-            (50, "BATTING", teal, batting_stats),
-            (555, "BOWLING", blue, bowling_stats),
+            (50, "BATTING", lime, batting_stats),
+            (555, "BOWLING", cyan, bowling_stats),
             (1060, "FIELDING", amber, fielding_stats),
         ]:
-            panel((x, 655, x+490, 850), panel_bg, edge, 14, 1)
             d.rounded_rectangle((x+18, 674, x+58, 680), radius=3, fill=accent)
             txt(x+18, 690, title, 17, accent)
             for i, (label, value) in enumerate(stats):
-                col, row = i//4, i%4
+                col, row = i//4, i % 4
                 xx = x+18+col*235
                 yy = 725+row*29
                 txt(xx, yy, label, 9, muted)
                 txt(xx+215, yy-3, value, 15, white, "ra")
                 if row < 3:
-                    d.line((xx, yy+21, xx+215, yy+21), fill=(229, 235, 242), width=1)
+                    d.line((xx, yy+21, xx+215, yy+21), fill=divider, width=1)
+        # Fielding panel's free column: catch success bar.
+        bx = 1060+18+235
+        txt(bx, 725, "CATCH SUCCESS", 9, muted)
+        txt(bx, 745, f"{catch_efficiency:.0f}%", 30, amber)
+        d.rounded_rectangle((bx, 797, bx+215, 807), radius=5, fill=divider)
+        if catch_efficiency > 0:
+            d.rounded_rectangle((bx, 797, bx+max(10, int(215*catch_efficiency/100)), 807), radius=5, fill=amber)
+        txt(bx, 815, f"{int(catches_caught or 0)} TAKEN  /  {int(catches_dropped or 0)} DROPPED", 9, muted)
 
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
@@ -2949,7 +3054,7 @@ class Stats(commands.Cog):
         try:
             if design in (4, 5, 6):
                 recent_match_cards = []
-                for recent_row in reversed(rows[-5:]):
+                for recent_row in reversed(rows[-(10 if design == 6 else 5):]):
                     recent_match_cards.append({
                         "opponent": self._saved_opponent(
                             recent_row["source_message_id"], member.id

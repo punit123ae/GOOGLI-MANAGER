@@ -59,8 +59,8 @@ CURATED = {
            "+rs  (reply to the raw stats message)", WHITELIST),
     "resetstats": ("Statistics", "Reset ALL imported batting/bowling stats for this server.",
                    "+resetstats", WHITELIST),
-    "setdesign": ("Statistics", "Choose which design the +stats card uses (1 or 2).",
-                  "+setdesign <1|2>", WHITELIST),
+    "setdesign": ("Statistics", "Choose which design the +stats card uses (1 to 6).",
+                  "+setdesign <1-6>", WHITELIST),
     # ---------------------------------------------------------------- Leaderboards
     "lb": ("Leaderboards", "Paginated leaderboard with menus for Batting, Bowling, Fantasy Points and Fielding.",
            "+lb", EVERYONE),
