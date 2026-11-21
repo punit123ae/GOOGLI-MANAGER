@@ -597,8 +597,7 @@ class TeamCommandsB:
         role_setting = self.db.execute(
             "SELECT role_id FROM team_role_settings WHERE team_id=?", (team["id"],)
         ).fetchone()
-        if not role_setting:
-            await ctx.reply(
+        if not role_setting:            await ctx.reply(
                 f"No team role is configured for **{team['name']}**. Use `+setteamrole` first. No players were added.",
                 mention_author=False
             )
@@ -910,7 +909,8 @@ class TeamCommandsB:
                 raw_saved = bytes(saved)
                 with Image.open(io.BytesIO(raw_saved)) as image:
                     image.load()
-                    normalized = image.convert("RGBA")                    output = io.BytesIO()
+                    normalized = image.convert("RGBA")
+                    output = io.BytesIO()
                     normalized.save(output, format="PNG", optimize=True)
                 payload = output.getvalue()
                 # Repair old/non-normalized backups in place.
@@ -1197,8 +1197,7 @@ class TeamCommandsB:
             ).fetchall()
             ordered_ids = list(dict.fromkeys(
                 [int(team["captain_id"])] + [int(row["user_id"]) for row in player_rows]
-            ))
-            # The image builder expects a context-like object with the target guild
+            ))            # The image builder expects a context-like object with the target guild
             # and requesting user; the command itself remains in the owner's DM.
             profile_ctx = type("TeamProfileContext", (), {
                 "guild": guild, "author": ctx.author
