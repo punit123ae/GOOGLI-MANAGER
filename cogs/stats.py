@@ -2042,7 +2042,8 @@ class StatsView(discord.ui.View):
     def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed,
                  cog=None, ctx=None, has_last_gate=False, graph_image=None,
                  graph_rows=None, graph_member=None, graph_avatar=None):
-        super().__init__(timeout=600)
+        # Keep the interactive menu alive for two minutes after the last interaction.
+        super().__init__(timeout=120)
         self.graph_image = graph_image
         self.graph_rows = graph_rows
         self.graph_member = graph_member
@@ -2057,6 +2058,19 @@ class StatsView(discord.ui.View):
         self.add_item(StatsSelect(has_graph=graph_rows is not None or bool(graph_image)))
         if has_last_gate and cog is not None and ctx is not None:
             self.add_item(StatsCompetitionSelect())
+
+    async def on_timeout(self):
+        """Release per-request image/data references when this menu expires."""
+        self.clear_items()
+        self.overall_image = None
+        self.graph_image = None
+        self.graph_rows = None
+        self.graph_avatar = None
+        self.graph_member = None
+        self.overview_embed = None
+        self.deep_embed = None
+        self.ctx = None
+        self.cog = None
 
 
 # Existing leaderboard metric definitions.
