@@ -1509,7 +1509,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     step = next(s for s in (10, 20, 25, 50, 100, 200, 500, 1000) if (hi-lo)/s <= 6)
     lo = step * (int(lo // step))
     hi = step * (-int(-hi // step))
-    left, right, top, bottom = 150, 1500, 215, 655
+    left, right, top, bottom = 150, 1500, 215, 620
     plot_w, plot_h = right-left, bottom-top
 
     def y_of(v):
@@ -1547,7 +1547,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     image = Image.alpha_composite(image.convert("RGBA"), canvas).convert("RGB")
     d = ImageDraw.Draw(image)
 
-    # --- value labels: the best match and the latest match of every series ---
+    # --- value labels: show the fantasy points for every category in every match ---
     placed = [(x-10, y-10, x+10, y+10) for key in pts for x, y in pts[key]]
 
     def put_label(px, py, text, color, prefer_up):
@@ -1569,17 +1569,19 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     for _label, key, color in series:
         series_values = [float(item[key]) for item in graph_rows]
         best_i = max(range(n), key=lambda i: series_values[i])
-        for i in sorted({best_i, n-1}):
-            put_label(pts[key][i][0], pts[key][i][1], f"{series_values[i]:.1f}".rstrip("0").rstrip("."), color, prefer_up=True)
+        # Label every match; the collision-aware placer moves chips around nearby points.
+        for i in range(n):
+            put_label(pts[key][i][0], pts[key][i][1], f"{series_values[i]:.1f}".rstrip("0").rstrip("."), color, prefer_up=((i + best_i) % 2 == 0))
 
     # --- x axis: opponent tag + match number ---
     for i, item in enumerate(graph_rows):
         opp = str(item.get("opponent") or "").strip()
         words = [w for w in opp.replace("-", " ").split() if w]
         tag = ("".join(w[0] for w in words[:3]) if len(words) > 1 else opp[:3]).upper()
-        txt(xs[i], bottom+22, tag or "—", 16, muted, "mt")
-        txt(xs[i], bottom+44, f"M{i+1}", 14, dim, "mt")
-    txt(right, bottom+70, "OLDEST → NEWEST", 13, dim, "ra")
+        txt(xs[i], bottom+18, tag or "—", 15, muted, "mt")
+        txt(xs[i], bottom+39, f"M{i+1}", 14, dim, "mt")
+        txt(xs[i], bottom+61, f"TOTAL {float(item.get('total', 0)):.1f} FP", 12, gold, "mt")
+    txt(right, bottom+91, "OLDEST → NEWEST", 13, dim, "ra")
 
     # --- summary: average, best match and recent form for each category ---
     col_w = 1500/3
@@ -1590,18 +1592,18 @@ def make_form_graph_image(member, graph_rows, avatar=None):
         best_i = max(range(n), key=lambda i: sv[i])
         txt(x0, 778, label, 22, color)
         txt(x0, 806, f"{avg:.1f}", 54, white)
-        txt(x0+130, 826, "AVG / MATCH", 14, muted)
-        txt(x0+130, 846, f"BEST {sv[best_i]:.1f}  •  M{best_i+1}", 15, white)
+        txt(x0+170, 826, "AVG / MATCH", 14, muted)
+        txt(x0+170, 846, f"BEST {sv[best_i]:.1f}  •  M{best_i+1}", 15, white)
         if n >= 4:
             recent_avg = sum(sv[-3:])/3
             earlier_avg = sum(sv[:-3])/(n-3)
             delta = recent_avg - earlier_avg
             up = delta >= 0
-            tri_x, tri_y, tri_c = x0+305, 822, mint if up else red
+            tri_x, tri_y, tri_c = x0+330, 822, mint if up else red
             tri = [(tri_x, tri_y-10), (tri_x-10, tri_y+8), (tri_x+10, tri_y+8)] if up else [(tri_x, tri_y+10), (tri_x-10, tri_y-8), (tri_x+10, tri_y-8)]
             d.polygon(tri, fill=tri_c)
-            txt(tri_x+18, tri_y-12, f"{abs(delta):.1f}", 26, tri_c)
-            txt(tri_x+18, tri_y+16, "LAST 3 VS EARLIER", 12, muted)
+            txt(tri_x+18, tri_y-12, f"{delta:+.1f}", 24, tri_c)
+            txt(tri_x+18, tri_y+16, "RECENT TREND", 12, muted)
 
     out = io.BytesIO()
     image.save(out, format="PNG", optimize=True)
@@ -2522,6 +2524,7 @@ class Stats(commands.Cog):
             graph_rows.append({
                 "opponent": self._saved_opponent(row["source_message_id"], member.id),
                 "bat": bat, "bowl": bowl, "field": caught*5 - dropped*10,
+                "total": bat + bowl + caught*5 - dropped*10,
                 "runs": row["runs"], "wickets": row["wickets"],
             })
         return graph_rows
