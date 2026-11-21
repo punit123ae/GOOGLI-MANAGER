@@ -1439,6 +1439,176 @@ def make_stats_image_experience(
     output.seek(0)
     return output
 
+def make_form_graph_image(member, graph_rows, avatar=None):
+    """Design 6, page 2: one full-size line graph of fantasy points per match.
+
+    graph_rows is oldest -> newest; each item has opponent, bat, bowl, field (points),
+    runs, wickets. Batting, bowling and fielding each get their own straight-line series.
+    """
+    from PIL import ImageFilter  # noqa: F401  (kept local like the other renderers)
+    W, H = 1600, 900
+    F = load_stats_display_font
+    image = _design6_background(W, H).copy()
+    coral, violet, mint, gold = (255, 128, 94), (156, 128, 255), (62, 224, 172), (255, 206, 90)
+    red = (255, 96, 128)
+    white, muted, edge = (244, 248, 255), (150, 168, 196), (48, 74, 116)
+    grid_c, grid_faint, dim = (52, 76, 112), (30, 46, 74), (104, 124, 156)
+    glass = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glass)
+    for box, radius in [((50, 20, 1550, 125), 18), ((50, 140, 1550, 745), 18), ((50, 760, 1550, 880), 18)]:
+        gd.rounded_rectangle(box, radius=radius, fill=(9, 17, 34, 214), outline=edge, width=1)
+    image = Image.alpha_composite(image.convert("RGBA"), glass).convert("RGB")
+    d = ImageDraw.Draw(image)
+
+    def txt(x, y, value, size=18, color=white, anchor=None):
+        d.text((x, y), str(value), font=F(size, True), fill=color, anchor=anchor)
+
+    name = str(getattr(member, "display_name", "PLAYER"))[:32]
+    team = str(get_player_team_name(member) or "NO TEAM CONNECTED").upper()[:38]
+    # --- header ---
+    size, ax, ay = 72, 76, 36
+    d.ellipse((ax-5, ay-5, ax+size+5, ay+size+5), fill=gold)
+    d.ellipse((ax-2, ay-2, ax+size+2, ay+size+2), fill=(15, 24, 38))
+    drawn = False
+    if avatar:
+        try:
+            pic = ImageOps.fit(Image.open(io.BytesIO(avatar)).convert("RGB"), (size, size), method=Image.Resampling.LANCZOS)
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, size-1, size-1), fill=255)
+            image.paste(pic, (ax, ay), mask)
+            drawn = True
+        except Exception:
+            pass
+    if not drawn:
+        txt(ax+size/2, ay+size/2, name[:1].upper(), 38, gold, "mm")
+    txt(178, 34, name, 38)
+    txt(180, 84, team, 18, muted)
+    n = len(graph_rows)
+    txt(1522, 36, "FORM GRAPH", 40, white, "ra")
+    txt(1522, 84, f"FANTASY POINTS PER MATCH  •  LAST {n} MATCHES" if n else "FANTASY POINTS PER MATCH", 17, muted, "ra")
+
+    series = [("BATTING", "bat", coral), ("BOWLING", "bowl", violet), ("FIELDING", "field", mint)]
+    # --- legend ---
+    lx = 90
+    for label, _key, color in series:
+        d.rounded_rectangle((lx, 165, lx+46, 171), radius=3, fill=color)
+        d.ellipse((lx+17, 160, lx+29, 176), outline=color, width=3, fill=(8, 16, 30))
+        txt(lx+60, 168, label, 22, color, "lm")
+        lx += 220
+
+    if n == 0:
+        txt(800, 440, "NOT ENOUGH MATCH DATA YET", 30, muted, "mm")
+        out = io.BytesIO()
+        image.save(out, format="PNG", optimize=True)
+        out.seek(0)
+        return out
+
+    # --- axes ---
+    values = [float(item[key]) for item in graph_rows for _l, key, _c in series]
+    lo, hi = min(0.0, min(values)), max(10.0, max(values))
+    step = next(s for s in (10, 20, 25, 50, 100, 200, 500, 1000) if (hi-lo)/s <= 6)
+    lo = step * (int(lo // step))
+    hi = step * (-int(-hi // step))
+    left, right, top, bottom = 150, 1500, 215, 655
+    plot_w, plot_h = right-left, bottom-top
+
+    def y_of(v):
+        return bottom - plot_h*(v-lo)/(hi-lo)
+    tick = lo
+    while tick <= hi + 1e-9:
+        gy = y_of(tick)
+        d.line((left, gy, right, gy), fill=grid_c if tick == 0 else grid_faint, width=2 if tick == 0 else 1)
+        txt(left-16, gy, f"{tick:g}", 16, muted, "rm")
+        tick += step
+    inset = 46
+    xs = [left + (plot_w/2 if n == 1 else inset + (plot_w-2*inset)*i/(n-1)) for i in range(n)]
+    for x in xs:
+        d.line((x, top, x, bottom), fill=grid_faint, width=1)
+
+    # --- series (supersampled so the straight segments stay crisp) ---
+    SS, pad = 4, 24
+    region = (left-pad, top-pad, right+pad, bottom+pad)
+    layer = Image.new("RGBA", ((region[2]-region[0])*SS, (region[3]-region[1])*SS), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+
+    def L(px, py):
+        return ((px-region[0])*SS, (py-region[1])*SS)
+    pts = {}
+    for _label, key, color in reversed(series):          # bat drawn last so it sits on top
+        pts[key] = [(xs[i], y_of(float(item[key]))) for i, item in enumerate(graph_rows)]
+        line = [L(*p) for p in pts[key]]
+        if len(line) > 1:
+            ld.line(line, fill=color + (255,), width=5*SS, joint="curve")
+        for px, py in line:
+            ld.ellipse((px-7*SS, py-7*SS, px+7*SS, py+7*SS), fill=(8, 16, 30, 255), outline=color + (255,), width=3*SS)
+    layer = layer.resize((region[2]-region[0], region[3]-region[1]), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    canvas.paste(layer, (region[0], region[1]))
+    image = Image.alpha_composite(image.convert("RGBA"), canvas).convert("RGB")
+    d = ImageDraw.Draw(image)
+
+    # --- value labels: the best match and the latest match of every series ---
+    placed = [(x-10, y-10, x+10, y+10) for key in pts for x, y in pts[key]]
+
+    def put_label(px, py, text, color, prefer_up):
+        w_ = 18 + 8*len(text)
+        vertical = [(0, -26), (0, 26), (0, -46), (0, 46)] if prefer_up else [(0, 26), (0, -26), (0, 46), (0, -46)]
+        sideways = [(-(w_/2 + 18), 0), (w_/2 + 18, 0), (-(w_/2 + 18), -24), (w_/2 + 18, -24),
+                    (-(w_/2 + 18), 24), (w_/2 + 18, 24), (0, -68), (0, 68)]
+        for dx, dy in vertical + sideways:
+            cx_, cy = px + dx, py + dy
+            box = (cx_-w_/2, cy-13, cx_+w_/2, cy+13)
+            if cy-13 < top-12 or cy+13 > bottom+12 or box[0] < left-10 or box[2] > right+34:
+                continue
+            if any(not (box[2] < o[0] or box[0] > o[2] or box[3] < o[1] or box[1] > o[3]) for o in placed):
+                continue
+            placed.append(box)
+            d.rounded_rectangle(box, radius=12, fill=(9, 20, 38), outline=color, width=2)
+            txt(cx_, cy, text, 17, color, "mm")
+            return
+    for _label, key, color in series:
+        series_values = [float(item[key]) for item in graph_rows]
+        best_i = max(range(n), key=lambda i: series_values[i])
+        for i in sorted({best_i, n-1}):
+            put_label(pts[key][i][0], pts[key][i][1], f"{series_values[i]:.1f}".rstrip("0").rstrip("."), color, prefer_up=True)
+
+    # --- x axis: opponent tag + match number ---
+    for i, item in enumerate(graph_rows):
+        opp = str(item.get("opponent") or "").strip()
+        words = [w for w in opp.replace("-", " ").split() if w]
+        tag = ("".join(w[0] for w in words[:3]) if len(words) > 1 else opp[:3]).upper()
+        txt(xs[i], bottom+22, tag or "—", 16, muted, "mt")
+        txt(xs[i], bottom+44, f"M{i+1}", 14, dim, "mt")
+    txt(right, bottom+70, "OLDEST → NEWEST", 13, dim, "ra")
+
+    # --- summary: average, best match and recent form for each category ---
+    col_w = 1500/3
+    for idx, (label, key, color) in enumerate(series):
+        sv = [float(item[key]) for item in graph_rows]
+        x0 = 80 + idx*col_w
+        avg = sum(sv)/n
+        best_i = max(range(n), key=lambda i: sv[i])
+        txt(x0, 778, label, 22, color)
+        txt(x0, 806, f"{avg:.1f}", 54, white)
+        txt(x0+130, 826, "AVG / MATCH", 14, muted)
+        txt(x0+130, 846, f"BEST {sv[best_i]:.1f}  •  M{best_i+1}", 15, white)
+        if n >= 4:
+            recent_avg = sum(sv[-3:])/3
+            earlier_avg = sum(sv[:-3])/(n-3)
+            delta = recent_avg - earlier_avg
+            up = delta >= 0
+            tri_x, tri_y, tri_c = x0+305, 822, mint if up else red
+            tri = [(tri_x, tri_y-10), (tri_x-10, tri_y+8), (tri_x+10, tri_y+8)] if up else [(tri_x, tri_y+10), (tri_x-10, tri_y-8), (tri_x+10, tri_y-8)]
+            d.polygon(tri, fill=tri_c)
+            txt(tri_x+18, tri_y-12, f"{abs(delta):.1f}", 26, tri_c)
+            txt(tri_x+18, tri_y+16, "LAST 3 VS EARLIER", 12, muted)
+
+    out = io.BytesIO()
+    image.save(out, format="PNG", optimize=True)
+    out.seek(0)
+    return out
+
+
 def make_stats_image_design3(
     member, rows, avatar=None, fielding_points=0,
     catches_caught=0, catches_dropped=0,
@@ -1757,14 +1927,19 @@ def make_recent_matches_image(player_name, rows):
 
 
 class StatsSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, has_graph=False):
+        options = [
+            discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview", default=True),
+            discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="<:deep_stats:1564906372187947008>", value="deep"),
+            discord.SelectOption(label="Image", description="Show the generated stats image", emoji="💎", value="image"),
+        ]
+        if has_graph:  # Design 6 page 2
+            options.append(discord.SelectOption(
+                label="Form Graph", description="Batting, bowling and fielding form across matches",
+                emoji="📈", value="graph"))
         super().__init__(
             placeholder="Choose a stats view...", min_values=1, max_values=1,
-            options=[
-                discord.SelectOption(label="Overview", description="Show the quick stats overview", emoji="<:overview_:1564906690925830164>", value="overview", default=True),
-                discord.SelectOption(label="Deep Stats", description="Show extended stats and recent five match scores", emoji="<:deep_stats:1564906372187947008>", value="deep"),
-                discord.SelectOption(label="Image", description="Show the generated stats image", emoji="💎", value="image"),
-            ],
+            options=options,
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -1788,6 +1963,15 @@ class StatsSelect(discord.ui.Select):
         if selected == "deep":
             await interaction.response.edit_message(
                 content=None, embed=view.deep_embed, attachments=[], view=view
+            )
+            return
+
+        if selected == "graph" and view.graph_image:
+            image = io.BytesIO(view.graph_image)
+            image.seek(0)
+            file = discord.File(image, filename=f"player_{view.member_id}_form_graph.png")
+            await interaction.response.edit_message(
+                content=None, embed=None, attachments=[file], view=view
             )
             return
 
@@ -1837,8 +2021,9 @@ class StatsCompetitionSelect(discord.ui.Select):
 
 class StatsView(discord.ui.View):
     def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed,
-                 cog=None, ctx=None, has_last_gate=False):
+                 cog=None, ctx=None, has_last_gate=False, graph_image=None):
         super().__init__(timeout=600)
+        self.graph_image = graph_image
         self.requester_id = requester_id
         self.member_id = member_id
         self.overall_image = overall_image
@@ -1846,7 +2031,7 @@ class StatsView(discord.ui.View):
         self.deep_embed = deep_embed
         self.cog = cog
         self.ctx = ctx
-        self.add_item(StatsSelect())
+        self.add_item(StatsSelect(has_graph=bool(graph_image)))
         if has_last_gate and cog is not None and ctx is not None:
             self.add_item(StatsCompetitionSelect())
 
@@ -2315,6 +2500,31 @@ class Stats(commands.Cog):
             return 0, 0, 0
         caught, dropped = (int(row[0]), int(row[1])) if row else (0, 0)
         return caught, dropped, caught * 5 - dropped * 10
+
+    def get_form_graph_rows(self, guild_id, member, rows, competition="MAIN TOURNAMENT", limit=20):
+        """Per-match fantasy points (batting, bowling, fielding) for the Design 6 form graph, oldest first."""
+        fielding = {}
+        try:
+            for source_id, caught, dropped in self.db.execute(
+                """SELECT f.source_message_id, f.catches_taken, f.catches_dropped
+                   FROM player_match_fielding f
+                   JOIN stats_imports i ON i.source_message_id=f.source_message_id
+                   WHERE i.guild_id=? AND COALESCE(i.competition,'MAIN TOURNAMENT')=? AND f.user_id=?""",
+                (int(guild_id), competition, int(member.id)),
+            ).fetchall():
+                fielding[str(source_id)] = (int(caught or 0), int(dropped or 0))
+        except Exception:
+            pass
+        graph_rows = []
+        for row in rows[-limit:]:
+            bat, bowl, _total = fantasy_raw_points([row])
+            caught, dropped = fielding.get(str(row["source_message_id"]), (0, 0))
+            graph_rows.append({
+                "opponent": self._saved_opponent(row["source_message_id"], member.id),
+                "bat": bat, "bowl": bowl, "field": caught*5 - dropped*10,
+                "runs": row["runs"], "wickets": row["wickets"],
+            })
+        return graph_rows
 
     def get_batter_drops(self, guild_id, user_id):
         """How many of this batter's catches were dropped (batter_drop_lb.drops)."""
@@ -3104,6 +3314,16 @@ class Stats(commands.Cog):
         image.seek(0)
         overall_image = image.getvalue()
 
+        graph_image = None
+        if design == 6:
+            try:
+                graph_rows = self.get_form_graph_rows(ctx.guild.id, member, rows, competition)
+                graph_image = (await asyncio.to_thread(
+                    make_form_graph_image, member, graph_rows, avatar=avatar
+                )).getvalue()
+            except Exception as exc:  # page 1 still works without the graph
+                print(f"[stats] Could not build the form graph: {type(exc).__name__}: {exc}")
+
         t = totals(rows)
         batting_points, bowling_points, total_points = fantasy_raw_points(rows, t)
         total_points += fielding_points
@@ -3349,7 +3569,7 @@ class Stats(commands.Cog):
         ).fetchone() is not None
         view = StatsView(
             ctx.author.id, member.id, overall_image, embed, deep_embed,
-            cog=self, ctx=ctx, has_last_gate=has_last_gate,
+            cog=self, ctx=ctx, has_last_gate=has_last_gate, graph_image=graph_image,
         )
 
         # First response is a stats overview embed; the dropdown switches between Overview, Deep Stats, and Image.
