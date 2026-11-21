@@ -326,14 +326,14 @@ def _footer(page, data, number, total):
 
 # --------------------------------------------------------------------------- page 1: overview
 
-def _player_card(page, box, who, label, accent, avatar_img):
+def _player_card(page, box, who, label, accent, avatar_img, stripe_color=None):
     x1, y1, x2, y2 = box
     d = page.d
     if who is None:
         _text(d, ((x1+x2)/2, (y1+y2)/2 - 12), label, 22, DIM, "mm")
         _text(d, ((x1+x2)/2, (y1+y2)/2 + 18), "NOT ASSIGNED", 18, DIM, "mm")
         return
-    d.rounded_rectangle((x1, y1+20, x1+10, y2-20), radius=5, fill=accent)
+    d.rounded_rectangle((x1, y1+20, x1+10, y2-20), radius=5, fill=stripe_color or accent)
     badge = _round_image(avatar_img, 168, ring=accent, ring_w=6, initial=who["name"][:1])
     _paste(page.image, badge, (x1+26, y1+(y2-y1-badge.size[1])//2))
     tx = x1 + 242
@@ -406,8 +406,8 @@ def _page_overview(data, theme, avatars, number, total_pages):
         _text(d, (1088, 279), "NO RESULTS YET", 15, DIM, "lm")
 
     # captain / vice-captain ------------------------------------------------
-    _player_card(page, (50, 356, 790, 596), data.get("captain"), "CAPTAIN", accent, avatars.get(("p", (data.get("captain") or {}).get("uid"))))
-    _player_card(page, (810, 356, 1550, 596), data.get("vice"), "VICE-CAPTAIN", accent2, avatars.get(("p", (data.get("vice") or {}).get("uid"))))
+    _player_card(page, (50, 356, 790, 596), data.get("captain"), "CAPTAIN", accent, avatars.get(("p", (data.get("captain") or {}).get("uid"))), stripe_color=accent)
+    _player_card(page, (810, 356, 1550, 596), data.get("vice"), "VICE-CAPTAIN", accent2, avatars.get(("p", (data.get("vice") or {}).get("uid"))), stripe_color=accent)
 
     # team leaders ------------------------------------------------------------
     leaders = data.get("leaders", [])
