@@ -924,29 +924,58 @@ class TeamCommandsB:
         }
 
     @commands.command(name="testteaminfo")
-    @commands.guild_only()
     async def test_team_info(self, ctx, *, team_name: str):
-        """Premium image-based team profile; does not change +teaminfo."""
-        team, error = self._resolve_team(ctx.guild.id, team_name)
-        if error == "short":
-            await ctx.reply("Enter at least the first **4 letters** of the team name.", mention_author=False)
+        """Private bot-owner preview of team profiles across every connected server."""
+        # This experimental command is deliberately unavailable in every server.
+        if ctx.guild is not None or not isinstance(ctx.channel, discord.DMChannel):
             return
-        if error == "multiple":
-            names = "\n".join(f"• {row['name']}" for row in team[:20])
-            await ctx.reply("More than one team matches that prefix. Type more letters:\n" + names, mention_author=False)
-            return
-        if not team:
-            await ctx.reply("I couldn't find an approved team matching that name or prefix.", mention_author=False)
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("This command is restricted to the bot owner.")
             return
 
-        loading = await ctx.send("⏳ Building the team profile...")
+        query = self._key(team_name)
+        if len(query) < 4:
+            await ctx.send("Enter at least the first **4 letters** of the team name.")
+            return
+
+        rows = self.db.execute(
+            "SELECT * FROM registered_teams WHERE status='approved' ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        exact = [row for row in rows if self._key(row["name"]) == query]
+        matches = exact or [row for row in rows if self._key(row["name"]).startswith(query)]
+        # Only show teams belonging to servers the bot is currently connected to.
+        matches = [row for row in matches if self.bot.get_guild(int(row["guild_id"])) is not None]
+
+        if len(matches) > 1:
+            labels = []
+            for row in matches[:20]:
+                guild = self.bot.get_guild(int(row["guild_id"]))
+                labels.append(f"• **{row['name']}** — {guild.name}")
+            await ctx.send(
+                "More than one team matches. Please provide a longer team name:\n" + "\n".join(labels)
+            )
+            return
+        if not matches:
+            await ctx.send("I couldn't find an approved team with that name or prefix in any connected server.")
+            return
+
+        team = matches[0]
+        guild = self.bot.get_guild(int(team["guild_id"]))
+        loading = await ctx.send("⏳ Building the private team profile...")
         try:
-            rows = self.db.execute(
+            player_rows = self.db.execute(
                 "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at",
                 (team["id"],),
             ).fetchall()
-            ordered_ids = list(dict.fromkeys([int(team["captain_id"])] + [int(row["user_id"]) for row in rows]))
-            data = await self._team_profile_data(ctx, team, ordered_ids)
+            ordered_ids = list(dict.fromkeys(
+                [int(team["captain_id"])] + [int(row["user_id"]) for row in player_rows]
+            ))
+            # The image builder expects a context-like object with the target guild
+            # and requesting user; the command itself remains in the owner's DM.
+            profile_ctx = type("TeamProfileContext", (), {
+                "guild": guild, "author": ctx.author
+            })()
+            data = await self._team_profile_data(profile_ctx, team, ordered_ids)
             images = await asyncio.to_thread(render_team_pages, data)
             view = TestTeamInfoView(ctx, images)
             view.message = await loading.edit(
@@ -958,7 +987,7 @@ class TeamCommandsB:
                 await loading.delete()
             except Exception:
                 pass
-            await ctx.reply("I couldn't generate the team profile images. Check the bot logs.", mention_author=False)
+            await ctx.send("I couldn't generate the team profile images. Check the bot logs.")
 
     @commands.command(name="teaminfo")
     @commands.guild_only()
