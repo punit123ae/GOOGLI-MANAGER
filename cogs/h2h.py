@@ -1,23 +1,144 @@
-"""Player head-to-head for Googli Manager.
+"""Player head-to-head for Googli Manager (image version).
 
 +h2h @player            you vs that player
 +h2h @player1 @player2  two players against each other
 
-Page 1 compares their batting, bowling and fielding side by side. Page 2 lists the
-matches where they were on opposing teams. Page 2 relies on the team names saved when
-a match is imported (match_teams), so only matches imported after that was added count.
+Page 1 is an image comparing batting, bowling, fielding and fantasy points side by side.
+Page 2 is an image listing the matches where they were on opposing teams. The background
+is split in the two players' team colours (their Discord team role colour).
+
+Page 2 relies on the team names saved when a match is imported (match_teams), so only
+matches imported after that was added count. If drawing the images ever fails, the
+original embed version is sent instead, so +h2h keeps working.
+
+This file also holds ImagePager and the small helpers that +compareteams reuses.
 """
+
+import asyncio
+import io
 
 import discord
 from discord.ext import commands
 
 from .lb import _totals
+from .versus_image import BAT_COLOR, BOWL_COLOR, FIELD_COLOR, render_h2h_pages, stat_row
 
 BLUE = discord.Color.from_rgb(55, 150, 255)
 NAME_WIDTH = 9
 MAX_MATCHES_SHOWN = 8
 BETTER = "▲"
 
+
+# --------------------------------------------------------------------------- shared helpers
+
+class ImagePager(discord.ui.View):
+    """Flip between image pages (PNG bytes). Only the person who ran the command can use it."""
+
+    def __init__(self, ctx, pages, names, filename):
+        super().__init__(timeout=180)
+        self.owner_id = ctx.author.id
+        self.pages = list(pages)
+        self.filename = filename
+        self.index = 0
+        self.message = None
+
+        self.prev_button = discord.ui.Button(label="Previous", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+        self.counter = discord.ui.Button(label="1/1", style=discord.ButtonStyle.primary, disabled=True, row=0)
+        self.next_button = discord.ui.Button(label="Next", emoji="▶️", style=discord.ButtonStyle.secondary, row=0)
+        self.prev_button.callback = self._previous
+        self.counter.callback = self._noop
+        self.next_button.callback = self._next
+        for item in (self.prev_button, self.counter, self.next_button):
+            self.add_item(item)
+
+        self.name_buttons = []
+        for number, name in enumerate(names[:len(self.pages)]):
+            button = discord.ui.Button(label=name, style=discord.ButtonStyle.secondary, row=1)
+            button.callback = self._goto(number)
+            self.name_buttons.append(button)
+            self.add_item(button)
+        self._sync()
+
+    def _sync(self):
+        self.prev_button.disabled = self.index <= 0
+        self.next_button.disabled = self.index >= len(self.pages) - 1
+        self.counter.label = f"{self.index + 1}/{len(self.pages)}"
+        for number, button in enumerate(self.name_buttons):
+            button.style = discord.ButtonStyle.success if number == self.index else discord.ButtonStyle.secondary
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Only the person who ran this command can turn the pages.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _show(self, interaction, index):
+        self.index = max(0, min(index, len(self.pages) - 1))
+        self._sync()
+        file = discord.File(io.BytesIO(self.pages[self.index]), filename=self.filename)
+        await interaction.response.edit_message(attachments=[file], view=self)
+
+    async def _previous(self, interaction):
+        await self._show(interaction, self.index - 1)
+
+    async def _next(self, interaction):
+        await self._show(interaction, self.index + 1)
+
+    async def _noop(self, interaction):
+        await interaction.response.defer()
+
+    def _goto(self, number):
+        async def callback(interaction):
+            await self._show(interaction, number)
+        return callback
+
+    async def on_timeout(self):
+        self.clear_items()
+        self.pages = []
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
+
+
+def team_role_color(core, guild, team):
+    """The Discord role colour configured for a team (same rule as +teaminfo), or None."""
+    try:
+        setting = core.db.execute(
+            "SELECT role_id FROM team_role_settings WHERE team_id=? AND enabled=1",
+            (int(team["id"]),),
+        ).fetchone()
+        if setting:
+            role = guild.get_role(int(setting["role_id"]))
+            if role is not None and role.color.value:
+                return role.color.to_rgb()
+    except Exception:
+        pass
+    return None
+
+
+async def fetch_avatar(bot, member):
+    """Avatar PNG bytes (cached and retried by the team cog when it is loaded), or None."""
+    if member is None:
+        return None
+    core = bot.get_cog("TeamRegistration")
+    if core is not None and hasattr(core, "_fetch_avatar"):
+        try:
+            return await core._fetch_avatar(member)
+        except Exception:
+            pass
+    try:
+        return await asyncio.wait_for(
+            member.display_avatar.replace(size=256, static_format="png").read(), timeout=10
+        )
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- embed fallback helpers
 
 def _short(name, width=NAME_WIDTH):
     name = str(name)
@@ -107,6 +228,90 @@ def _fielding_rows(fa, fb):
     ]
 
 
+# --------------------------------------------------------------------------- image data
+
+def _overs_text(balls):
+    return f"{balls // 6}.{balls % 6}"
+
+
+def _efficiency(rec):
+    chances = rec[0] + rec[1]
+    return rec[0] / chances * 100 if chances else None
+
+
+def _best_figures(rows):
+    """(sortable number, "w/r" text) of the best spell, or (None, "—") if never bowled."""
+    spells = [r for r in rows if r["balls_bowled"] > 0]
+    if not spells:
+        return None, "—"
+    best = max(spells, key=lambda r: (r["wickets"], -r["runs_conceded"]))
+    # wickets first, fewer runs conceded breaks a tie
+    return best["wickets"] + 1 / (1 + best["runs_conceded"]), f"{best['wickets']}/{best['runs_conceded']}"
+
+
+def _image_groups(ra, rb, fa, fb):
+    """The three comparison cards for page 1: batting, bowling, fielding & fantasy."""
+    from .stats import fantasy_raw_points
+
+    ta, tb = _totals(ra), _totals(rb)
+
+    def hi(rows):
+        return max((r["runs"] for r in rows), default=0)
+
+    def fifties(rows):
+        return sum(1 for r in rows if 50 <= r["runs"] < 100)
+
+    def hundreds(rows):
+        return sum(1 for r in rows if r["runs"] >= 100)
+
+    def spells(rows):
+        return sum(1 for r in rows if r["balls_bowled"] > 0)
+
+    batting = [
+        stat_row("Innings", len(ra), len(rb), "int", None),
+        stat_row("Runs", ta["runs"], tb["runs"], "int", "high"),
+        stat_row("Average", ta["bat_avg"] if ra else None, tb["bat_avg"] if rb else None, "num2", "high"),
+        stat_row("Strike rate", ta["strike_rate"] if ta["balls_faced"] else None,
+                 tb["strike_rate"] if tb["balls_faced"] else None, "num1", "high"),
+        stat_row("Highest", hi(ra) if ra else None, hi(rb) if rb else None, "int", "high"),
+        stat_row("50s", fifties(ra), fifties(rb), "int", "high"),
+        stat_row("100s", hundreds(ra), hundreds(rb), "int", "high"),
+    ]
+    best_a, best_a_text = _best_figures(ra)
+    best_b, best_b_text = _best_figures(rb)
+    bowling = [
+        stat_row("Wickets", ta["wickets"], tb["wickets"], "int", "high"),
+        stat_row("Economy", ta["economy"] if ta["balls_bowled"] else None,
+                 tb["economy"] if tb["balls_bowled"] else None, "num2", "low"),
+        stat_row("Average", ta["bowl_avg"] if ta["wickets"] else None,
+                 tb["bowl_avg"] if tb["wickets"] else None, "num2", "low"),
+        stat_row("Strike rate", ta["bowl_sr"] if ta["wickets"] else None,
+                 tb["bowl_sr"] if tb["wickets"] else None, "num1", "low"),
+        stat_row("Overs", ta["balls_bowled"], tb["balls_bowled"], "text", None,
+                 _overs_text(ta["balls_bowled"]), _overs_text(tb["balls_bowled"])),
+        stat_row("Best figures", best_a, best_b, "text", "high", best_a_text, best_b_text),
+        stat_row("Spells", spells(ra), spells(rb), "int", None),
+    ]
+    bat_a, bowl_a, _ = fantasy_raw_points(ra)
+    bat_b, bowl_b, _ = fantasy_raw_points(rb)
+    field_a, field_b = fa[0] * 5 - fa[1] * 10, fb[0] * 5 - fb[1] * 10
+    fielding = [
+        stat_row("Caught", fa[0], fb[0], "int", "high"),
+        stat_row("Dropped", fa[1], fb[1], "int", "low"),
+        stat_row("Efficiency", _efficiency(fa), _efficiency(fb), "pct", "high"),
+        stat_row("Batting pts", bat_a, bat_b, "num1", "high"),
+        stat_row("Bowling pts", bowl_a, bowl_b, "num1", "high"),
+        stat_row("Fielding pts", field_a, field_b, "int", "high"),
+        stat_row("Total fantasy", bat_a + bowl_a + field_a, bat_b + bowl_b + field_b, "num1", "high"),
+    ]
+    totals = (bat_a + bowl_a + field_a, bat_b + bowl_b + field_b)
+    return [
+        {"title": "BATTING", "color": BAT_COLOR, "rows": batting},
+        {"title": "BOWLING", "color": BOWL_COLOR, "rows": bowling},
+        {"title": "FIELDING & FANTASY", "color": FIELD_COLOR, "rows": fielding},
+    ], totals
+
+
 class PlayerH2H(commands.Cog):
     """+h2h: compare two players."""
 
@@ -191,7 +396,20 @@ class PlayerH2H(commands.Cog):
             result.append((m[0], *m[2:8], a_team, *m[8:14], b_team))
         return result
 
-    # ------------------------------------------------------------------ embeds
+    def _team_of(self, guild, member):
+        """(team name, role colour) of a player's current team, or (None, None)."""
+        core = self.bot.get_cog("TeamRegistration")
+        if core is None:
+            return None, None
+        try:
+            team = core._membership(guild.id, member.id)
+        except Exception:
+            return None, None
+        if not team:
+            return None, None
+        return str(team["name"]), team_role_color(core, guild, team)
+
+    # ------------------------------------------------------------------ embeds (fallback)
     @staticmethod
     def _name(member):
         return discord.utils.escape_markdown(member.display_name)
@@ -274,17 +492,43 @@ class PlayerH2H(commands.Cog):
         embed.set_footer(text="Page 2 of 2 • newest first")
         return embed
 
-    # ------------------------------------------------------------------ command
-    @commands.command(name="h2h", aliases=["headtohead"])
-    @commands.guild_only()
-    async def h2h(self, ctx, first: discord.Member, second: discord.Member = None):
-        """Compare two players: +h2h @player  or  +h2h @player1 @player2."""
-        if second is None:
-            first, second = ctx.author, first
-        if first.id == second.id:
-            await ctx.reply("Pick two different players to compare.", mention_author=False)
-            return
+    # ------------------------------------------------------------------ images
+    async def _image_pages(self, guild, a, b):
+        """Gather everything and draw both pages. Returns a list of PNG bytes."""
+        ra, rb = self._match_rows(guild.id, a.id), self._match_rows(guild.id, b.id)
+        fa, fb = self._fielding(guild.id, a.id), self._fielding(guild.id, b.id)
+        groups, fantasy = _image_groups(ra, rb, fa, fb)
+        (a_team, a_color), (b_team, b_color) = self._team_of(guild, a), self._team_of(guild, b)
+        a_avatar, b_avatar = await asyncio.gather(fetch_avatar(self.bot, a), fetch_avatar(self.bot, b))
 
+        opposed = self._opposed_matches(guild.id, a.id, b.id)
+        a_more = b_more = 0
+        matches = []
+        for r in opposed:
+            (ts, a_runs, a_faced, a_conc, a_balls, a_wk, a_no, a_name_team,
+             b_runs, b_faced, b_conc, b_balls, b_wk, b_no, b_name_team) = r
+            a_more += int(a_runs) > int(b_runs)
+            b_more += int(b_runs) > int(a_runs)
+            matches.append({
+                "ts": ts, "a_runs": int(a_runs), "b_runs": int(b_runs),
+                "a_team": a_name_team, "b_team": b_name_team,
+                "a_bat": self._bat_text(int(a_runs), int(a_faced), int(a_no)),
+                "a_bowl": self._bowl_text(int(a_wk), int(a_conc), int(a_balls)),
+                "b_bat": self._bat_text(int(b_runs), int(b_faced), int(b_no)),
+                "b_bowl": self._bowl_text(int(b_wk), int(b_conc), int(b_balls)),
+            })
+
+        data = {
+            "a": {"name": a.display_name, "avatar": a_avatar, "team": a_team, "color": a_color,
+                  "mini": [("MATCHES", str(len(ra))), ("FANTASY", f"{fantasy[0]:.0f}")]},
+            "b": {"name": b.display_name, "avatar": b_avatar, "team": b_team, "color": b_color,
+                  "mini": [("MATCHES", str(len(rb))), ("FANTASY", f"{fantasy[1]:.0f}")]},
+            "groups": groups, "matches": matches, "match_total": len(matches),
+            "a_more": a_more, "b_more": b_more, "guild": guild.name,
+        }
+        return await asyncio.to_thread(render_h2h_pages, data)
+
+    async def _send_embeds(self, ctx, first, second):
         pages = [
             self._stats_page(ctx.guild, first, second),
             self._matches_page(ctx.guild, first, second),
@@ -301,6 +545,32 @@ class PlayerH2H(commands.Cog):
                 embed=pages[0], mention_author=False,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    # ------------------------------------------------------------------ command
+    @commands.command(name="h2h", aliases=["headtohead"])
+    @commands.guild_only()
+    async def h2h(self, ctx, first: discord.Member, second: discord.Member = None):
+        """Compare two players: +h2h @player  or  +h2h @player1 @player2."""
+        if second is None:
+            first, second = ctx.author, first
+        if first.id == second.id:
+            await ctx.reply("Pick two different players to compare.", mention_author=False)
+            return
+
+        loading = await ctx.reply("⏳ Building the head-to-head...", mention_author=False)
+        try:
+            pngs = await self._image_pages(ctx.guild, first, second)
+            view = ImagePager(ctx, pngs, ("Stats", "Matches"), "h2h.png")
+            view.message = await loading.edit(
+                content=None, attachments=[discord.File(io.BytesIO(pngs[0]), filename="h2h.png")], view=view,
+            )
+        except Exception as exc:
+            print(f"[h2h] image generation failed: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+            await self._send_embeds(ctx, first, second)
 
 
 async def setup(bot):
