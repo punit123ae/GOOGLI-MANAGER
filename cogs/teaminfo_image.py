@@ -271,31 +271,18 @@ class _Page:
 
 
 def _clean_mark(logo):
-    """Strip a flat logo background so only the artwork remains, then feather the edges.
+    """Keep the logo exactly as uploaded, but melt its edges into the page.
 
-    Logos that ship on a white/black/coloured square would otherwise show up as a grey
-    box behind the page. Transparent logos are left as they are.
+    A logo saved on a solid square would otherwise show a hard-edged box. A heavily
+    blurred mask fades every side smoothly into the background instead.
     """
     img = ImageOps.contain(logo.convert("RGBA"), (640, 640), method=Image.Resampling.LANCZOS)
     width, height = img.size
-    alpha = img.getchannel("A")
-    opaque = sum(1 for v in alpha.resize((32, 32)).getdata() if v > 240) / 1024
-    if opaque > 0.6:   # a solid backdrop: key its colour out everywhere (also enclosed areas)
-        rgb = img.convert("RGB")
-        corners = [rgb.getpixel(pt) for pt in ((0, 0), (width-1, 0), (0, height-1), (width-1, height-1))]
-        bg = tuple(sum(c[i] for c in corners) // 4 for i in range(3))
-        if max(max(c[i] for c in corners) - min(c[i] for c in corners) for i in range(3)) < 50:
-            diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, bg))
-            r, g, b = diff.split()
-            distance = ImageChops.lighter(ImageChops.lighter(r, g), b)
-            mask = distance.point(lambda v: 0 if v < 38 else (255 if v > 70 else int((v-38)*255/32)))
-            mask = mask.filter(ImageFilter.GaussianBlur(0.8))
-            img.putalpha(ImageChops.multiply(alpha, mask))
-    # feather the outer edge so no straight border can survive
+    inset = int(min(width, height) * 0.12)
     fade = Image.new("L", img.size, 0)
-    inset = int(min(width, height) * 0.04)
-    ImageDraw.Draw(fade).ellipse((inset, inset, width-inset, height-inset), fill=255)
-    fade = fade.filter(ImageFilter.GaussianBlur(min(width, height) * 0.035))
+    ImageDraw.Draw(fade).rounded_rectangle(
+        (inset, inset, width-inset, height-inset), radius=int(min(width, height) * 0.3), fill=255)
+    fade = fade.filter(ImageFilter.GaussianBlur(min(width, height) * 0.09))
     img.putalpha(ImageChops.multiply(img.getchannel("A"), fade))
     return img
 
