@@ -1050,7 +1050,7 @@ class TeamCommandsB:
                 await asyncio.sleep(0.25 * (index + 1))
         return None
 
-    async def _team_profile_data(self, ctx, team, ordered_ids):
+    async def _team_profile_data(self, ctx, team, ordered_ids, fetch_avatars=True):
         """Everything the premium team-profile images need, gathered from the bot's own data."""
         from .lb import _totals
         from .stats import fantasy_raw_points
@@ -1108,10 +1108,14 @@ class TeamCommandsB:
             f"logo_url_present={bool(team['logo_url'])} url_host={urlparse(str(team['logo_url'] or '')).netloc!r}",
             flush=True,
         )
-        avatar_list, logo_bytes = await asyncio.gather(
-            asyncio.gather(*(avatar_of(uid) for uid in member_ids)),
-            self._team_logo_bytes(ctx, team),
-        )
+        if fetch_avatars:
+            avatar_list, logo_bytes = await asyncio.gather(
+                asyncio.gather(*(avatar_of(uid) for uid in member_ids)),
+                self._team_logo_bytes(ctx, team),
+            )
+        else:   # callers that only need a few avatars fetch those themselves
+            logo_bytes = await self._team_logo_bytes(ctx, team)
+            avatar_list = [None] * len(member_ids)
         print(
             f"[teaminfo][logo:DATA] Downloader returned "
             f"{len(logo_bytes) if logo_bytes else 0} bytes",
@@ -1213,6 +1217,12 @@ class TeamCommandsB:
             "players": players, "captain": by_uid.get(captain_id), "vice": by_uid.get(vice_id) if vice_id else None,
             "roster_size": len(ordered_ids), "roster_max": self._max_players(guild.id),
             "standing": standing, "sections": sections, "leaders": leaders,
+            "totals": {
+                "runs": tt["runs"] if tt else None, "bat_avg": tt["bat_avg"] if tt else None,
+                "strike_rate": tt["strike_rate"] if tt else None, "wickets": tt["wickets"] if tt else None,
+                "economy": tt["economy"] if balls else None,
+                "catches": catches, "drops": drops, "eff": efficiency if catches + drops else None,
+            },
         }
 
     @commands.command(name="testteaminfo")
