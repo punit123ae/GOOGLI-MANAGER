@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import commands, tasks
 
-from .utility import owner_or_whitelisted
+from .utility import is_bot_owner_id, owner_or_whitelisted
 
 HANDCRICKET_BOT_ID = 753191385296928808
 BOT_OWNER_ID = 1014568928682459198
@@ -411,7 +411,7 @@ class CommitConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -1357,7 +1357,7 @@ class BatterFieldingDropStats(commands.Cog):
     @commands.group(name="previewlb", invoke_without_command=True)
     @commands.guild_only()
     async def previewlb(self, ctx: commands.Context, backup_no: int = None):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         if backup_no is not None:
             await self._send_backup(ctx, backup_no)
