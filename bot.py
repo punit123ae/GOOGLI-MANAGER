@@ -59,6 +59,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.reservenumbering",
             "cogs.batcatches",
             "cogs.moderation",
+            "cogs.compareteams",
         ):
             await self.load_extension(extension)
 
