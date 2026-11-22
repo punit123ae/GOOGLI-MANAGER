@@ -15,6 +15,7 @@ from discord.ext import commands
 
 from . import versus_cards as vi
 from .lb import _totals
+from .utility import is_bot_owner_id
 
 BOT_OWNER_ID = 1014568928682459198
 
@@ -78,7 +79,7 @@ class TestVersus(commands.Cog):
         self.bot = bot
 
     async def _allowed(self, ctx, name):
-        if int(ctx.author.id) == BOT_OWNER_ID or await self.bot.is_owner(ctx.author):
+        if is_bot_owner_id(self.bot, ctx.author.id) or await self.bot.is_owner(ctx.author):
             return True
         try:
             from .utility import owner_or_whitelisted
