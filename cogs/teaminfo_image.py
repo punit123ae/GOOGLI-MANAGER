@@ -261,6 +261,7 @@ class _Page:
         logo = self.theme.get("logo")
         if logo is None:
             return
+        print("[teaminfo] watermark: feathered", flush=True)
         size = 560
         src = ImageOps.contain(_clean_mark(logo), (size, size), method=Image.Resampling.LANCZOS)
         alpha = src.getchannel("A").point(lambda v: int(v*0.13))
@@ -278,11 +279,14 @@ def _clean_mark(logo):
     """
     img = ImageOps.contain(logo.convert("RGBA"), (640, 640), method=Image.Resampling.LANCZOS)
     width, height = img.size
-    inset = int(min(width, height) * 0.12)
+    side = min(width, height)
+    inset = int(side * 0.2)
     fade = Image.new("L", img.size, 0)
-    ImageDraw.Draw(fade).rounded_rectangle(
-        (inset, inset, width-inset, height-inset), radius=int(min(width, height) * 0.3), fill=255)
-    fade = fade.filter(ImageFilter.GaussianBlur(min(width, height) * 0.09))
+    # a soft round spot: fully transparent long before the logo's own edges, so no box shows
+    ImageDraw.Draw(fade).ellipse((inset, inset, width-inset, height-inset), fill=255)
+    fade = fade.filter(ImageFilter.GaussianBlur(side * 0.1))
+    fade = fade.point(lambda v: min(255, int(v * 1.25)) if v < 204 else 255)
+    ImageDraw.Draw(fade).rectangle((0, 0, width-1, height-1), outline=0, width=max(2, int(side * 0.03)))
     img.putalpha(ImageChops.multiply(img.getchannel("A"), fade))
     return img
 
