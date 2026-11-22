@@ -28,6 +28,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from .utility import is_bot_owner_id
+
 BOT_OWNER_ID = 1014568928682459198
 MAX_LINE_LENGTH = 300
 MENU_TIMEOUT_SECONDS = 300
@@ -357,7 +359,7 @@ class FielderLines(commands.Cog):
     @commands.guild_only()
     async def reset_celeb(self, ctx, user: discord.User = None):
         """Bot owner only: remove everyone's celebration lines, or one user's."""
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             await ctx.reply("❌ Only the bot owner can use this command.", mention_author=False)
             return
         if user is None:
