@@ -13,7 +13,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from .utility import owner_or_whitelisted
+from .utility import is_bot_owner_id, owner_or_whitelisted
 
 OWNER_ID = 1014568928682459198
 TICK = "✅"
@@ -218,7 +218,7 @@ class LiveDraws(commands.Cog):
         )
 
     def _is_bot_owner(self, ctx):
-        return ctx.author.id == OWNER_ID
+        return is_bot_owner_id(self.bot, ctx.author.id)
 
     def can_cancel_live_draw(self, ctx):
         return (
