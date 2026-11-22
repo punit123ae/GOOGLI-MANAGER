@@ -25,6 +25,8 @@ from urllib.parse import urlparse
 import aiohttp
 import discord
 from discord.ext import commands
+
+from .utility import is_bot_owner_id
 from discord.http import Route
 
 try:  # Pillow is optional but strongly recommended (resizes/converts logos).
@@ -242,7 +244,7 @@ class TeamEmojis(commands.Cog):
                 return True
         except Exception:  # is_owner can raise if application info is unavailable
             pass
-        return user.id in EXTRA_BOT_OWNER_IDS
+        return is_bot_owner_id(self.bot, user.id) or user.id in EXTRA_BOT_OWNER_IDS
 
     # -- logos -------------------------------------------------------------
 
