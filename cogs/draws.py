@@ -277,8 +277,9 @@ class LiveDraws(commands.Cog):
              labels.index(normalized_label), ctx.author.id),
         )
         self.db.commit()
+        setting_label = discord.utils.escape_markdown(setting["setting_name"])
         await ctx.send(
-            f"Secret assignment saved for **{discord.utils.escape_markdown(setting["setting_name"])}**. "
+            f"Secret assignment saved for **{setting_label}**. "
             f"The team will be placed in Group {normalized_label}."
         )
 
