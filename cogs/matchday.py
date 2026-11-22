@@ -572,6 +572,7 @@ class MatchDay(commands.Cog):
                     (announcement.id, match_id),
                 )
                 self.db.commit()
+                self.bot.dispatch("match_announced", ctx.guild, channel, team_a, team_b, announcement)
 
                 # Lock the stadium channel after the force announcement.
                 lock_overwrite = channel.overwrites_for(ctx.guild.default_role)
@@ -942,6 +943,7 @@ class MatchDay(commands.Cog):
                 allowed_mentions=scheduling.role_mentions(team_a, team_b))
             announcement_id = announcement.id
             self.db.execute("UPDATE matches SET announcement_message_id = ? WHERE id = ?", (announcement_id, match_id))
+            self.bot.dispatch("match_announced", guild, channel, team_a, team_b, announcement)
         except discord.HTTPException as exc:
             self.db.execute("UPDATE matches SET error = ? WHERE id = ?", (f"Announcement failed: {exc}", match_id))
         self.db.commit()

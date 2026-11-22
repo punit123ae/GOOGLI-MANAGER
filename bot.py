@@ -105,6 +105,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.batcatches",
             "cogs.moderation",
             "cogs.compareteams",
+            "cogs.matchpreview",
             "cogs.testversus",
         ):
             await self.load_extension(extension)

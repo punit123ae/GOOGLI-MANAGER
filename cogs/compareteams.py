@@ -15,7 +15,6 @@ counted for the team a player was on when it was played (transfers respected).
 """
 
 import asyncio
-import contextlib
 import io
 import re
 import sqlite3
@@ -39,29 +38,6 @@ USAGE = (
     "Or `+compareteams Team B` to compare your own team with Team B.\n"
     "Team names work like `+teaminfo`: at least the first 4 letters."
 )
-
-
-@contextlib.contextmanager
-def _transfers_cached(core):
-    """+teaminfo's team lookups ask the database for a player's transfers once per match row.
-    Remember the answers for the duration of one (synchronous) calculation: far fewer queries."""
-    if "_team_transfer_history" in vars(core):      # already inside one: share its answers
-        yield
-        return
-    cache = {}
-    original = core._team_transfer_history
-
-    def cached(guild_id, user_id):
-        key = (guild_id, user_id)
-        if key not in cache:
-            cache[key] = original(guild_id, user_id)
-        return cache[key]
-
-    core._team_transfer_history = cached
-    try:
-        yield
-    finally:
-        del core._team_transfer_history          # back to the normal method
 
 
 _LOGO_CACHE = {}
@@ -88,28 +64,78 @@ def _innings_best(rows):
     return max(per_match.values(), default=0)
 
 
-def win_probability(a_record, b_record, a_wins, b_wins, ties):
-    """(chance A wins, chance B wins, number of past meetings) when the two teams face each other.
+def _smooth(wins, played):
+    """Win rate pulled towards 50% so one or two matches can't mean 0% or 100%."""
+    return (wins + 2) / (played + 4) if played else 0.5
 
-    Each team's win rate (smoothed so one match can't mean 0% or 100%) is combined with the
-    Log5 formula, then blended with how their meetings actually went: the more meetings, the more
-    weight they get. Never shows 0% or 100%.
+
+def _log5(x, y):
+    """Chance that a side with strength x beats a side with strength y (both 0..1)."""
+    top = x * (1 - y)
+    bottom = top + y * (1 - x)
+    return top / bottom if bottom else 0.5
+
+
+def predict(a, b, meetings):
+    """Win chance when side a faces side b.
+
+    Four things are weighed, each as "chance A wins" (None when there is no data for it):
+      record    both teams' win rates (Log5)
+      form      results of each team's last 5 matches (Log5)
+      strength  runs scored per over minus runs conceded per over
+      meetings  how their previous matches against each other went
+    The first three are blended 45 / 20 / 15 (missing ones drop out); the meetings then take
+    up to 60% of the result, the more they have met the more. Never below 5% or above 95%.
+    Returns {"a", "b", "met", "known", "factors": [(label, chance_a, a_text, b_text)]}.
     """
-    def rate(record):
-        played, wins = record
-        if not played:
-            return 0.5
-        return (wins + 2) / (played + 4)
+    import math
 
-    ra, rb = rate(a_record), rate(b_record)
-    base = ra * (1 - rb) / (ra * (1 - rb) + rb * (1 - ra))
-    met = a_wins + b_wins + ties
+    pa, wa, _ra, _pta = CompareTeams._record(a)
+    pb, wb, _rb, _ptb = CompareTeams._record(b)
+    record = _log5(_smooth(wa or 0, pa or 0), _smooth(wb or 0, pb or 0)) if (pa or pb) else None
+
+    def last5(side):
+        history = ((side.get("standing") or {}).get("history") or [])[-5:]
+        return history.count("W"), len(history)
+
+    (fwa, fna), (fwb, fnb) = last5(a), last5(b)
+    form = _log5(_smooth(fwa, fna), _smooth(fwb, fnb)) if (fna or fnb) else None
+
+    def net(side):
+        t = side["totals"]
+        if not side.get("has_rows") or not t.get("balls_faced") or not t.get("balls_bowled"):
+            return None
+        return t["strike_rate"] * 0.06 - t["economy"]
+
+    na, nb = net(a), net(b)
+    strength = 1 / (1 + math.exp(-(na - nb) / 3)) if (na is not None and nb is not None) else None
+
+    parts = [(0.45, record), (0.20, form), (0.15, strength)]
+    live = [(w, v) for w, v in parts if v is not None]
+    base = sum(w * v for w, v in live) / sum(w for w, _ in live) if live else 0.5
+
+    a_w = sum(1 for m in meetings if m["a"] > m["b"])
+    b_w = sum(1 for m in meetings if m["b"] > m["a"])
+    met = len(meetings)
+    h2h = None
     if met:
-        h2h = (a_wins + ties / 2 + 1) / (met + 2)
-        weight = met / (met + 4)
+        h2h = (a_w + (met - a_w - b_w) / 2 + 1) / (met + 2)
+        weight = 0.6 * met / (met + 4)
         base = base * (1 - weight) + h2h * weight
     base = min(0.95, max(0.05, base))
-    return base, 1 - base, met
+
+    def wl(played, wins):
+        return f"{wins}-{played - wins}" if played else "—"
+
+    factors = [
+        ("RECORD", record, wl(pa or 0, wa or 0), wl(pb or 0, wb or 0)),
+        ("LAST 5", form, f"{fwa}/{fna} W" if fna else "—", f"{fwb}/{fnb} W" if fnb else "—"),
+        ("HEAD TO HEAD", h2h, str(a_w) if met else "—", str(b_w) if met else "—"),
+        ("RUN STRENGTH", strength, f"{na:+.1f}" if na is not None else "—",
+         f"{nb:+.1f}" if nb is not None else "—"),
+    ]
+    return {"a": base, "b": 1 - base, "met": met,
+            "known": bool(live or met), "factors": factors}
 
 
 class CompareTeams(commands.Cog):
@@ -173,13 +199,13 @@ class CompareTeams(commands.Cog):
         meetings.sort(key=lambda m: -m["ts"])
         return meetings[:limit] if limit else meetings
 
-    def _guild_stat_rows(self, guild_id):
-        """Batting/bowling rows of EVERY team, read from the database once (kept for 2 minutes).
+    def _guild_rows(self, guild_id):
+        """Batting/bowling rows and fielding totals of EVERY team, read from the database once (kept 2 minutes).
 
         Same rule as +teaminfo (the team a player was on when the match was played), but one
         pass over the stats for the whole server instead of one full pass per team, which is
         what used to peg the CPU, above all for +ct overall.
-        Returns {team name (casefolded): {user id: [rows]}}.
+        Returns {"stats": {team name (casefolded): {user id: [rows]}}, "fielding": {team: {user id: (caught, dropped)}}}.
         """
         hit = self._index_cache.get(int(guild_id))
         if hit and time.monotonic() - hit[0] < 120:
@@ -215,7 +241,24 @@ class CompareTeams(commands.Cog):
                 current.setdefault(int(r["user_id"]), str(r["name"]))
         except sqlite3.Error:
             pass
-        index = {}
+        def team_of(uid, mid, imported_at, saved):
+            """Name of the team the player was on when the match was played (None if unknown)."""
+            history = transfers.get(uid)
+            if not history:
+                name = str(saved) if saved else None
+            else:
+                match_at = core._team_match_time(mid, imported_at)
+                name = history[0][0]
+                for _old, new, when in history:
+                    if when is None:
+                        continue
+                    if match_at >= when:
+                        name = new
+                    else:
+                        break
+            return name or current.get(uid)
+
+        stats, fielding = {}, {}
         try:
             rows = db.execute(
                 """SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
@@ -233,31 +276,56 @@ class CompareTeams(commands.Cog):
             rows = []
         for row in rows:
             uid = int(row["user_id"])
-            history = transfers.get(uid)
-            if not history:
-                team_name = str(row["team_name"]) if row["team_name"] else None
-            else:
-                match_at = core._team_match_time(row["source_message_id"], row["imported_at"])
-                team_name = history[0][0]
-                for _old, new, when in history:
-                    if when is None:
-                        continue
-                    if match_at >= when:
-                        team_name = new
-                    else:
-                        break
-            if not team_name:
-                team_name = current.get(uid)
-            if not team_name:
+            name = team_of(uid, row["source_message_id"], row["imported_at"], row["team_name"])
+            if not name:
                 continue
-            index.setdefault(team_name.casefold(), {}).setdefault(uid, []).append({
+            stats.setdefault(name.casefold(), {}).setdefault(uid, []).append({
                 "mid": int(row["source_message_id"]),
                 "runs": int(row["runs"]), "balls_faced": int(row["balls_faced"]),
                 "runs_conceded": int(row["runs_conceded"]), "balls_bowled": int(row["balls_bowled"]),
                 "wickets": int(row["wickets"]), "not_out": int(row["not_out"]),
             })
-        self._index_cache[int(guild_id)] = (time.monotonic(), index)
-        return index
+
+        # Fielding: the same rule as +teaminfo (match rows by team at the time; players who were
+        # never transferred use their live totals).
+        try:
+            rows = db.execute(
+                """SELECT f.source_message_id, f.user_id, f.catches_taken, f.catches_dropped,
+                          i.imported_at, mt.team_name
+                   FROM player_match_fielding f
+                   JOIN stats_imports i ON i.source_message_id=f.source_message_id
+                   LEFT JOIN match_teams mt
+                     ON mt.source_message_id=f.source_message_id AND mt.user_id=f.user_id
+                   WHERE i.guild_id=?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT')='MAIN TOURNAMENT'
+                     AND (f.catches_taken>0 OR f.catches_dropped>0)""",
+                (int(guild_id),),
+            ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            uid = int(row["user_id"])
+            name = team_of(uid, row["source_message_id"], row["imported_at"], row["team_name"])
+            if not name:
+                continue
+            per_team = fielding.setdefault(name.casefold(), {})
+            caught, dropped = per_team.get(uid, (0, 0))
+            per_team[uid] = (caught + int(row["catches_taken"]), dropped + int(row["catches_dropped"]))
+        try:
+            for r in db.execute(
+                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=?",
+                (int(guild_id),),
+            ).fetchall():
+                uid = int(r["user_id"])
+                if uid in current and uid not in transfers:
+                    fielding.setdefault(current[uid].casefold(), {})[uid] = (
+                        int(r["catches_caught"]), int(r["catches_dropped"]))
+        except Exception:
+            pass
+
+        result = {"stats": stats, "fielding": fielding}
+        self._index_cache[int(guild_id)] = (time.monotonic(), result)
+        return result
 
     async def _logo_for(self, ctx, team):
         """The team logo as a small PNG (the big saved copy is decoded once, then remembered)."""
@@ -291,7 +359,7 @@ class CompareTeams(commands.Cog):
         name = self.core._username(guild, int(uid))
         return f"Player {str(uid)[-4:]}" if name == str(uid) else name
 
-    async def _side(self, ctx, team):
+    async def _side(self, ctx, team, avatars=True):
         """Everything one side of the comparison needs."""
         from .lb import _totals
         from .stats import fantasy_raw_points
@@ -317,9 +385,9 @@ class CompareTeams(commands.Cog):
         except sqlite3.Error:
             total_ids = ordered
 
-        stat_rows = self._guild_stat_rows(guild.id).get(str(team["name"]).casefold(), {})
-        with _transfers_cached(core):
-            fielding = core._team_fielding_totals(guild.id, team)
+        index = self._guild_rows(guild.id)
+        key = str(team["name"]).casefold()
+        stat_rows, fielding = index["stats"].get(key, {}), index["fielding"].get(key, {})
 
         team_rows = [r for uid in total_ids for r in stat_rows.get(uid, [])]
         totals = _totals(team_rows)
@@ -365,7 +433,8 @@ class CompareTeams(commands.Cog):
             return await fetch_avatar(self.bot, member)
 
         logo, *avatars = await asyncio.gather(
-            logo_task, *(avatar_of(picks[key]) for key in ("runs", "wickets", "catches"))
+            logo_task, *(avatar_of(picks[key]) if avatars else asyncio.sleep(0, None)
+                         for key in ("runs", "wickets", "catches"))
         )
         avatar_by_key = dict(zip(("runs", "wickets", "catches"), avatars))
 
@@ -511,9 +580,9 @@ class CompareTeams(commands.Cog):
         except sqlite3.Error:
             pass
         ids = list(dict.fromkeys(ids))
-        stat_rows = self._guild_stat_rows(guild.id).get(str(team["name"]).casefold(), {})
-        with _transfers_cached(core):
-            fielding = core._team_fielding_totals(guild.id, team)
+        index = self._guild_rows(guild.id)
+        key = str(team["name"]).casefold()
+        stat_rows, fielding = index["stats"].get(key, {}), index["fielding"].get(key, {})
         rows = [r for uid in ids for r in stat_rows.get(uid, [])]
         fantasy = sum(
             (fantasy_raw_points(stat_rows[uid])[2] if stat_rows.get(uid) else 0)
@@ -551,12 +620,11 @@ class CompareTeams(commands.Cog):
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved'", (int(guild.id),)
         ).fetchall()
         numbers = []
-        with _transfers_cached(self.core):
-            for t in teams:
-                if int(t["id"]) == int(own_team["id"]):
-                    continue
-                numbers.append(self._numbers_for(guild, t))
-                await asyncio.sleep(0)        # let the bot answer other things between teams
+        for t in teams:
+            if int(t["id"]) == int(own_team["id"]):
+                continue
+            numbers.append(self._numbers_for(guild, t))
+            await asyncio.sleep(0)            # let the bot answer other things between teams
         numbers = [x for x in numbers if x["rows"]]
         n = len(numbers)
         if n == 0:
@@ -684,22 +752,14 @@ class CompareTeams(commands.Cog):
         try:
             a, b = await self._side(ctx, first), await self._side(ctx, second)
             meetings = self._meetings(ctx.guild.id, a["name"], b["name"])
-            pa, wa, _ra, _pta = self._record(a)
-            pb, wb, _rb, _ptb = self._record(b)
-            chance_a, chance_b, met = win_probability(
-                (pa or 0, wa or 0), (pb or 0, wb or 0),
-                sum(1 for m in meetings if m["a"] > m["b"]),
-                sum(1 for m in meetings if m["b"] > m["a"]),
-                sum(1 for m in meetings if m["a"] == m["b"]),
-            )
+            prediction = predict(a, b, meetings)
             data = {
                 "a": {k: a[k] for k in ("name", "logo", "color", "standing", "roster")},
                 "b": {k: b[k] for k in ("name", "logo", "color", "standing", "roster")},
                 "groups": self._groups(a, b),
                 "leaders": self._leaders(ctx.guild, a, b),
                 "meetings": meetings[:4],
-                "win_prob": {"a": chance_a, "b": chance_b, "met": met,
-                             "known": bool(pa or pb or met)},
+                "win_prob": prediction,
                 "guild": ctx.guild.name,
             }
             png = await render_png(render_compare_page, data, 0)

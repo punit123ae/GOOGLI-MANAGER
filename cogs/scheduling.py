@@ -601,6 +601,8 @@ class Scheduling(commands.Cog):
                     (message.id, match_id)
                 )
                 self.cog.db.commit()
+                interaction.client.dispatch(          # the match preview card listens for this
+                    "match_announced", self.guild, self.channel, self.team_a, self.team_b, message)
             except discord.HTTPException as exc:
                 self.cog.db.execute("UPDATE matches SET error = ? WHERE id = ?", (f"Announcement failed: {exc}", match_id))
                 self.cog.db.commit()
