@@ -115,11 +115,17 @@ _TITLE_COLOR = {
 
 
 class _FdDesignView(discord.ui.View):
-    """Flip between the two fielding image designs (owner only)."""
+    """Flip between the two fielding image designs (invoker only)."""
 
     def __init__(self, ctx, pngs):
         super().__init__(timeout=300)
         self.ctx, self.pngs, self.index, self.message = ctx, pngs, 0, None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.ctx.author.id:
+            return True
+        await interaction.response.send_message("Only the person who ran the command can switch designs.", ephemeral=True)
+        return False
 
     async def _show(self, interaction, index):
         self.index = index
@@ -1038,25 +1044,32 @@ class CatchTracker(commands.Cog):
 
     @commands.command(name="testfdstats")
     async def test_fdstats(self, ctx, *, who: str = None):
-        """Owner-only DM preview: image version of +fdstats. Usage: +testfdstats [user id or name]"""
-        if ctx.guild is not None:
+        """Image preview of +fdstats (bot owner or a whitelisted role). Usage: +testfdstats [@user / id / name]"""
+        from .utility import owner_or_whitelisted
+        if not (int(ctx.author.id) == BOT_OWNER_ID or await self.bot.is_owner(ctx.author)
+                or (ctx.guild is not None and await owner_or_whitelisted(ctx, "testfdstats"))):
+            await ctx.send("❌ Only the bot owner or a role whitelisted for `+testfdstats` can use this command.")
             return
-        if not await self.bot.is_owner(ctx.author):
-            await ctx.send("This command is restricted to the bot owner.")
-            return
-        needle = (who or str(ctx.author.id)).strip().strip("<@!>").casefold()
+        needle = (who or "").strip().strip("<@!>").casefold()
+        guilds = [ctx.guild] if ctx.guild is not None else list(self.bot.guilds)
         found = None
-        for guild in self.bot.guilds:
-            member = guild.get_member(int(needle)) if needle.isdigit() else next(
-                (m for m in guild.members
-                 if needle in (m.name.casefold(), m.display_name.casefold())), None)
+        for guild in guilds:
+            if ctx.message.mentions and ctx.guild is not None:
+                member = guild.get_member(ctx.message.mentions[0].id)
+            elif not needle:
+                member = guild.get_member(ctx.author.id)
+            elif needle.isdigit():
+                member = guild.get_member(int(needle))
+            else:
+                member = next((m for m in guild.members
+                               if needle in (m.name.casefold(), m.display_name.casefold())), None)
             if member is None:
                 continue
             chances = sum(self._get_stats(guild.id, member.id))
             if found is None or chances > found[2]:
                 found = (guild, member, chances)
         if found is None:
-            await ctx.send("I couldn't find that user in any server I share with them.")
+            await ctx.send("I couldn't find that user.")
             return
         loading = await ctx.send("⏳ Building the fielding image...")
         try:
