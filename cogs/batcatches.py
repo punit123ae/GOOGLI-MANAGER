@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import commands
 
+from .utility import is_bot_owner_id
+
 from .batfds import (
     BOT_OWNER_ID,
     HANDCRICKET_BOT_ID,
@@ -240,7 +242,7 @@ class BatterCatches(commands.Cog):
         Reads every +starttracking channel for the last <hours> hours (max 2880).
         Without "apply" nothing is written. Safe to run repeatedly.
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         if competition.lower() in ("apply", "confirm", "preview"):
             mode, competition = competition, "MAIN"
