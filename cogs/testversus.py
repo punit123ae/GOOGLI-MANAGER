@@ -13,7 +13,7 @@ import time
 import discord
 from discord.ext import commands
 
-from . import versus_image as vi
+from . import versus_cards as vi
 from .lb import _totals
 
 BOT_OWNER_ID = 1014568928682459198
