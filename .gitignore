@@ -18,3 +18,4 @@ env/
 *.log
 .vscode/
 .idea/
+.command_sync_hash

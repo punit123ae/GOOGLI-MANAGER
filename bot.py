@@ -1,5 +1,9 @@
+import hashlib
+import json
 import os
 import sqlite3
+import time
+import traceback
 from pathlib import Path
 
 import discord
@@ -24,7 +28,49 @@ intents.message_content = True
 intents.reactions = True
 
 
+SYNC_HASH_FILE = BASE_DIR / ".command_sync_hash"
+
+
+def _command_signature(tree, guild):
+    """A short fingerprint of every slash command's name, description and options."""
+    parts = []
+    for command in tree.get_commands(guild=guild):
+        nodes = [command] + (list(command.walk_commands()) if hasattr(command, "walk_commands") else [])
+        for node in nodes:
+            options = [(p.name, p.description, str(p.type), p.required) for p in getattr(node, "parameters", [])]
+            parts.append((node.qualified_name, getattr(node, "description", ""), options))
+    return hashlib.sha256(json.dumps(sorted(parts, key=str), default=str).encode()).hexdigest()
+
+
 class GoogIManagerBot(commands.Bot):
+    async def _sync_slash_commands(self, guild):
+        """Sync slash commands only when they changed, so restarts don't hit Discord's rate limits."""
+        try:
+            signature = _command_signature(self.tree, guild)
+        except Exception as exc:
+            print(f"Could not fingerprint slash commands ({type(exc).__name__}); syncing anyway.")
+            signature = None
+        try:
+            with open(SYNC_HASH_FILE, encoding="utf-8") as handle:
+                saved = handle.read().strip()
+        except OSError:
+            saved = None
+        if signature is not None and signature == saved:
+            print("Slash commands unchanged; skipping sync.")
+            return
+        try:
+            await self.tree.sync(guild=guild)
+        except discord.HTTPException as exc:
+            print(f"Slash command sync failed ({exc.status}); the bot keeps running with the old commands.")
+            return
+        if signature is not None:
+            try:
+                with open(SYNC_HASH_FILE, "w", encoding="utf-8") as handle:
+                    handle.write(signature)
+            except OSError:
+                pass
+        print("Slash commands synced to the configured server.")
+
     async def setup_hook(self):
         # Load each feature as a separate module.
         for extension in (
@@ -51,7 +97,6 @@ class GoogIManagerBot(commands.Bot):
             "cogs.help_menu",
             "cogs.fielding",
             "cogs.points table",
-            "cogs.batfds",
             "cogs.fielderlines",
             "cogs.team_emojis",
             "cogs.h2h",
@@ -66,8 +111,7 @@ class GoogIManagerBot(commands.Bot):
 
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        print("Slash commands synced to the configured server.")
+        await self._sync_slash_commands(guild)
 
 
 bot = GoogIManagerBot(
@@ -200,4 +244,21 @@ async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 
-bot.run(TOKEN)
+
+def _run_forever_guarded():
+    """Start the bot; if it dies on startup, wait before exiting so the panel's auto-restart
+    doesn't hammer Discord with logins (that gets the host's IP rate-limited)."""
+    try:
+        bot.run(TOKEN)
+    except discord.HTTPException as exc:
+        print(f"Discord refused the login ({exc.status}). Waiting 5 minutes before exiting.", flush=True)
+        time.sleep(300)
+        raise
+    except Exception:
+        traceback.print_exc()
+        print("The bot crashed while starting. Waiting 60 seconds before exiting.", flush=True)
+        time.sleep(60)
+        raise SystemExit(1)
+
+
+_run_forever_guarded()

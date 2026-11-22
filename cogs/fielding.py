@@ -1127,7 +1127,7 @@ class CatchTracker(commands.Cog):
             "team_name": team["name"] if team else None, "team_color": color,
             "caught": caught, "dropped": dropped, "chances": caught + dropped,
             "eff": _efficiency(caught, dropped), "fantasy": caught*5 - dropped*10,
-            "drop_runs": (lambda r: r if r[0] else None)(self._drop_cost(guild.id, member.id)),
+            "drop_runs": None,   # run-cost tracking was retired with the live Match Status tracker
             "rank": (title[1], title[2]) if title else None,
             "title": _TITLE_TEXT[title[0]].title() + " " + team["name"] if title and team else None,
             "min_chances": MIN_LABEL_CHANCES,
