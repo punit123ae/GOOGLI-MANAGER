@@ -49,7 +49,7 @@ class MatchPreview(commands.Cog):
         ctx = types.SimpleNamespace(guild=guild)
         a = await compare._side(ctx, team_a, avatars=False)
         b = await compare._side(ctx, team_b, avatars=False)
-        prediction = predict(a, b, compare._meetings(guild.id, a["name"], b["name"]))
+        prediction = predict(a, b)
         data = {
             "a": {k: a[k] for k in ("name", "logo", "color", "standing", "roster")},
             "b": {k: b[k] for k in ("name", "logo", "color", "standing", "roster")},

@@ -1,8 +1,8 @@
 """Match preview card: who is more likely to win, posted when a match is announced.
 
 One 1600x900 image. The win probability is the hero (two huge percentages and a wide bar);
-under it four small "factor" tiles show what the prediction is built from (record, last 5,
-head to head, run strength) and which team each one favours.
+under it four small "factor" tiles show what the prediction is built from (record, batting,
+bowling, fielding) and which team each one favours.
 
 Pure Pillow, no Discord objects. data = {
     "a"/"b": {name, logo (bytes), color, standing, roster},
@@ -27,7 +27,7 @@ def _team_column(c, team, accent, cx):
     _paste(c.image, ring, (cx - ring.size[0] // 2, 70))
     name = team["name"].upper()
     size = _fit(d, name, 320, 38, 18, "head")
-    _title(d, (cx, 342), _clip(d, name, 320, size, "head"), size, WHITE, "ma", "head")
+    _title(d, (cx, 356), _clip(d, name, 320, size, "head"), size, WHITE, "mm", "head")
     standing = team.get("standing")
     if standing:
         text = f"RANK #{standing['rank']} OF {standing['of']}  •  {standing['group']}"
@@ -76,8 +76,7 @@ def _hero(c, prediction, a, b):
     pw = int(d.textlength(label, font=_font(20))) + 44
     _pill(d, cx - pw // 2, 440, label, 20, fill=fill, fg=fg, outline=outline, pad=22, h=40)
     if prediction.get("known", True):
-        met = prediction.get("met", 0)
-        basis = f"BASED ON RECORD, FORM AND {met} PAST MEETING(S)" if met else "BASED ON RECORD AND FORM  •  FIRST MEETING"
+        basis = "BASED ON RECORD, BATTING, BOWLING AND FIELDING"
     else:
         basis = "NOT ENOUGH MATCHES PLAYED YET  •  SHOWN AS EVEN"
     _text(d, (cx, 500), basis, 13, DIM, "mm")

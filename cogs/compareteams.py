@@ -76,66 +76,62 @@ def _log5(x, y):
     return top / bottom if bottom else 0.5
 
 
-def predict(a, b, meetings):
-    """Win chance when side a faces side b.
-
-    Four things are weighed, each as "chance A wins" (None when there is no data for it):
-      record    both teams' win rates (Log5)
-      form      results of each team's last 5 matches (Log5)
-      strength  runs scored per over minus runs conceded per over
-      meetings  how their previous matches against each other went
-    The first three are blended 45 / 20 / 15 (missing ones drop out); the meetings then take
-    up to 60% of the result, the more they have met the more. Never below 5% or above 95%.
-    Returns {"a", "b", "met", "known", "factors": [(label, chance_a, a_text, b_text)]}.
-    """
+def _edge(diff, scale):
+    """Chance for side A from a difference in some stat (positive = A better); 50% when equal."""
     import math
+    return 1 / (1 + math.exp(-diff / scale))
 
+
+def predict(a, b):
+    """Win chance when side a faces side b, from what each team has actually done.
+
+    Four things are weighed, each as "chance A wins" (None when either team has no data for it):
+      record     both teams' win rates (Log5, smoothed)                 weight 40%
+      batting    runs scored per over (strike rate)                     weight 20%
+      bowling    runs conceded per over (economy), lower is better      weight 20%
+      fielding   catch efficiency: catches / (catches + drops)          weight 20%
+    A factor with no data drops out and the rest share its weight. Never below 5% or above 95%.
+    Returns {"a", "b", "known", "factors": [(label, chance_a, a_text, b_text)]}.
+    """
     pa, wa, _ra, _pta = CompareTeams._record(a)
     pb, wb, _rb, _ptb = CompareTeams._record(b)
-    record = _log5(_smooth(wa or 0, pa or 0), _smooth(wb or 0, pb or 0)) if (pa or pb) else None
+    record = _log5(_smooth(wa or 0, pa or 0), _smooth(wb or 0, pb or 0)) if (pa and pb) else None
 
-    def last5(side):
-        history = ((side.get("standing") or {}).get("history") or [])[-5:]
-        return history.count("W"), len(history)
-
-    (fwa, fna), (fwb, fnb) = last5(a), last5(b)
-    form = _log5(_smooth(fwa, fna), _smooth(fwb, fnb)) if (fna or fnb) else None
-
-    def net(side):
+    def rpo(side):       # runs scored per over
         t = side["totals"]
-        if not side.get("has_rows") or not t.get("balls_faced") or not t.get("balls_bowled"):
-            return None
-        return t["strike_rate"] * 0.06 - t["economy"]
+        return t["strike_rate"] * 0.06 if side.get("has_rows") and t.get("balls_faced") else None
 
-    na, nb = net(a), net(b)
-    strength = 1 / (1 + math.exp(-(na - nb) / 3)) if (na is not None and nb is not None) else None
+    def eco(side):       # runs conceded per over
+        t = side["totals"]
+        return t["economy"] if side.get("has_rows") and t.get("balls_bowled") else None
 
-    parts = [(0.45, record), (0.20, form), (0.15, strength)]
+    def eff(side):       # catch efficiency, percent
+        chances = side["catches"] + side["drops"]
+        return side["catches"] / chances * 100 if chances else None
+
+    ba, bb, ea, eb, fa, fb = rpo(a), rpo(b), eco(a), eco(b), eff(a), eff(b)
+    batting = _edge(ba - bb, 2.0) if None not in (ba, bb) else None
+    bowling = _edge(eb - ea, 2.0) if None not in (ea, eb) else None
+    fielding = _edge(fa - fb, 15.0) if None not in (fa, fb) else None
+
+    parts = [(0.40, record), (0.20, batting), (0.20, bowling), (0.20, fielding)]
     live = [(w, v) for w, v in parts if v is not None]
     base = sum(w * v for w, v in live) / sum(w for w, _ in live) if live else 0.5
-
-    a_w = sum(1 for m in meetings if m["a"] > m["b"])
-    b_w = sum(1 for m in meetings if m["b"] > m["a"])
-    met = len(meetings)
-    h2h = None
-    if met:
-        h2h = (a_w + (met - a_w - b_w) / 2 + 1) / (met + 2)
-        weight = 0.6 * met / (met + 4)
-        base = base * (1 - weight) + h2h * weight
     base = min(0.95, max(0.05, base))
+
+    def num(value, fmt):
+        return fmt.format(value) if value is not None else "—"
 
     def wl(played, wins):
         return f"{wins}-{played - wins}" if played else "—"
 
     factors = [
         ("RECORD", record, wl(pa or 0, wa or 0), wl(pb or 0, wb or 0)),
-        ("LAST 5", form, f"{fwa}/{fna} W" if fna else "—", f"{fwb}/{fnb} W" if fnb else "—"),
-        ("HEAD TO HEAD", h2h, str(a_w) if met else "—", str(b_w) if met else "—"),
-        ("RUN STRENGTH", strength, f"{na:+.1f}" if na is not None else "—",
-         f"{nb:+.1f}" if nb is not None else "—"),
+        ("BATTING", batting, num(ba, "{:.1f} RPO"), num(bb, "{:.1f} RPO")),
+        ("BOWLING", bowling, num(ea, "{:.1f} ECO"), num(eb, "{:.1f} ECO")),
+        ("FIELDING", fielding, num(fa, "{:.0f}%"), num(fb, "{:.0f}%")),
     ]
-    return {"a": base, "b": 1 - base, "met": met,
-            "known": bool(live or met), "factors": factors}
+    return {"a": base, "b": 1 - base, "known": bool(live), "factors": factors}
 
 
 class CompareTeams(commands.Cog):
@@ -752,7 +748,7 @@ class CompareTeams(commands.Cog):
         try:
             a, b = await self._side(ctx, first), await self._side(ctx, second)
             meetings = self._meetings(ctx.guild.id, a["name"], b["name"])
-            prediction = predict(a, b, meetings)
+            prediction = predict(a, b)
             data = {
                 "a": {k: a[k] for k in ("name", "logo", "color", "standing", "roster")},
                 "b": {k: b[k] for k in ("name", "logo", "color", "standing", "roster")},
