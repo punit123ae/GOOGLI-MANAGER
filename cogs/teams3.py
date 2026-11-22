@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import discord
 from PIL import Image
-from .teaminfo_image import render_team_pages
+from .teaminfo_image import TeamPageRenderer, render_team_pages
 from discord.ext import commands
 
 from .teams1 import TeamCore, ConfirmDeleteAllView, TeamApprovalView, TeamListView, JoinRequestView, LeaveTeamConfirmView, CAPTAIN_EMOJI, VICE_CAPTAIN_EMOJI
@@ -112,19 +112,19 @@ class TestTeamInfoView(discord.ui.View):
 
 
 class TeamInfoMixedView(discord.ui.View):
-    """Original roster embed followed by the image-based profile pages."""
-    def __init__(self, ctx, roster_embed, image_pages):
+    """Original roster embed followed by the image-based profile pages (drawn on demand)."""
+    def __init__(self, ctx, roster_embed, renderer):
         super().__init__(timeout=120)
         self.owner_id = ctx.author.id
         self.roster_embed = roster_embed
-        self.image_pages = image_pages
+        self.renderer = renderer
         self.index = 0
         self.message = None
         self._sync()
 
     @property
     def page_count(self):
-        return 1 + len(self.image_pages)
+        return 1 + self.renderer.page_count
 
     def _sync(self):
         self.previous.disabled = self.index == 0
@@ -146,9 +146,16 @@ class TeamInfoMixedView(discord.ui.View):
             await interaction.response.edit_message(
                 embed=self.roster_embed, attachments=[], view=self
             )
-        else:
-            file = discord.File(io.BytesIO(self.image_pages[self.index - 1]), filename="teaminfo.png")
-            await interaction.response.edit_message(embed=None, attachments=[file], view=self)
+            return
+        await interaction.response.defer()   # drawing can take a few seconds on a small host
+        try:
+            png = await asyncio.to_thread(self.renderer.render, self.index)
+        except Exception as exc:
+            print(f"[teaminfo] page render failed: {type(exc).__name__}: {exc}", flush=True)
+            await interaction.followup.send("I couldn't draw that page. Check the bot logs.", ephemeral=True)
+            return
+        file = discord.File(io.BytesIO(png), filename="teaminfo.png")
+        await interaction.edit_original_response(embed=None, attachments=[file], view=self)
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
     async def previous(self, interaction, button):
@@ -164,7 +171,6 @@ class TeamInfoMixedView(discord.ui.View):
 
     async def on_timeout(self):
         self.clear_items()
-        self.image_pages = []
         self.roster_embed = None
         if self.message:
             try:
@@ -1350,17 +1356,16 @@ class TeamCommandsB:
             cache_key = (int(ctx.guild.id), int(team["id"]), tuple(int(u) for u in ordered_ids))
             hit = _TEAMINFO_CACHE.get(cache_key)
             if hit and time.time() - hit[0] < _TEAMINFO_TTL:
-                images = hit[1]
+                renderer = hit[1]
             else:
                 started = time.perf_counter()
                 data = await self._team_profile_data(ctx, team, ordered_ids)
-                fetched = time.perf_counter()
-                images = await asyncio.to_thread(render_team_pages, data)
-                print(f"[teaminfo] data {fetched-started:.1f}s, render {time.perf_counter()-fetched:.1f}s", flush=True)
-                if len(_TEAMINFO_CACHE) >= 20:
+                renderer = await asyncio.to_thread(TeamPageRenderer, data)
+                print(f"[teaminfo] data ready in {time.perf_counter()-started:.1f}s (pages draw on demand)", flush=True)
+                if len(_TEAMINFO_CACHE) >= 6:
                     _TEAMINFO_CACHE.pop(next(iter(_TEAMINFO_CACHE)))
-                _TEAMINFO_CACHE[cache_key] = (time.time(), images)
-            view = TeamInfoMixedView(ctx, roster_embed, images[1:])
+                _TEAMINFO_CACHE[cache_key] = (time.time(), renderer)
+            view = TeamInfoMixedView(ctx, roster_embed, renderer)
             view.message = await loading.edit(
                 content=None, embed=roster_embed, attachments=[], view=view
             )

@@ -332,6 +332,8 @@ def _theme(data):
         flush=True,
     )
     logo = _open(logo_bytes)
+    if logo is not None and max(logo.size) > 640:   # nothing on the page is larger than this
+        logo = ImageOps.contain(logo, (640, 640), method=Image.Resampling.LANCZOS)
     if logo is None:
         print("[teaminfo][logo:ERROR] Renderer could not open logo bytes; using fallback badge", flush=True)
     else:
@@ -689,3 +691,66 @@ def render_team_pages(data):
         image.save(out, format="PNG", compress_level=3)
         pages.append(out.getvalue())
     return pages
+
+
+class TeamPageRenderer:
+    """Renders the image pages one at a time, only when somebody opens them.
+
+    Page numbers follow the pager: 1 = overview, 2 = team stats, 3+ = squad pages
+    (the roster embed that comes before them is not an image).
+    """
+
+    def __init__(self, data):
+        import threading
+        self.data = data
+        self.theme = _theme(data)
+        players = list(data.get("players", []))
+        ranked = sorted(players, key=lambda p: (-p["fantasy"], p["name"].casefold()))
+        self.chunks = [ranked[i:i+ROWS_PER_SQUAD_PAGE]
+                       for i in range(0, len(ranked), ROWS_PER_SQUAD_PAGE)] or [[]]
+        self.total_pages = 3 + len(self.chunks)
+        self.page_count = 2 + len(self.chunks)
+        self._players = players
+        self._avatars = None
+        self._cache = {}
+        self._lock = threading.Lock()
+
+    def _avatar_map(self):
+        if self._avatars is None:
+            data, avatars = self.data, {}
+            for who in self._players:
+                avatars[("p", who["uid"])] = _open(who.get("avatar_bytes"))
+            for key in ("captain", "vice"):
+                who = data.get(key)
+                if who is not None:
+                    avatars.setdefault(("p", who["uid"]), _open(who.get("avatar_bytes")))
+            for section in data.get("sections", []):
+                for item in section["top"]:
+                    who = item["player"]
+                    avatars.setdefault(("p", who["uid"]), _open(who.get("avatar_bytes")))
+            for leader in data.get("leaders", []):
+                who = leader.get("player")
+                if who is not None:
+                    avatars.setdefault(("p", who["uid"]), _open(who.get("avatar_bytes")))
+            self._avatars = avatars
+        return self._avatars
+
+    def render(self, number):
+        """PNG bytes of image page ``number`` (1-based)."""
+        with self._lock:
+            if number in self._cache:
+                return self._cache[number]
+            avatars = self._avatar_map()
+            if number == 1:
+                image = _page_overview(self.data, self.theme, avatars, 2, self.total_pages)
+            elif number == 2:
+                image = _page_stats(self.data, self.theme, avatars, 3, self.total_pages)
+            else:
+                index = number - 3
+                rank = 1 + sum(len(c) for c in self.chunks[:index])
+                image = _page_squad(self.data, self.theme, avatars, 4 + index, self.total_pages,
+                                    self.chunks[index], rank)
+            out = io.BytesIO()
+            image.save(out, format="PNG", compress_level=3)
+            self._cache[number] = out.getvalue()
+            return self._cache[number]
