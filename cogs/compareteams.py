@@ -20,6 +20,7 @@ import io
 import re
 import sqlite3
 import time
+from datetime import datetime
 
 import discord
 from discord.ext import commands
@@ -44,6 +45,9 @@ USAGE = (
 def _transfers_cached(core):
     """+teaminfo's team lookups ask the database for a player's transfers once per match row.
     Remember the answers for the duration of one (synchronous) calculation: far fewer queries."""
+    if "_team_transfer_history" in vars(core):      # already inside one: share its answers
+        yield
+        return
     cache = {}
     original = core._team_transfer_history
 
@@ -60,12 +64,61 @@ def _transfers_cached(core):
         del core._team_transfer_history          # back to the normal method
 
 
+_LOGO_CACHE = {}
+
+
+def _shrink_logo(raw, size=420):
+    """A small copy of a team logo. Saved logos can be several MB; every page decodes them again."""
+    from PIL import Image
+    with Image.open(io.BytesIO(raw)) as image:
+        image = image.convert("RGBA")
+        image.thumbnail((size, size), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        image.save(out, format="PNG", compress_level=1)
+        return out.getvalue()
+
+
+def _innings_best(rows):
+    """Highest team total in one innings: the runs of the team's players added up per match."""
+    per_match = {}
+    for row in rows:
+        mid = row.get("mid")
+        if mid is not None:
+            per_match[mid] = per_match.get(mid, 0) + int(row["runs"])
+    return max(per_match.values(), default=0)
+
+
+def win_probability(a_record, b_record, a_wins, b_wins, ties):
+    """(chance A wins, chance B wins, number of past meetings) when the two teams face each other.
+
+    Each team's win rate (smoothed so one match can't mean 0% or 100%) is combined with the
+    Log5 formula, then blended with how their meetings actually went: the more meetings, the more
+    weight they get. Never shows 0% or 100%.
+    """
+    def rate(record):
+        played, wins = record
+        if not played:
+            return 0.5
+        return (wins + 2) / (played + 4)
+
+    ra, rb = rate(a_record), rate(b_record)
+    base = ra * (1 - rb) / (ra * (1 - rb) + rb * (1 - ra))
+    met = a_wins + b_wins + ties
+    if met:
+        h2h = (a_wins + ties / 2 + 1) / (met + 2)
+        weight = met / (met + 4)
+        base = base * (1 - weight) + h2h * weight
+    base = min(0.95, max(0.05, base))
+    return base, 1 - base, met
+
+
 class CompareTeams(commands.Cog):
     """+compareteams: two teams side by side."""
 
     def __init__(self, bot):
         self.bot = bot
         self._numbers_cache = {}     # team id -> (time, numbers) for the +ctall average
+        self._index_cache = {}       # guild id -> (time, rows of every team) read once
 
     @property
     def core(self):
@@ -86,7 +139,7 @@ class CompareTeams(commands.Cog):
         return team, None
 
     # ------------------------------------------------------------------ data
-    def _meetings(self, guild_id, name_a, name_b, limit=4):
+    def _meetings(self, guild_id, name_a, name_b, limit=None):
         """Recent matches where both teams played, from the team names saved at import time.
 
         Each team's score is the sum of its players' runs. The team with more runs is shown as
@@ -118,7 +171,118 @@ class CompareTeams(commands.Cog):
             for entry in by_match.values() if key_a in entry and key_b in entry
         ]
         meetings.sort(key=lambda m: -m["ts"])
-        return meetings[:limit]
+        return meetings[:limit] if limit else meetings
+
+    def _guild_stat_rows(self, guild_id):
+        """Batting/bowling rows of EVERY team, read from the database once (kept for 2 minutes).
+
+        Same rule as +teaminfo (the team a player was on when the match was played), but one
+        pass over the stats for the whole server instead of one full pass per team, which is
+        what used to peg the CPU, above all for +ct overall.
+        Returns {team name (casefolded): {user id: [rows]}}.
+        """
+        hit = self._index_cache.get(int(guild_id))
+        if hit and time.monotonic() - hit[0] < 120:
+            return hit[1]
+        core, db = self.core, self.bot.db
+        transfers = {}
+        try:
+            for r in core.db.execute(
+                "SELECT user_id, old_team_name, new_team_name, transferred_at FROM player_team_transfers "
+                "WHERE guild_id=? ORDER BY transferred_at ASC", (int(guild_id),)
+            ).fetchall():
+                try:
+                    when = datetime.fromisoformat(str(r["transferred_at"]).replace("Z", "+00:00")).timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    when = None
+                transfers.setdefault(int(r["user_id"]), []).append(
+                    (str(r["old_team_name"]), str(r["new_team_name"]), when))
+        except sqlite3.Error:
+            pass
+        current = {}
+        try:
+            for t in core.db.execute(
+                "SELECT id, name, captain_id, vice_captain_id FROM registered_teams "
+                "WHERE guild_id=? AND status='approved'", (int(guild_id),)
+            ).fetchall():
+                for uid in (t["captain_id"], t["vice_captain_id"]):
+                    if uid:
+                        current.setdefault(int(uid), str(t["name"]))
+            for r in core.db.execute(
+                "SELECT tp.user_id, t.name FROM team_players tp JOIN registered_teams t ON t.id=tp.team_id "
+                "WHERE t.guild_id=? AND t.status='approved'", (int(guild_id),)
+            ).fetchall():
+                current.setdefault(int(r["user_id"]), str(r["name"]))
+        except sqlite3.Error:
+            pass
+        index = {}
+        try:
+            rows = db.execute(
+                """SELECT p.source_message_id, p.user_id, p.runs, p.balls_faced,
+                          p.runs_conceded, p.balls_bowled, p.wickets, p.not_out,
+                          i.imported_at, mt.team_name
+                   FROM player_match_stats p
+                   JOIN stats_imports i ON i.source_message_id=p.source_message_id
+                   LEFT JOIN match_teams mt
+                     ON mt.source_message_id=p.source_message_id AND mt.user_id=p.user_id
+                   WHERE i.guild_id=?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT')='MAIN TOURNAMENT'""",
+                (int(guild_id),),
+            ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            uid = int(row["user_id"])
+            history = transfers.get(uid)
+            if not history:
+                team_name = str(row["team_name"]) if row["team_name"] else None
+            else:
+                match_at = core._team_match_time(row["source_message_id"], row["imported_at"])
+                team_name = history[0][0]
+                for _old, new, when in history:
+                    if when is None:
+                        continue
+                    if match_at >= when:
+                        team_name = new
+                    else:
+                        break
+            if not team_name:
+                team_name = current.get(uid)
+            if not team_name:
+                continue
+            index.setdefault(team_name.casefold(), {}).setdefault(uid, []).append({
+                "mid": int(row["source_message_id"]),
+                "runs": int(row["runs"]), "balls_faced": int(row["balls_faced"]),
+                "runs_conceded": int(row["runs_conceded"]), "balls_bowled": int(row["balls_bowled"]),
+                "wickets": int(row["wickets"]), "not_out": int(row["not_out"]),
+            })
+        self._index_cache[int(guild_id)] = (time.monotonic(), index)
+        return index
+
+    async def _logo_for(self, ctx, team):
+        """The team logo as a small PNG (the big saved copy is decoded once, then remembered)."""
+        try:
+            saved = team["logo_data"]
+        except (KeyError, IndexError):
+            saved = None
+        try:
+            url = team["logo_url"]
+        except (KeyError, IndexError):
+            url = None
+        key = (int(team["id"]), len(saved) if saved else -1, url)
+        if key in _LOGO_CACHE:
+            return _LOGO_CACHE[key]
+        raw = await self.core._team_logo_bytes(ctx, team)
+        small = None
+        if raw:
+            try:
+                small = await asyncio.to_thread(_shrink_logo, raw)
+            except Exception:
+                small = raw
+        if len(_LOGO_CACHE) >= 24:
+            _LOGO_CACHE.pop(next(iter(_LOGO_CACHE)))
+        _LOGO_CACHE[key] = small
+        return small
 
     def _display_name(self, guild, uid):
         member = guild.get_member(int(uid))
@@ -153,8 +317,8 @@ class CompareTeams(commands.Cog):
         except sqlite3.Error:
             total_ids = ordered
 
+        stat_rows = self._guild_stat_rows(guild.id).get(str(team["name"]).casefold(), {})
         with _transfers_cached(core):
-            stat_rows = core._team_stat_rows(guild.id, team)
             fielding = core._team_fielding_totals(guild.id, team)
 
         team_rows = [r for uid in total_ids for r in stat_rows.get(uid, [])]
@@ -187,7 +351,7 @@ class CompareTeams(commands.Cog):
 
         picks = {"runs": top("runs"), "wickets": top("wickets"), "catches": top("catches")}
 
-        logo_task = core._team_logo_bytes(ctx, team)
+        logo_task = self._logo_for(ctx, team)
 
         async def avatar_of(player):
             if player is None:
@@ -222,7 +386,7 @@ class CompareTeams(commands.Cog):
             "team": team, "name": str(team["name"]), "logo": logo, "color": color,
             "standing": standing, "roster": f"ROSTER {len(ordered)}/{max_players}",
             "has_rows": bool(team_rows), "totals": totals,
-            "highest": max((r["runs"] for r in team_rows), default=0),
+            "highest": _innings_best(team_rows),
             "catches": catches, "drops": drops,
             "fantasy": sum(p["fantasy"] for p in players),
             "picks": picks, "avatars": avatar_by_key,
@@ -262,7 +426,7 @@ class CompareTeams(commands.Cog):
             stat_row("Average", pick(a, ta["bat_avg"]), pick(b, tb["bat_avg"]), "num1", "high"),
             stat_row("Strike rate", pick(a, ta["strike_rate"], ta["balls_faced"] > 0),
                      pick(b, tb["strike_rate"], tb["balls_faced"] > 0), "num1", "high"),
-            count("Top score", pick(a, a["highest"]), pick(b, b["highest"])),
+            count("Highest total", pick(a, a["highest"]), pick(b, b["highest"])),
         ]
         bowling = [
             count("Wickets", ta["wickets"], tb["wickets"]),
@@ -347,8 +511,8 @@ class CompareTeams(commands.Cog):
         except sqlite3.Error:
             pass
         ids = list(dict.fromkeys(ids))
+        stat_rows = self._guild_stat_rows(guild.id).get(str(team["name"]).casefold(), {})
         with _transfers_cached(core):
-            stat_rows = core._team_stat_rows(guild.id, team)
             fielding = core._team_fielding_totals(guild.id, team)
         rows = [r for uid in ids for r in stat_rows.get(uid, [])]
         fantasy = sum(
@@ -367,7 +531,7 @@ class CompareTeams(commands.Cog):
             "rows": rows, "fantasy": fantasy, "standing": standing,
             "catches": sum(fielding.get(uid, (0, 0))[0] for uid in ids),
             "drops": sum(fielding.get(uid, (0, 0))[1] for uid in ids),
-            "highest": max((r["runs"] for r in rows), default=0),
+            "highest": _innings_best(rows),
         }
 
     def _numbers_for(self, guild, team):
@@ -387,11 +551,12 @@ class CompareTeams(commands.Cog):
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved'", (int(guild.id),)
         ).fetchall()
         numbers = []
-        for t in teams:
-            if int(t["id"]) == int(own_team["id"]):
-                continue
-            numbers.append(self._numbers_for(guild, t))
-            await asyncio.sleep(0)            # let the bot answer other things between teams
+        with _transfers_cached(self.core):
+            for t in teams:
+                if int(t["id"]) == int(own_team["id"]):
+                    continue
+                numbers.append(self._numbers_for(guild, t))
+                await asyncio.sleep(0)        # let the bot answer other things between teams
         numbers = [x for x in numbers if x["rows"]]
         n = len(numbers)
         if n == 0:
@@ -518,12 +683,23 @@ class CompareTeams(commands.Cog):
         loading = await ctx.reply("⏳ Building the team comparison...", mention_author=False)
         try:
             a, b = await self._side(ctx, first), await self._side(ctx, second)
+            meetings = self._meetings(ctx.guild.id, a["name"], b["name"])
+            pa, wa, _ra, _pta = self._record(a)
+            pb, wb, _rb, _ptb = self._record(b)
+            chance_a, chance_b, met = win_probability(
+                (pa or 0, wa or 0), (pb or 0, wb or 0),
+                sum(1 for m in meetings if m["a"] > m["b"]),
+                sum(1 for m in meetings if m["b"] > m["a"]),
+                sum(1 for m in meetings if m["a"] == m["b"]),
+            )
             data = {
                 "a": {k: a[k] for k in ("name", "logo", "color", "standing", "roster")},
                 "b": {k: b[k] for k in ("name", "logo", "color", "standing", "roster")},
                 "groups": self._groups(a, b),
                 "leaders": self._leaders(ctx.guild, a, b),
-                "meetings": self._meetings(ctx.guild.id, a["name"], b["name"]),
+                "meetings": meetings[:4],
+                "win_prob": {"a": chance_a, "b": chance_b, "met": met,
+                             "known": bool(pa or pb or met)},
                 "guild": ctx.guild.name,
             }
             png = await render_png(render_compare_page, data, 0)

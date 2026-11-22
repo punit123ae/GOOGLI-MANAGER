@@ -547,10 +547,41 @@ def _team_block(c, team, accent, left):
         _text(d, (tx + 62 if left else tx - 62, 214), "NO RESULTS YET", 14, DIM, "lm" if left else "rm")
 
 
+def _win_strip(c, prob, a_name, b_name):
+    """Win probability bar under the hero: both chances at the ends, the split in the middle."""
+    d = c.d
+    pa, pb = prob["a"], prob["b"]
+    la, lb = int(round(pa * 100)), int(round(pb * 100))
+    if la + lb != 100:
+        lb = 100 - la
+    met = prob.get("met", 0)
+    if prob.get("known", True):
+        basis = f"BASED ON RECORD + {met} MEETING(S)" if met else "BASED ON RECORD  •  THEY HAVE NOT MET YET"
+    else:
+        basis = "NOT ENOUGH MATCHES YET  •  EVEN"
+    _text(d, (W // 2, 261), f"WIN PROBABILITY  •  {basis}", 13, MUTED, "mm")
+    bx1, bx2, by, bh = 330, 1270, 272, 14
+    d.rounded_rectangle((bx1, by, bx2, by + bh), radius=bh // 2, fill=TRACK)
+    cut = bx1 + int((bx2 - bx1) * min(0.97, max(0.03, pa)))
+    d.rounded_rectangle((bx1, by, max(bx1 + bh, cut - 3), by + bh), radius=bh // 2, fill=c.a)
+    d.rounded_rectangle((min(bx2 - bh, cut + 3), by, bx2, by + bh), radius=bh // 2, fill=c.b)
+    mid = by + bh // 2
+    _text(d, (50, mid), f"{la}%", 28, c.a if pa >= pb else MUTED, "lm", "head")
+    _text(d, (1550, mid), f"{lb}%", 28, c.b if pb > pa else MUTED, "rm", "head")
+    _text(d, (bx1 - 14, mid), _clip(d, a_name.upper(), 200, 14), 14, WHITE, "rm")
+    _text(d, (bx2 + 14, mid), _clip(d, b_name.upper(), 200, 14), 14, WHITE, "lm")
+
+
 def _compare_main_page(data, col_a, col_b):
     c = _Canvas(col_a, col_b)
     groups = data["groups"]
-    boxes = [(50, 268, 790, 552), (810, 268, 1550, 552), (50, 568, 790, 852), (810, 568, 1550, 852)]
+    prob = data.get("win_prob")
+    if prob:      # room for the win probability bar: the four cards start lower and are a little tighter
+        boxes = [(50, 296, 790, 570), (810, 296, 1550, 570), (50, 582, 790, 856), (810, 582, 1550, 856)]
+        row_h = 50
+    else:
+        boxes = [(50, 268, 790, 552), (810, 268, 1550, 552), (50, 568, 790, 852), (810, 568, 1550, 852)]
+        row_h = 54
     for box in boxes:
         c.card(box, 26)
     c.seal()
@@ -560,7 +591,9 @@ def _compare_main_page(data, col_a, col_b):
     a_total, b_total, per = _tally(groups)
     _scoreboard(c, a_total, b_total, a["name"], b["name"], data.get("caption", "Team comparison"))
     for box, group, won in zip(boxes, groups, per):
-        _draw_group(c.d, box, group, c.a, c.b, won, row_h=54, first_row=64)
+        _draw_group(c.d, box, group, c.a, c.b, won, row_h=row_h, first_row=64 if not prob else 60)
+    if prob:
+        _win_strip(c, prob, a["name"], b["name"])
     _footer(c, f"GOOGLI MANAGER  •  TEAM COMPARISON  •  {a['name']} vs {b['name']}"[:90], data.get("guild"))
     return c.image
 

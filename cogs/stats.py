@@ -563,6 +563,56 @@ def get_player_team_name(member):
             connection.close()
 
 
+
+def player_team_color(member):
+    """The Discord role colour of the player's team (same rule as +teaminfo), or None."""
+    import sqlite3
+
+    db_path = Path(__file__).resolve().parent.parent / "team_registration.db"
+    guild = getattr(member, "guild", None)
+    if guild is None or not db_path.is_file():
+        return None
+    connection = None
+    try:
+        connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT s.role_id
+            FROM registered_teams AS t
+            LEFT JOIN team_players AS p ON p.team_id = t.id
+            JOIN team_role_settings AS s ON s.team_id = t.id AND s.enabled = 1
+            WHERE t.guild_id = ? AND t.status = 'approved'
+              AND (p.user_id = ? OR t.captain_id = ? OR t.vice_captain_id = ?)
+            ORDER BY CASE WHEN t.captain_id = ? THEN 0 WHEN t.vice_captain_id = ? THEN 1 ELSE 2 END
+            LIMIT 1
+            """,
+            (int(guild.id),) + (int(member.id),) * 5,
+        ).fetchone()
+        if row:
+            role = guild.get_role(int(row["role_id"]))
+            if role is not None and role.color.value:
+                return role.color.to_rgb()
+    except (sqlite3.Error, OSError, ValueError, TypeError, AttributeError):
+        pass
+    finally:
+        if connection is not None:
+            connection.close()
+    return None
+
+
+def _stats_background(member, W=1600, H=900):
+    """Page background: the team's role colour like +teaminfo; the navy design-6 look without one."""
+    color = player_team_color(member)
+    if color is not None:
+        try:
+            from .teaminfo_image import _background, _backdrop_color
+            return _background(tuple(_backdrop_color(color))).copy()
+        except Exception as exc:
+            print(f"[stats] team colour background failed: {type(exc).__name__}: {exc}", flush=True)
+    return _design6_background(W, H).copy()
+
+
 @lru_cache(maxsize=1)
 def _cached_design2_background():
     """Load and resize the static Design 2 background once per process."""
@@ -1240,7 +1290,7 @@ def make_stats_image_experience(
     else:
         # ANALYTICS: the three categories (batting / bowling / fielding) are the hero of the
         # image so they stay readable at Discord's small preview size; form is a bar chart.
-        image = _design6_background(W, H).copy()
+        image = _stats_background(member, W, H)
         coral, violet, mint, gold = (255, 128, 94), (156, 128, 255), (62, 224, 172), (255, 206, 90)
         white, muted, edge = (244, 248, 255), (150, 168, 196), (48, 74, 116)
         track, divider, dim = (30, 46, 76), (36, 54, 86), (104, 124, 156)
@@ -1475,7 +1525,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     from PIL import ImageFilter  # noqa: F401  (kept local like the other renderers)
     W, H = 1600, 900
     F = load_stats_display_font
-    image = _design6_background(W, H).copy()
+    image = _stats_background(member, W, H)
     coral, violet, mint, gold = (255, 128, 94), (156, 128, 255), (62, 224, 172), (255, 206, 90)
     red = (255, 96, 128)
     white, muted, edge = (244, 248, 255), (150, 168, 196), (48, 74, 116)
