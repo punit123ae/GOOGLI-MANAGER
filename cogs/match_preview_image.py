@@ -11,10 +11,11 @@ Pure Pillow, no Discord objects. data = {
 }
 """
 from .teaminfo_image import (
-    DIM, H, MUTED, W, WHITE, _clip, _fit, _open, _paste, _pill, _round_image, _text,
+    DIM, LOSS, MUTED, W, WHITE, WIN, _clip, _fit, _open, _paste, _pill, _round_image, _tag, _text,
 )
 from .versus_image import (
-    EDGE, INK, TRACK, _Canvas, _footer, _png, _title, _tug, pick_sides,
+    BAT_COLOR, BOWL_COLOR, EDGE, FIELD_COLOR, INK, RECORD_COLOR, TRACK, _Canvas, _draw_row, _footer, _png,
+    _title, _tug, pick_sides,
 )
 
 CLOSE = 0.04          # within 4 points of 50%: "too close to call"
@@ -37,6 +38,22 @@ def _team_column(c, team, accent, cx):
         text = _clip(d, text.upper(), 300, 15)
         width = int(d.textlength(text, font=_font(15))) + 32
         _pill(d, cx - width // 2, 392, text, 15, fg=WHITE, outline=accent, pad=16, h=32)
+    _last_five(d, cx, 462, (standing or {}).get("history", [])[-5:])
+
+
+def _last_five(d, cx, y, history):
+    """LAST 5 results as green W / red L circles, oldest to newest (graphics only, not part of the maths)."""
+    _text(d, (cx, y - 26), "LAST 5 MATCHES", 13, MUTED, "mm")
+    if not history:
+        _text(d, (cx, y), "NO RESULTS YET", 14, DIM, "mm")
+        return
+    step = 42
+    start = cx - step * (len(history) - 1) / 2
+    for i, result in enumerate(history):
+        x = start + i * step
+        win = result == "W"
+        d.ellipse((x - 16, y - 16, x + 16, y + 16), fill=WIN if win else LOSS)
+        _text(d, (x, y), result, 16, INK, "mm", "head")
 
 
 def _font(size, kind="reg"):
@@ -76,30 +93,36 @@ def _hero(c, prediction, a, b):
     pw = int(d.textlength(label, font=_font(20))) + 44
     _pill(d, cx - pw // 2, 440, label, 20, fill=fill, fg=fg, outline=outline, pad=22, h=40)
     if prediction.get("known", True):
-        basis = "BASED ON RECORD, BATTING, BOWLING AND FIELDING"
+        basis = "BASED ON RECORD, BATTING, BOWLING, FIELDING AND SQUAD BALANCE"
     else:
         basis = "NOT ENOUGH MATCHES PLAYED YET  •  SHOWN AS EVEN"
     _text(d, (cx, 500), basis, 13, DIM, "mm")
 
 
+TILE_COLORS = {"RECORD": RECORD_COLOR, "BATTING": BAT_COLOR, "BOWLING": BOWL_COLOR, "FIELDING": FIELD_COLOR}
+
+
 def _tile(c, box, factor, a_tag, b_tag):
+    """One category: title, three stat rows (winner lit up, tug bar) and who has the edge."""
     d = c.d
     x1, y1, x2, y2 = box
-    label, chance, a_text, b_text = factor
-    cx = (x1 + x2) // 2
-    _text(d, (cx, y1 + 28), label, 15, MUTED, "mm")
-    missing = chance is None
-    for text, side_x, anchor, color in ((a_text, x1 + 26, "lm", c.a), (b_text, x2 - 26, "rm", c.b)):
-        size = _fit(d, text, 130, 38, 18, "head")
-        _text(d, (side_x, y1 + 78), text, size, DIM if text == "—" else color, anchor, "head")
-    _tug(d, x1 + 26, x2 - 26, y1 + 118, 9, None if missing else min(0.93, max(0.07, chance)), c.a, c.b)
-    if missing:
-        note, color = "NO DATA", DIM
+    label, chance = factor["label"], factor["chance"]
+    color = TILE_COLORS.get(label, WHITE)
+    d.ellipse((x1 + 24, y1 + 25, x1 + 36, y1 + 37), fill=color)
+    _text(d, (x1 + 48, y1 + 20), label, 22, color, "la", "head")
+    for i, row in enumerate(factor["rows"]):
+        _draw_row(d, x1, x2, y1 + 58 + i * 62, row, c.a, c.b, pad=24)
+    if chance is None:
+        text, fill, fg, outline = "NO DATA", None, DIM, EDGE
     elif abs(chance - 0.5) < 0.03:
-        note, color = "EVEN", MUTED
+        text, fill, fg, outline = "EVEN", None, WHITE, EDGE
     else:
-        note, color = (f"EDGE  {a_tag}", c.a) if chance > 0.5 else (f"EDGE  {b_tag}", c.b)
-    _text(d, (cx, y1 + 152), note, 15, color, "mm", "head")
+        win_a = chance > 0.5
+        share = round((chance if win_a else 1 - chance) * 100)
+        text = f"EDGE  {a_tag if win_a else b_tag}  {share}%"
+        fill, fg, outline = (c.a if win_a else c.b), INK, None
+    width = int(d.textlength(text, font=_font(16, "bold"))) + 36
+    _pill(d, (x1 + x2) // 2 - width // 2, y2 - 52, text, 16, fill=fill, fg=fg, outline=outline, pad=18, h=34)
 
 
 def render_match_preview(data):
@@ -110,19 +133,15 @@ def render_match_preview(data):
     factors = prediction["factors"]
     gap, left, right = 20, 50, 1550
     tile_w = (right - left - gap * 3) // 4
-    boxes = [(left + i * (tile_w + gap), 640, left + i * (tile_w + gap) + tile_w, 836) for i in range(4)]
+    boxes = [(left + i * (tile_w + gap), 560, left + i * (tile_w + gap) + tile_w, 848) for i in range(4)]
     for box in boxes:
         c.card(box, 24)
-    c.card((left, 560, right, 618), 20)
     c.seal()
 
     _team_column(c, a, c.a, 190)
     _team_column(c, b, c.b, W - 190)
     _hero(c, prediction, a, b)
 
-    d = c.d
-    _text(d, (W // 2, 589), "WHAT THE PREDICTION IS BASED ON", 16, MUTED, "mm", "head")
-    from .teaminfo_image import _tag
     a_tag, b_tag = _tag(a["name"]), _tag(b["name"])
     for box, factor in zip(boxes, factors):
         _tile(c, box, factor, a_tag, b_tag)

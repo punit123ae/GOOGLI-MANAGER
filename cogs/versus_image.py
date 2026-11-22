@@ -555,7 +555,7 @@ def _win_strip(c, prob, a_name, b_name):
     if la + lb != 100:
         lb = 100 - la
     if prob.get("known", True):
-        basis = "BASED ON RECORD, BATTING, BOWLING AND FIELDING"
+        basis = "BASED ON RECORD, BATTING, BOWLING, FIELDING AND SQUAD BALANCE"
     else:
         basis = "NOT ENOUGH MATCHES YET  •  EVEN"
     _text(d, (W // 2, 261), f"WIN PROBABILITY  •  {basis}", 13, MUTED, "mm")

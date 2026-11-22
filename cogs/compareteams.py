@@ -82,56 +82,122 @@ def _edge(diff, scale):
     return 1 / (1 + math.exp(-diff / scale))
 
 
+def _rel(a, b, higher=True, scale=0.3):
+    """Chance for A from one stat, judged by the RELATIVE gap (30% better ~ 73%). None without data."""
+    if a is None or b is None:
+        return None
+    mean = (abs(a) + abs(b)) / 2
+    if mean == 0 or a == b:
+        return 0.5
+    diff = (a - b) / mean
+    return _edge(diff if higher else -diff, scale)
+
+
+def _blend(values):
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def _gini(values):
+    """0 = every player contributes the same, towards 1 = one player does everything.
+    None with fewer than 3 players or no points at all."""
+    ordered = sorted(max(0.0, float(v)) for v in values)
+    n, total = len(ordered), sum(ordered)
+    if n < 3 or total <= 0:
+        return None
+    return sum((2 * (i + 1) - n - 1) * x for i, x in enumerate(ordered)) / (n * total)
+
+
 def predict(a, b):
     """Win chance when side a faces side b, from what each team has actually done.
 
-    Four things are weighed, each as "chance A wins" (None when either team has no data for it):
-      record     both teams' win rates (Log5, smoothed)                 weight 40%
-      batting    runs scored per over (strike rate)                     weight 20%
-      bowling    runs conceded per over (economy), lower is better      weight 20%
-      fielding   catch efficiency: catches / (catches + drops)          weight 20%
-    A factor with no data drops out and the rest share its weight. Never below 5% or above 95%.
-    Returns {"a", "b", "known", "factors": [(label, chance_a, a_text, b_text)]}.
+    Each category is the average of several stats, every stat judged by how far apart the two
+    teams are in relative terms, so nothing rests on a single number:
+      record    win rate (Log5, smoothed) and points per match played                       30%
+      batting   runs per match, average, strike rate                                        25%
+      bowling   wickets per match, economy, bowling average, bowling strike rate            25%
+      fielding  catches per match, catch efficiency, (fewer) drops per match                10%
+      balance   how evenly the team's fantasy points are spread over its players            10%
+    "Balance" is not drawn on the card: a team that leans on one or two players (a big gap
+    between its best and its other players) is rated lower than an even squad.
+    A category without data drops out and the others share its weight. 5%-95%.
+    Returns {"a", "b", "known", "factors": [{label, chance, rows}], "balance": chance_a or None}.
     """
-    pa, wa, _ra, _pta = CompareTeams._record(a)
-    pb, wb, _rb, _ptb = CompareTeams._record(b)
-    record = _log5(_smooth(wa or 0, pa or 0), _smooth(wb or 0, pb or 0)) if (pa and pb) else None
+    pa, wa, ra, pta = CompareTeams._record(a)
+    pb, wb, rb, ptb = CompareTeams._record(b)
 
-    def rpo(side):       # runs scored per over
-        t = side["totals"]
-        return t["strike_rate"] * 0.06 if side.get("has_rows") and t.get("balls_faced") else None
+    record = _blend([
+        _log5(_smooth(wa or 0, pa or 0), _smooth(wb or 0, pb or 0)) if (pa and pb) else None,
+        _rel(pta / pa, ptb / pb) if (pa and pb and pta is not None and ptb is not None) else None,
+    ])
 
-    def eco(side):       # runs conceded per over
-        t = side["totals"]
-        return t["economy"] if side.get("has_rows") and t.get("balls_bowled") else None
+    def per_match(side, value):
+        m = side.get("matches") or 0
+        return value / m if m else None
 
-    def eff(side):       # catch efficiency, percent
+    ta, tb = a["totals"], b["totals"]
+    bat_a, bat_b = a.get("has_rows") and ta["balls_faced"] > 0, b.get("has_rows") and tb["balls_faced"] > 0
+    batting = _blend([
+        _rel(per_match(a, ta["runs"]), per_match(b, tb["runs"])),
+        _rel(ta["bat_avg"], tb["bat_avg"]),
+        _rel(ta["strike_rate"], tb["strike_rate"]),
+    ]) if (bat_a and bat_b) else None
+
+    bowl_a, bowl_b = a.get("has_rows") and ta["balls_bowled"] > 0, b.get("has_rows") and tb["balls_bowled"] > 0
+    both_wk = ta["wickets"] > 0 and tb["wickets"] > 0
+    bowling = _blend([
+        _rel(per_match(a, ta["wickets"]), per_match(b, tb["wickets"])),
+        _rel(ta["economy"], tb["economy"], higher=False),
+        _rel(ta["bowl_avg"], tb["bowl_avg"], higher=False) if both_wk else None,
+        _rel(ta["bowl_sr"], tb["bowl_sr"], higher=False) if both_wk else None,
+    ]) if (bowl_a and bowl_b) else None
+
+    def eff(side):
         chances = side["catches"] + side["drops"]
         return side["catches"] / chances * 100 if chances else None
 
-    ba, bb, ea, eb, fa, fb = rpo(a), rpo(b), eco(a), eco(b), eff(a), eff(b)
-    batting = _edge(ba - bb, 2.0) if None not in (ba, bb) else None
-    bowling = _edge(eb - ea, 2.0) if None not in (ea, eb) else None
-    fielding = _edge(fa - fb, 15.0) if None not in (fa, fb) else None
+    ea, eb = eff(a), eff(b)
+    fielding = _blend([
+        _rel(per_match(a, a["catches"]), per_match(b, b["catches"])),
+        _rel(ea, eb),
+        _rel(per_match(a, a["drops"]), per_match(b, b["drops"]), higher=False),
+    ]) if (ea is not None and eb is not None) else None
 
-    parts = [(0.40, record), (0.20, batting), (0.20, bowling), (0.20, fielding)]
+    ga, gb = a.get("gini"), b.get("gini")
+    balance = _edge(gb - ga, 0.25) if (ga is not None and gb is not None) else None
+
+    parts = [(0.30, record), (0.25, batting), (0.25, bowling), (0.10, fielding), (0.10, balance)]
     live = [(w, v) for w, v in parts if v is not None]
     base = sum(w * v for w, v in live) / sum(w for w, _ in live) if live else 0.5
     base = min(0.95, max(0.05, base))
 
-    def num(value, fmt):
-        return fmt.format(value) if value is not None else "—"
-
-    def wl(played, wins):
-        return f"{wins}-{played - wins}" if played else "—"
-
+    row = stat_row
     factors = [
-        ("RECORD", record, wl(pa or 0, wa or 0), wl(pb or 0, wb or 0)),
-        ("BATTING", batting, num(ba, "{:.1f} RPO"), num(bb, "{:.1f} RPO")),
-        ("BOWLING", bowling, num(ea, "{:.1f} ECO"), num(eb, "{:.1f} ECO")),
-        ("FIELDING", fielding, num(fa, "{:.0f}%"), num(fb, "{:.0f}%")),
+        {"label": "RECORD", "chance": record, "rows": [
+            row("Played", pa, pb, "int", None),
+            row("Wins", wa, wb, "int", "high"),
+            row("Win rate", ra, rb, "pct", "high"),
+        ]},
+        {"label": "BATTING", "chance": batting, "rows": [
+            row("Runs", ta["runs"] if bat_a else None, tb["runs"] if bat_b else None, "int", "high"),
+            row("Average", ta["bat_avg"] if bat_a else None, tb["bat_avg"] if bat_b else None, "num1", "high"),
+            row("Strike rate", ta["strike_rate"] if bat_a else None, tb["strike_rate"] if bat_b else None,
+                "num1", "high"),
+        ]},
+        {"label": "BOWLING", "chance": bowling, "rows": [
+            row("Wickets", ta["wickets"] if bowl_a else None, tb["wickets"] if bowl_b else None, "int", "high"),
+            row("Economy", ta["economy"] if bowl_a else None, tb["economy"] if bowl_b else None, "num2", "low"),
+            row("Average", ta["bowl_avg"] if ta["wickets"] else None, tb["bowl_avg"] if tb["wickets"] else None,
+                "num1", "low"),
+        ]},
+        {"label": "FIELDING", "chance": fielding, "rows": [
+            row("Catches", a["catches"], b["catches"], "int", "high"),
+            row("Drops", a["drops"], b["drops"], "int", "low"),
+            row("Catch rate", ea, eb, "pct", "high",
+                f"{ea:.0f}%" if ea is not None else None, f"{eb:.0f}%" if eb is not None else None),
+        ]},
     ]
-    return {"a": base, "b": 1 - base, "known": bool(live), "factors": factors}
+    return {"a": base, "b": 1 - base, "known": bool(live), "factors": factors, "balance": balance}
 
 
 class CompareTeams(commands.Cog):
@@ -414,6 +480,7 @@ class CompareTeams(commands.Cog):
             return pool[0] if pool else None
 
         picks = {"runs": top("runs"), "wickets": top("wickets"), "catches": top("catches")}
+        gini = _gini([p["fantasy"] for p in players])
 
         logo_task = self._logo_for(ctx, team)
 
@@ -455,6 +522,7 @@ class CompareTeams(commands.Cog):
             "catches": catches, "drops": drops,
             "fantasy": sum(p["fantasy"] for p in players),
             "picks": picks, "avatars": avatar_by_key,
+            "matches": len({r["mid"] for r in team_rows}), "gini": gini,
         }
 
     # ------------------------------------------------------------------ comparison rows
