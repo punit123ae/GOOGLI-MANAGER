@@ -257,17 +257,47 @@ class _Page:
 
 
     def _watermark(self):
-        """Team logo exactly centred, fitted without distortion, softly translucent."""
+        """Team logo exactly centred, background removed, softly translucent."""
         logo = self.theme.get("logo")
         if logo is None:
             return
         size = 560
-        src = ImageOps.contain(logo.convert("RGBA"), (size, size), method=Image.Resampling.LANCZOS)
+        src = ImageOps.contain(_clean_mark(logo), (size, size), method=Image.Resampling.LANCZOS)
         alpha = src.getchannel("A").point(lambda v: int(v*0.13))
         src.putalpha(alpha)
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         layer.paste(src, ((W-src.width)//2, (H-src.height)//2))
         self.image = Image.alpha_composite(self.image.convert("RGBA"), layer).convert("RGB")
+
+
+def _clean_mark(logo):
+    """Strip a flat logo background so only the artwork remains, then feather the edges.
+
+    Logos that ship on a white/black/coloured square would otherwise show up as a grey
+    box behind the page. Transparent logos are left as they are.
+    """
+    img = ImageOps.contain(logo.convert("RGBA"), (640, 640), method=Image.Resampling.LANCZOS)
+    width, height = img.size
+    alpha = img.getchannel("A")
+    opaque = sum(1 for v in alpha.resize((32, 32)).getdata() if v > 240) / 1024
+    if opaque > 0.6:   # a solid backdrop: key its colour out everywhere (also enclosed areas)
+        rgb = img.convert("RGB")
+        corners = [rgb.getpixel(pt) for pt in ((0, 0), (width-1, 0), (0, height-1), (width-1, height-1))]
+        bg = tuple(sum(c[i] for c in corners) // 4 for i in range(3))
+        if max(max(c[i] for c in corners) - min(c[i] for c in corners) for i in range(3)) < 50:
+            diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, bg))
+            r, g, b = diff.split()
+            distance = ImageChops.lighter(ImageChops.lighter(r, g), b)
+            mask = distance.point(lambda v: 0 if v < 38 else (255 if v > 70 else int((v-38)*255/32)))
+            mask = mask.filter(ImageFilter.GaussianBlur(0.8))
+            img.putalpha(ImageChops.multiply(alpha, mask))
+    # feather the outer edge so no straight border can survive
+    fade = Image.new("L", img.size, 0)
+    inset = int(min(width, height) * 0.04)
+    ImageDraw.Draw(fade).ellipse((inset, inset, width-inset, height-inset), fill=255)
+    fade = fade.filter(ImageFilter.GaussianBlur(min(width, height) * 0.035))
+    img.putalpha(ImageChops.multiply(img.getchannel("A"), fade))
+    return img
 
 
 def _luma(color):
