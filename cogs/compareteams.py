@@ -23,7 +23,9 @@ import time
 import discord
 from discord.ext import commands
 
-from .h2h import ImagePager, fetch_avatar, team_role_color
+from .h2h import (
+    ImagePager, contrasting_overall_color, fetch_avatar, overall_color_for, team_role_color,
+)
 from .versus_image import (
     BAT_COLOR, BOWL_COLOR, FIELD_COLOR, RECORD_COLOR, render_compare_pages, stat_row,
 )
@@ -31,6 +33,7 @@ from .versus_image import (
 COOLDOWN_SECONDS = 8
 USAGE = (
     "Usage: `+compareteams Team A | Team B`  (or `Team A vs Team B`)\n"
+    "`+ctall` (or `+ct overall`) compares your team with the average of all other teams.\n"
     "Or `+compareteams Team B` to compare your own team with Team B.\n"
     "Team names work like `+teaminfo`: at least the first 4 letters."
 )
@@ -207,6 +210,8 @@ class CompareTeams(commands.Cog):
     @staticmethod
     def _record(side):
         """(played, wins, win rate %, points) from the points table, or Nones without a standing."""
+        if side.get("record") is not None:      # the "all teams" average side
+            return side["record"]
         standing = side["standing"]
         if not standing:
             return None, None, None, None
@@ -214,25 +219,31 @@ class CompareTeams(commands.Cog):
         wins = int(standing["won"])
         return played, wins, (wins / played * 100 if played else None), int(standing["points"])
 
-    def _groups(self, a, b):
+    def _groups(self, a, b, avg_b=False):
+        """The four comparison cards. avg_b: side B is a per-team average, so its counts show a decimal."""
         ta, tb = a["totals"], b["totals"]
 
         def pick(side, value, condition=True):
             return value if (side["has_rows"] and condition) else None
+
+        def count(label, av, bv, better="high"):
+            if avg_b and bv is not None:
+                return stat_row(label, av, bv, "int", better, None, f"{bv:,.1f}")
+            return stat_row(label, av, bv, "int", better)
 
         def efficiency(side):
             chances = side["catches"] + side["drops"]
             return side["catches"] / chances * 100 if chances else None
 
         batting = [
-            stat_row("Runs", ta["runs"], tb["runs"], "int", "high"),
+            count("Runs", ta["runs"], tb["runs"]),
             stat_row("Average", pick(a, ta["bat_avg"]), pick(b, tb["bat_avg"]), "num1", "high"),
             stat_row("Strike rate", pick(a, ta["strike_rate"], ta["balls_faced"] > 0),
                      pick(b, tb["strike_rate"], tb["balls_faced"] > 0), "num1", "high"),
-            stat_row("Top score", pick(a, a["highest"]), pick(b, b["highest"]), "int", "high"),
+            count("Top score", pick(a, a["highest"]), pick(b, b["highest"])),
         ]
         bowling = [
-            stat_row("Wickets", ta["wickets"], tb["wickets"], "int", "high"),
+            count("Wickets", ta["wickets"], tb["wickets"]),
             stat_row("Economy", pick(a, ta["economy"], ta["balls_bowled"] > 0),
                      pick(b, tb["economy"], tb["balls_bowled"] > 0), "num2", "low"),
             stat_row("Average", pick(a, ta["bowl_avg"], ta["wickets"] > 0),
@@ -241,18 +252,18 @@ class CompareTeams(commands.Cog):
                      pick(b, tb["bowl_sr"], tb["wickets"] > 0), "num1", "low"),
         ]
         fielding = [
-            stat_row("Catches", a["catches"], b["catches"], "int", "high"),
-            stat_row("Drops", a["drops"], b["drops"], "int", "low"),
+            count("Catches", a["catches"], b["catches"]),
+            count("Drops", a["drops"], b["drops"], "low"),
             stat_row("Efficiency", efficiency(a), efficiency(b), "pct", "high"),
-            stat_row("Fantasy pts", a["fantasy"], b["fantasy"], "int", "high"),
+            count("Fantasy pts", a["fantasy"], b["fantasy"]),
         ]
         pa, wa, ra, pta = self._record(a)
         pb, wb, rb, ptb = self._record(b)
         record = [
-            stat_row("Played", pa, pb, "int", None),
-            stat_row("Wins", wa, wb, "int", "high"),
+            count("Played", pa, pb, None),
+            count("Wins", wa, wb),
             stat_row("Win rate", ra, rb, "pct", "high"),
-            stat_row("Points", pta, ptb, "int", "high"),
+            count("Points", pta, ptb),
         ]
         return [
             {"title": "BATTING", "color": BAT_COLOR, "rows": batting},
@@ -294,8 +305,140 @@ class CompareTeams(commands.Cog):
             })
         return leaders
 
+    # ------------------------------------------------------------------ overall (vs all other teams)
+    def _team_numbers(self, guild, team):
+        """Rows, fielding, fantasy and standing of one team (same rules as _side, no images)."""
+        from .stats import fantasy_raw_points
+
+        core = self.core
+        player_rows = core.db.execute(
+            "SELECT user_id FROM team_players WHERE team_id=? ORDER BY added_at", (team["id"],)
+        ).fetchall()
+        ids = [int(team["captain_id"])] + ([int(team["vice_captain_id"])] if team["vice_captain_id"] else []) \
+            + [int(row["user_id"]) for row in player_rows]
+        try:
+            ids += [int(row[0]) for row in core.db.execute(
+                "SELECT DISTINCT user_id FROM player_team_transfers "
+                "WHERE guild_id=? AND (old_team_id=? OR new_team_id=?)",
+                (int(guild.id), int(team["id"]), int(team["id"])),
+            ).fetchall()]
+        except sqlite3.Error:
+            pass
+        ids = list(dict.fromkeys(ids))
+        stat_rows = core._team_stat_rows(guild.id, team)
+        fielding = core._team_fielding_totals(guild.id, team)
+        rows = [r for uid in ids for r in stat_rows.get(uid, [])]
+        fantasy = sum(
+            (fantasy_raw_points(stat_rows[uid])[2] if stat_rows.get(uid) else 0)
+            + fielding.get(uid, (0, 0))[0] * 5 - fielding.get(uid, (0, 0))[1] * 10
+            for uid in ids
+        )
+        standing = None
+        points_cog = self.bot.get_cog("PointsTable")
+        if points_cog is not None and hasattr(points_cog, "team_standing"):
+            try:
+                standing = points_cog.team_standing(guild.id, team["name"])
+            except Exception:
+                standing = None
+        return {
+            "rows": rows, "fantasy": fantasy, "standing": standing,
+            "catches": sum(fielding.get(uid, (0, 0))[0] for uid in ids),
+            "drops": sum(fielding.get(uid, (0, 0))[1] for uid in ids),
+            "highest": max((r["runs"] for r in rows), default=0),
+        }
+
+    def _overall_side(self, guild, own_team):
+        """Average of every OTHER approved team: counts are per team, rates are pooled over all of them."""
+        from .lb import _totals
+
+        teams = self.core.db.execute(
+            "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved'", (int(guild.id),)
+        ).fetchall()
+        numbers = [
+            self._team_numbers(guild, t) for t in teams if int(t["id"]) != int(own_team["id"])
+        ]
+        numbers = [x for x in numbers if x["rows"]]
+        n = len(numbers)
+        if n == 0:
+            return None
+        pooled = _totals([r for x in numbers for r in x["rows"]])
+        totals = dict(pooled)
+        for key in ("runs", "balls_faced", "runs_conceded", "balls_bowled", "wickets"):
+            totals[key] = pooled[key] / n
+
+        def mean(key):
+            return sum(x[key] for x in numbers) / n
+
+        record = None
+        standings = [x["standing"] for x in numbers if x["standing"]]
+        if standings:
+            played = sum(int(s["won"]) + int(s["lost"]) for s in standings)
+            wins = sum(int(s["won"]) for s in standings)
+            m = len(standings)
+            record = (played / m, wins / m, wins / played * 100 if played else None,
+                      sum(int(s["points"]) for s in standings) / m)
+        return {
+            "name": "All teams", "logo": None, "color": None, "standing": None,
+            "roster": f"AVERAGE OF {n} TEAMS", "has_rows": True, "totals": totals,
+            "highest": mean("highest"), "catches": mean("catches"), "drops": mean("drops"),
+            "fantasy": mean("fantasy"), "record": record,
+        }
+
+    async def _run_overall(self, ctx, query=None):
+        core = self.core
+        if core is None:
+            await ctx.reply("The team system isn't loaded right now.", mention_author=False)
+            return
+        if query:
+            team, error = self._resolve(ctx.guild.id, query)
+            if error:
+                await ctx.reply(error, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                return
+        else:
+            team = core._membership(ctx.guild.id, ctx.author.id)
+            if not team:
+                await ctx.reply(
+                    "You're not in a team. Use `+ctall Team Name` to compare a specific team with all others.",
+                    mention_author=False,
+                )
+                return
+        wait = COOLDOWN_SECONDS - (time.monotonic() - self._last_use.get(ctx.author.id, -1e9))
+        if wait > 0:
+            await ctx.reply(f"Please wait {wait:.0f}s before comparing again.", mention_author=False)
+            return
+        self._last_use[ctx.author.id] = time.monotonic()
+
+        loading = await ctx.reply("⏳ Building the overall comparison...", mention_author=False)
+        try:
+            a = await self._side(ctx, team)
+            b = self._overall_side(ctx.guild, team)
+            if b is None:
+                await loading.edit(content="No other team has recorded matches yet.")
+                return
+            b["color"] = contrasting_overall_color(await overall_color_for(self.bot, ctx), a["color"])
+            data = {
+                "a": {k: a[k] for k in ("name", "logo", "color", "standing", "roster")},
+                "b": {k: b[k] for k in ("name", "logo", "color", "standing", "roster")},
+                "groups": self._groups(a, b, avg_b=True),
+                "leaders": [], "meetings": [], "guild": ctx.guild.name, "caption": "Vs all teams",
+            }
+            png = (await asyncio.to_thread(render_compare_pages, data, True))[0]
+            await loading.edit(content=None, attachments=[discord.File(io.BytesIO(png), filename="ctall.png")])
+        except Exception as exc:
+            print(f"[ctall] failed: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                await loading.edit(content="I couldn't generate the overall comparison. Check the bot logs.")
+            except Exception:
+                pass
+
+    @commands.command(name="ctall", aliases=["ctoverall"])
+    @commands.guild_only()
+    async def ct_all(self, ctx, *, team: str = ""):
+        """Your team (or the named team) vs the average of all other teams."""
+        await self._run_overall(ctx, team.strip() or None)
+
     # ------------------------------------------------------------------ command
-    @commands.command(name="compareteams", aliases=["teamcompare", "cmpteams"])
+    @commands.command(name="compareteams", aliases=["ct", "teamcompare", "cmpteams"])
     @commands.guild_only()
     async def compare_teams(self, ctx, *, teams: str = ""):
         """Compare two teams: +compareteams Team A | Team B"""
@@ -304,6 +447,10 @@ class CompareTeams(commands.Cog):
             await ctx.reply("The team system isn't loaded right now.", mention_author=False)
             return
 
+        words = teams.strip().split()
+        if words and words[0].lower() in ("overall", "all"):       # +ct overall [Team]
+            await self._run_overall(ctx, " ".join(words[1:]) or None)
+            return
         parts = [p.strip() for p in re.split(r"\s*\|\s*|\s+vs\.?\s+", teams.strip(), flags=re.IGNORECASE) if p.strip()]
         if len(parts) == 1:
             mine = core._membership(ctx.guild.id, ctx.author.id)

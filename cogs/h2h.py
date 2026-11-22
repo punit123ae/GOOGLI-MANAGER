@@ -16,6 +16,7 @@ This file also holds ImagePager and the small helpers that +compareteams reuses.
 
 import asyncio
 import io
+import sqlite3
 
 import discord
 from discord.ext import commands
@@ -136,6 +137,113 @@ async def fetch_avatar(bot, member):
         )
     except Exception:
         return None
+
+
+
+# --------------------------------------------------------------------------- overall side colour
+# +h2h all / +ctall compare one player / team with "everyone else". That second side has no
+# team colour, so the bot owner picks one of these (saved per server, changed with +overallcolor).
+OVERALL_COLORS = {
+    "red": (225, 40, 60),
+    "yellow": (255, 196, 40),
+    "blue": (50, 120, 255),
+}
+DEFAULT_OVERALL_COLOR = "red"
+
+
+def _ensure_color_table(bot):
+    bot.db.execute(
+        "CREATE TABLE IF NOT EXISTS overall_side_color ("
+        "guild_id INTEGER PRIMARY KEY, color TEXT NOT NULL)"
+    )
+
+
+def get_overall_color_name(bot, guild_id):
+    """Saved colour name for this server, or None if the owner has not chosen one yet."""
+    try:
+        _ensure_color_table(bot)
+        row = bot.db.execute(
+            "SELECT color FROM overall_side_color WHERE guild_id=?", (int(guild_id),)
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    return str(row[0]) if row and str(row[0]) in OVERALL_COLORS else None
+
+
+def set_overall_color_name(bot, guild_id, name):
+    _ensure_color_table(bot)
+    bot.db.execute(
+        "INSERT INTO overall_side_color (guild_id, color) VALUES (?, ?) "
+        "ON CONFLICT(guild_id) DO UPDATE SET color=excluded.color",
+        (int(guild_id), name),
+    )
+    bot.db.commit()
+
+
+class OverallColorView(discord.ui.View):
+    """Red / Yellow / Blue buttons for the bot owner. The pick is saved when pressed."""
+
+    def __init__(self, bot, ctx):
+        super().__init__(timeout=60)
+        self.bot, self.ctx = bot, ctx
+        self.choice = None
+        self.message = None
+        for name in OVERALL_COLORS:
+            button = discord.ui.Button(
+                label=name.title(),
+                emoji={"red": "🔴", "yellow": "🟡", "blue": "🔵"}[name],
+                style=discord.ButtonStyle.secondary,
+            )
+            button.callback = self._pick(name)
+            self.add_item(button)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Only the bot owner can pick this.", ephemeral=True)
+            return False
+        return True
+
+    def _pick(self, name):
+        async def callback(interaction):
+            set_overall_color_name(self.bot, self.ctx.guild.id, name)
+            self.choice = name
+            await interaction.response.edit_message(
+                content=f"✅ Overall side colour set to **{name}**. Change it any time with `+overallcolor`.",
+                view=None,
+            )
+            self.stop()
+        return callback
+
+    async def on_timeout(self):
+        if self.message is not None and self.choice is None:
+            try:
+                await self.message.edit(content="No colour chosen, using the default for now.", view=None)
+            except discord.HTTPException:
+                pass
+
+
+async def overall_color_for(bot, ctx):
+    """RGB for the 'everyone else' side. The first time the owner uses an overall command, ask."""
+    name = get_overall_color_name(bot, ctx.guild.id)
+    if name is None and await bot.is_owner(ctx.author):
+        view = OverallColorView(bot, ctx)
+        view.message = await ctx.reply(
+            "🎨 Which colour should the **overall** side use? (red / yellow / blue)\n"
+            "You can change it later with `+overallcolor`.",
+            view=view, mention_author=False,
+        )
+        await view.wait()
+        name = view.choice
+    return OVERALL_COLORS[name or DEFAULT_OVERALL_COLOR]
+
+
+def contrasting_overall_color(color, side_color):
+    """The chosen colour, unless it is too close to the other side - then the most different of the three."""
+    def dist(x, y):
+        return sum((p - q) ** 2 for p, q in zip(x, y)) ** 0.5
+    if side_color is None or dist(color, side_color) >= 90:
+        return color
+    return max(OVERALL_COLORS.values(), key=lambda c: dist(c, side_color))
 
 
 # --------------------------------------------------------------------------- embed fallback helpers
@@ -310,6 +418,92 @@ def _image_groups(ra, rb, fa, fb):
         {"title": "BOWLING", "color": BOWL_COLOR, "rows": bowling},
         {"title": "FIELDING & FANTASY", "color": FIELD_COLOR, "rows": fielding},
     ], totals
+
+
+def _overall_groups(ra, fa, others, field_others):
+    """Cards for one player vs the average of all OTHER players.
+
+    others: {user_id: rows} for every other player with matches; field_others: {user_id: (caught, dropped)}.
+    Counting stats are per-player averages; rates (average, strike rate, economy...) are pooled
+    over everybody's matches.
+    """
+    from .stats import fantasy_raw_points
+
+    n = len(others)
+    pooled = [r for rows in others.values() for r in rows]
+    ta, tb = _totals(ra), _totals(pooled)
+
+    def mean(values):
+        values = list(values)
+        return sum(values) / len(values) if values else None
+
+    def cnt(label, a, b, better="high", digits=1):
+        text = None if b is None else (f"{b:.{digits}f}")
+        return stat_row(label, a, b, "int", better, None, text)
+
+    def best_w(rows):
+        w = [r["wickets"] for r in rows if r["balls_bowled"] > 0]
+        return max(w) if w else None
+
+    avg_fifties = mean(sum(1 for r in rows if 50 <= r["runs"] < 100) for rows in others.values())
+    avg_hundreds = mean(sum(1 for r in rows if r["runs"] >= 100) for rows in others.values())
+    mine_best_num, mine_best_text = _best_figures(ra)
+    bowler_best = [best_w(rows) for rows in others.values() if best_w(rows) is not None]
+    avg_best = mean(bowler_best)
+    balls_each = tb["balls_bowled"] / n
+
+    batting = [
+        cnt("Innings", len(ra), mean(len(rows) for rows in others.values()), None),
+        cnt("Runs", ta["runs"], tb["runs"] / n),
+        stat_row("Average", ta["bat_avg"] if ra else None, tb["bat_avg"], "num2", "high"),
+        stat_row("Strike rate", ta["strike_rate"] if ta["balls_faced"] else None,
+                 tb["strike_rate"] if tb["balls_faced"] else None, "num1", "high"),
+        cnt("Highest", max((r["runs"] for r in ra), default=None),
+            mean(max(r["runs"] for r in rows) for rows in others.values())),
+        cnt("50s", sum(1 for r in ra if 50 <= r["runs"] < 100), avg_fifties),
+        cnt("100s", sum(1 for r in ra if r["runs"] >= 100), avg_hundreds),
+    ]
+    bowling = [
+        cnt("Wickets", ta["wickets"], tb["wickets"] / n),
+        stat_row("Economy", ta["economy"] if ta["balls_bowled"] else None,
+                 tb["economy"] if tb["balls_bowled"] else None, "num2", "low"),
+        stat_row("Average", ta["bowl_avg"] if ta["wickets"] else None,
+                 tb["bowl_avg"] if tb["wickets"] else None, "num2", "low"),
+        stat_row("Strike rate", ta["bowl_sr"] if ta["wickets"] else None,
+                 tb["bowl_sr"] if tb["wickets"] else None, "num1", "low"),
+        stat_row("Overs", ta["balls_bowled"], balls_each, "text", None,
+                 _overs_text(ta["balls_bowled"]), _overs_text(int(round(balls_each)))),
+        stat_row("Best figures", mine_best_num, avg_best, "text", "high", mine_best_text,
+                 None if avg_best is None else f"{avg_best:.1f} wkts"),
+        cnt("Spells", sum(1 for r in ra if r["balls_bowled"] > 0),
+            mean(sum(1 for r in rows if r["balls_bowled"] > 0) for rows in others.values()), None),
+    ]
+    bat_a, bowl_a, _ = fantasy_raw_points(ra)
+    parts = [fantasy_raw_points(rows) for rows in others.values()]
+    bat_b, bowl_b = mean(p[0] for p in parts), mean(p[1] for p in parts)
+    field_a = fa[0] * 5 - fa[1] * 10
+    field_b = mean(c * 5 - d * 10 for c, d in field_others.values()) if field_others else 0.0
+    caught_b = mean(c for c, _ in field_others.values()) if field_others else None
+    dropped_b = mean(d for _, d in field_others.values()) if field_others else None
+    pooled_caught = sum(c for c, _ in field_others.values())
+    pooled_chances = pooled_caught + sum(d for _, d in field_others.values())
+    eff_b = pooled_caught / pooled_chances * 100 if pooled_chances else None
+    total_a = bat_a + bowl_a + field_a
+    total_b = bat_b + bowl_b + field_b
+    fielding = [
+        cnt("Caught", fa[0], caught_b),
+        cnt("Dropped", fa[1], dropped_b, "low"),
+        stat_row("Efficiency", _efficiency(fa), eff_b, "pct", "high"),
+        stat_row("Batting pts", bat_a, bat_b, "num1", "high"),
+        stat_row("Bowling pts", bowl_a, bowl_b, "num1", "high"),
+        stat_row("Fielding pts", field_a, field_b, "num1", "high"),
+        stat_row("Total fantasy", total_a, total_b, "num1", "high"),
+    ]
+    return [
+        {"title": "BATTING", "color": BAT_COLOR, "rows": batting},
+        {"title": "BOWLING", "color": BOWL_COLOR, "rows": bowling},
+        {"title": "FIELDING & FANTASY", "color": FIELD_COLOR, "rows": fielding},
+    ], (total_a, total_b)
 
 
 class PlayerH2H(commands.Cog):
@@ -546,11 +740,86 @@ class PlayerH2H(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
+    # ------------------------------------------------------------------ overall (vs everyone else)
+    def _all_player_rows(self, guild_id, exclude_id):
+        """{user_id: match rows} for every other player with recorded main-tournament matches."""
+        try:
+            rows = self.bot.db.execute(
+                """SELECT p.user_id, p.runs, p.balls_faced, p.runs_conceded, p.balls_bowled,
+                          p.wickets, p.not_out
+                   FROM player_match_stats p
+                   JOIN stats_imports i ON i.source_message_id = p.source_message_id
+                   WHERE i.guild_id = ? AND p.user_id != ?
+                     AND COALESCE(i.competition, 'MAIN TOURNAMENT') = 'MAIN TOURNAMENT'""",
+                (int(guild_id), int(exclude_id)),
+            ).fetchall()
+        except Exception:
+            return {}
+        result = {}
+        for r in rows:
+            result.setdefault(int(r[0]), []).append({
+                "runs": int(r[1]), "balls_faced": int(r[2]), "runs_conceded": int(r[3]),
+                "balls_bowled": int(r[4]), "wickets": int(r[5]), "not_out": int(r[6]),
+            })
+        return result
+
+    def _all_fielding(self, guild_id, exclude_id):
+        try:
+            rows = self.bot.db.execute(
+                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats "
+                "WHERE guild_id=? AND user_id != ? AND (catches_caught > 0 OR catches_dropped > 0)",
+                (int(guild_id), int(exclude_id)),
+            ).fetchall()
+        except Exception:
+            return {}
+        return {int(r[0]): (int(r[1]), int(r[2])) for r in rows}
+
+    async def _overall_image(self, ctx, member):
+        guild = ctx.guild
+        ra, fa = self._match_rows(guild.id, member.id), self._fielding(guild.id, member.id)
+        others = self._all_player_rows(guild.id, member.id)
+        if not others:
+            return None
+        groups, totals = _overall_groups(ra, fa, others, self._all_fielding(guild.id, member.id))
+        team, color = self._team_of(guild, member)
+        avatar = await fetch_avatar(self.bot, member)
+        overall = contrasting_overall_color(await overall_color_for(self.bot, ctx), color)
+        data = {
+            "a": {"name": member.display_name, "avatar": avatar, "team": team, "color": color,
+                  "mini": [("MATCHES", str(len(ra))), ("FANTASY", f"{totals[0]:.0f}")]},
+            "b": {"name": "All players", "avatar": None, "team": "LEAGUE AVERAGE", "color": overall,
+                  "mini": [("PLAYERS", str(len(others))), ("FANTASY", f"{totals[1]:.0f}")]},
+            "groups": groups, "matches": [], "match_total": 0, "a_more": 0, "b_more": 0,
+            "guild": guild.name, "caption": "Vs all players",
+        }
+        return (await asyncio.to_thread(render_h2h_pages, data, True))[0]
+
     # ------------------------------------------------------------------ command
     @commands.command(name="h2h", aliases=["headtohead"])
     @commands.guild_only()
-    async def h2h(self, ctx, first: discord.Member, second: discord.Member = None):
-        """Compare two players: +h2h @player  or  +h2h @player1 @player2."""
+    async def h2h(self, ctx, first: str, second: discord.Member = None):
+        """+h2h @player | +h2h @p1 @p2 | +h2h all (you vs everyone) | +h2h all @player"""
+        if first.strip().lower() in ("all", "overall"):
+            subject = second or ctx.author
+            loading = await ctx.reply("⏳ Building the overall comparison...", mention_author=False)
+            try:
+                png = await self._overall_image(ctx, subject)
+            except Exception as exc:
+                print(f"[h2h all] failed: {type(exc).__name__}: {exc}", flush=True)
+                png = None
+                await loading.edit(content="I couldn't build the overall comparison. Check the bot logs.")
+                return
+            if png is None:
+                await loading.edit(content="There are no other players with recorded matches yet.")
+                return
+            await loading.edit(content=None, attachments=[discord.File(io.BytesIO(png), filename="h2h_all.png")])
+            return
+
+        try:
+            first = await commands.MemberConverter().convert(ctx, first)
+        except commands.BadArgument:
+            await ctx.reply("Use `+h2h @player`, `+h2h @player1 @player2` or `+h2h all`.", mention_author=False)
+            return
         if second is None:
             first, second = ctx.author, first
         if first.id == second.id:
@@ -571,6 +840,27 @@ class PlayerH2H(commands.Cog):
             except Exception:
                 pass
             await self._send_embeds(ctx, first, second)
+
+    @commands.command(name="overallcolor", aliases=["overallcolour", "setoverallcolor"])
+    @commands.guild_only()
+    async def overall_color(self, ctx, color: str = None):
+        """Bot owner: choose the colour of the 'overall' side (red / yellow / blue)."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.reply("Only the bot owner can change this.", mention_author=False)
+            return
+        if color is None:
+            current = get_overall_color_name(self.bot, ctx.guild.id) or f"{DEFAULT_OVERALL_COLOR} (default)"
+            view = OverallColorView(self.bot, ctx)
+            view.message = await ctx.reply(
+                f"🎨 Overall side colour is **{current}**. Pick a new one:", view=view, mention_author=False
+            )
+            return
+        name = color.strip().lower()
+        if name not in OVERALL_COLORS:
+            await ctx.reply("Choose `red`, `yellow` or `blue`.", mention_author=False)
+            return
+        set_overall_color_name(self.bot, ctx.guild.id, name)
+        await ctx.reply(f"✅ Overall side colour set to **{name}**.", mention_author=False)
 
 
 async def setup(bot):

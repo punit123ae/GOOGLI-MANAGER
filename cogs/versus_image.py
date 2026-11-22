@@ -378,7 +378,7 @@ def _h2h_stats_page(data, col_a, col_b):
     _player_block(c, a, c.a, True)
     _player_block(c, b, c.b, False)
     a_total, b_total, per = _tally(groups)
-    _scoreboard(c, a_total, b_total, a["name"], b["name"], "Head to head")
+    _scoreboard(c, a_total, b_total, a["name"], b["name"], data.get("caption", "Head to head"))
     for box, group, won in zip(boxes, groups, per):
         _draw_group(c.d, box, group, c.a, c.b, won, row_h=62, first_row=70)
     _footer(c, f"GOOGLI MANAGER  •  HEAD TO HEAD  •  {a['name']} vs {b['name']}"[:90], data.get("guild"))
@@ -455,9 +455,14 @@ def _h2h_matches_page(data, col_a, col_b):
     return c.image
 
 
-def render_h2h_pages(data):
-    """data: a/b {name, avatar, team, color, mini}, groups, matches, match_total, a_more, b_more, guild."""
+def render_h2h_pages(data, only_first=False):
+    """data: a/b {name, avatar, team, color, mini}, groups, matches, match_total, a_more, b_more, guild.
+
+    Optional data["caption"] replaces the "Head to head" chip; only_first draws just page 1.
+    """
     col_a, col_b = pick_sides(data["a"].get("color"), data["b"].get("color"))
+    if only_first:
+        return [_png(_h2h_stats_page(data, col_a, col_b))]
     return [_png(_h2h_stats_page(data, col_a, col_b)), _png(_h2h_matches_page(data, col_a, col_b))]
 
 
@@ -519,7 +524,7 @@ def _compare_main_page(data, col_a, col_b):
     _team_block(c, a, c.a, True)
     _team_block(c, b, c.b, False)
     a_total, b_total, per = _tally(groups)
-    _scoreboard(c, a_total, b_total, a["name"], b["name"], "Team comparison")
+    _scoreboard(c, a_total, b_total, a["name"], b["name"], data.get("caption", "Team comparison"))
     for box, group, won in zip(boxes, groups, per):
         _draw_group(c.d, box, group, c.a, c.b, won, row_h=54, first_row=64)
     _footer(c, f"GOOGLI MANAGER  •  TEAM COMPARISON  •  {a['name']} vs {b['name']}"[:90], data.get("guild"))
@@ -618,7 +623,12 @@ def _compare_people_page(data, col_a, col_b):
     return c.image
 
 
-def render_compare_pages(data):
-    """data: a/b {name, logo, color, standing, roster}, groups (4), leaders (3), meetings, guild."""
+def render_compare_pages(data, only_first=False):
+    """data: a/b {name, logo, color, standing, roster}, groups (4), leaders (3), meetings, guild.
+
+    Optional data["caption"] replaces the "Team comparison" chip; only_first draws just page 1.
+    """
     col_a, col_b = pick_sides(data["a"].get("color"), data["b"].get("color"))
+    if only_first:
+        return [_png(_compare_main_page(data, col_a, col_b))]
     return [_png(_compare_main_page(data, col_a, col_b)), _png(_compare_people_page(data, col_a, col_b))]
