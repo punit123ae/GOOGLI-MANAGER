@@ -149,6 +149,51 @@ def initialize_database():
 initialize_database()
 
 
+def _log_command(kind, command_name, user, guild, status):
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    server_name = guild.name if guild else "DM"
+    server_id = guild.id if guild else "N/A"
+    user_name = f"{user} ({user.id})" if user else "Unknown"
+    print(
+        f"[COMMAND {kind}] [{timestamp}] "
+        f"server={server_name!r} ({server_id}) "
+        f"user={user_name} command={command_name!r} status={status}",
+        flush=True,
+    )
+
+
+@bot.event
+async def on_command_completion(ctx):
+    _log_command(
+        "PREFIX", ctx.command.qualified_name, ctx.author, ctx.guild, "SUCCESS"
+    )
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    # Log command errors too, including failed checks and invalid arguments.
+    _log_command(
+        "PREFIX", ctx.command.qualified_name if ctx.command else "unknown",
+        ctx.author, ctx.guild, f"ERROR: {type(error).__name__}: {error}"
+    )
+
+
+@bot.event
+async def on_interaction(interaction):
+    # Only log slash/application commands, not buttons, selects, or other components.
+    if interaction.type is discord.InteractionType.application_command:
+        command = interaction.command
+        command_name = (
+            command.qualified_name if command is not None
+            else interaction.data.get("name", "unknown")
+        )
+        _log_command(
+            "SLASH", command_name, interaction.user, interaction.guild, "RECEIVED"
+        )
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
