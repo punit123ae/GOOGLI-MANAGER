@@ -363,7 +363,7 @@ class BatterCatches(commands.Cog):
     async def set_catch_competition(self, ctx: commands.Context, channel: discord.TextChannel,
                                     *, competition: str):
         """Set the competition scope for batter-side catch events in a tracked channel."""
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         normalized = competition.strip().upper().replace("_", " ")
         if normalized in ("MAIN", "MAIN TOURNAMENT"):
@@ -399,7 +399,7 @@ class BatterCatches(commands.Cog):
     @commands.guild_only()
     async def reset_batter_catches(self, ctx: commands.Context, confirm: str = ""):
         """Delete all recorded batter-side catches of this server (owner only)."""
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         if confirm.lower() != "confirm":
             return await ctx.reply("This deletes every recorded batter-side catch in this server. "
