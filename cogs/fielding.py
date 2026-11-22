@@ -868,7 +868,7 @@ class CatchTracker(commands.Cog):
 
     # ------------------------------------------------------------------ permissions
     async def _tracking_permission(self, ctx, command_name):
-        if int(ctx.author.id) == BOT_OWNER_ID:
+        if is_bot_owner_id(self.bot, ctx.author.id):
             return True
         if _member_has_whitelist_role(self.bot, ctx.guild.id, ctx.author, command_name):
             return True
@@ -1045,8 +1045,8 @@ class CatchTracker(commands.Cog):
     @commands.command(name="testfdstats")
     async def test_fdstats(self, ctx, *, who: str = None):
         """Image preview of +fdstats (bot owner or a whitelisted role). Usage: +testfdstats [@user / id / name]"""
-        from .utility import owner_or_whitelisted
-        if not (int(ctx.author.id) == BOT_OWNER_ID or await self.bot.is_owner(ctx.author)
+        from .utility import is_bot_owner_id, owner_or_whitelisted
+        if not (is_bot_owner_id(self.bot, ctx.author.id) or await self.bot.is_owner(ctx.author)
                 or (ctx.guild is not None and await owner_or_whitelisted(ctx, "testfdstats"))):
             await ctx.send("❌ Only the bot owner or a role whitelisted for `+testfdstats` can use this command.")
             return
