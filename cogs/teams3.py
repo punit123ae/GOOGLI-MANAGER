@@ -130,6 +130,10 @@ class TeamInfoMixedView(discord.ui.View):
         self.previous.disabled = self.index == 0
         self.next.disabled = self.index >= self.page_count - 1
         self.counter.label = f"{self.index + 1}/{self.page_count}"
+        active = 0 if self.index == 0 else (1 if self.index == 1 else (2 if self.index == 2 else 3))
+        for position, button in enumerate((self.roster_btn, self.overview_btn, self.stats_btn, self.squad_btn)):
+            button.style = discord.ButtonStyle.success if position == active else discord.ButtonStyle.secondary
+        self.squad_btn.disabled = self.page_count < 4
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.owner_id:
@@ -157,17 +161,33 @@ class TeamInfoMixedView(discord.ui.View):
         file = discord.File(io.BytesIO(png), filename="teaminfo.png")
         await interaction.edit_original_response(embed=None, attachments=[file], view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Previous", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def previous(self, interaction, button):
         await self._show(interaction, self.index - 1)
 
-    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True)
+    @discord.ui.button(label="1/1", style=discord.ButtonStyle.primary, disabled=True, row=0)
     async def counter(self, interaction, button):
         await interaction.response.defer()
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Next", emoji="▶️", style=discord.ButtonStyle.secondary, row=0)
     async def next(self, interaction, button):
         await self._show(interaction, self.index + 1)
+
+    @discord.ui.button(label="Roster", emoji="📋", style=discord.ButtonStyle.success, row=1)
+    async def roster_btn(self, interaction, button):
+        await self._show(interaction, 0)
+
+    @discord.ui.button(label="Overview", emoji="🏏", style=discord.ButtonStyle.secondary, row=1)
+    async def overview_btn(self, interaction, button):
+        await self._show(interaction, 1)
+
+    @discord.ui.button(label="Team Stats", emoji="📊", style=discord.ButtonStyle.secondary, row=1)
+    async def stats_btn(self, interaction, button):
+        await self._show(interaction, 2)
+
+    @discord.ui.button(label="Squad", emoji="👥", style=discord.ButtonStyle.secondary, row=1)
+    async def squad_btn(self, interaction, button):
+        await self._show(interaction, 3)
 
     async def on_timeout(self):
         self.clear_items()

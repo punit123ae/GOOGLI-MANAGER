@@ -2019,59 +2019,7 @@ class StatsSelect(discord.ui.Select):
             )
             return
 
-        selected = self.values[0]
-        for option in self.options:
-            option.default = option.value == selected
-
-        if selected == "image":
-            image = io.BytesIO(view.overall_image)
-            image.seek(0)
-            file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
-            await interaction.response.edit_message(
-                content=None, embed=None, attachments=[file], view=view
-            )
-            return
-
-        if selected == "overview":
-            await interaction.response.edit_message(
-                content=None, embed=view.overview_embed, view=view
-            )
-            return
-
-        if selected == "deep":
-            await interaction.response.edit_message(
-                content=None, embed=view.deep_embed, view=view
-            )
-            return
-
-        if selected == "graph" and view.graph_rows is not None:
-            # Generate the graph only when requested; do not delay the initial stats card.
-            if view.graph_image is None:
-                await interaction.response.defer()
-                try:
-                    graph_buffer = await asyncio.to_thread(
-                        make_form_graph_image, view.graph_member,
-                        view.graph_rows, avatar=view.graph_avatar,
-                    )
-                except Exception as exc:
-                    print(f"[stats] Could not build the form graph: {type(exc).__name__}: {exc}")
-                    await interaction.followup.send("❌ Could not build the form graph right now.", ephemeral=True)
-                    return
-                view.graph_image = graph_buffer.getvalue()
-            image = io.BytesIO(view.graph_image)
-            image.seek(0)
-            file = discord.File(image, filename=f"player_{view.member_id}_form_graph.png")
-            await interaction.edit_original_response(
-                content=None, embed=None, attachments=[file], view=view
-            )
-            return
-
-        image = io.BytesIO(view.overall_image)
-        image.seek(0)
-        file = discord.File(image, filename=f"player_{view.member_id}_stats.png")
-        await interaction.response.edit_message(
-            content=None, embed=None, attachments=[file], view=view
-        )
+        await view.show(interaction, self.values[0])
 
 
 class StatsCompetitionSelect(discord.ui.Select):
@@ -2110,6 +2058,17 @@ class StatsCompetitionSelect(discord.ui.Select):
             pending.pop(context_key, None)
 
 
+class StatsPageButton(discord.ui.Button):
+    """Named quick-jump button for one stats page."""
+
+    def __init__(self, key, label, emoji):
+        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=2)
+        self.key = key
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.show(interaction, self.key)
+
+
 class StatsView(discord.ui.View):
     def __init__(self, requester_id, member_id, overall_image, overview_embed, deep_embed,
                  cog=None, ctx=None, has_last_gate=False, graph_image=None,
@@ -2127,9 +2086,96 @@ class StatsView(discord.ui.View):
         self.deep_embed = deep_embed
         self.cog = cog
         self.ctx = ctx
-        self.add_item(StatsSelect(has_graph=graph_rows is not None or bool(graph_image)))
+        self.has_graph = graph_rows is not None or bool(graph_image)
+        self.add_item(StatsSelect(has_graph=self.has_graph))
         if has_last_gate and cog is not None and ctx is not None:
             self.add_item(StatsCompetitionSelect())
+        self.page_buttons = {}
+        pages = [("image", "Player Card", "💎")]
+        if self.has_graph:
+            pages.append(("graph", "Form Graph", "📈"))
+        pages += [("overview", "Overview", "📊"), ("deep", "Deep Stats", "🔎")]
+        for key, label, emoji in pages:
+            button = StatsPageButton(key, label, emoji)
+            self.page_buttons[key] = button
+            self.add_item(button)
+        self._mark_active("image")
+
+    def _mark_active(self, selected):
+        """Highlight the open page on both the dropdown and the buttons."""
+        for key, button in self.page_buttons.items():
+            button.style = discord.ButtonStyle.primary if key == selected else discord.ButtonStyle.secondary
+        for item in self.children:
+            if isinstance(item, StatsSelect):
+                for option in item.options:
+                    option.default = option.value == selected
+
+    async def show(self, interaction, selected):
+        """Show one stats page; shared by the dropdown and the buttons."""
+        previous = getattr(self, "current_page", "image")
+        self._mark_active(selected)
+        self.current_page = selected
+
+        if selected == "image":
+            image = io.BytesIO(self.overall_image)
+            image.seek(0)
+            file = discord.File(image, filename=f"player_{self.member_id}_stats.png")
+            await interaction.response.edit_message(
+                content=None, embed=None, attachments=[file], view=self
+            )
+            return
+
+        if selected == "overview":
+            await interaction.response.edit_message(
+                content=None, embed=self.overview_embed, view=self
+            )
+            return
+
+        if selected == "deep":
+            await interaction.response.edit_message(
+                content=None, embed=self.deep_embed, view=self
+            )
+            return
+
+        if selected == "graph" and (self.graph_rows is not None or self.graph_image):
+            # Generate the graph only when requested; do not delay the initial stats card.
+            if self.graph_image is None:
+                await interaction.response.defer()
+                try:
+                    graph_buffer = await asyncio.to_thread(
+                        make_form_graph_image, self.graph_member,
+                        self.graph_rows, avatar=self.graph_avatar,
+                    )
+                except Exception as exc:
+                    print(f"[stats] Could not build the form graph: {type(exc).__name__}: {exc}")
+                    self._mark_active(previous)       # the graph never opened: keep the old highlight
+                    self.current_page = previous
+                    await interaction.edit_original_response(view=self)
+                    await interaction.followup.send("❌ Could not build the form graph right now.", ephemeral=True)
+                    return
+                self.graph_image = graph_buffer.getvalue()
+            image = io.BytesIO(self.graph_image)
+            image.seek(0)
+            file = discord.File(image, filename=f"player_{self.member_id}_form_graph.png")
+            await interaction.edit_original_response(
+                content=None, embed=None, attachments=[file], view=self
+            )
+            return
+
+        image = io.BytesIO(self.overall_image)
+        image.seek(0)
+        file = discord.File(image, filename=f"player_{self.member_id}_stats.png")
+        await interaction.response.edit_message(
+            content=None, embed=None, attachments=[file], view=self
+        )
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "This stats menu belongs to the person who requested it.", ephemeral=True
+        )
+        return False
 
     async def on_timeout(self):
         """Release per-request image/data references when this menu expires."""
