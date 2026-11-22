@@ -145,7 +145,7 @@ def pick_sides(color_a, color_b):
 SEAM_TOP, SEAM_BOTTOM = 880, 720      # the diagonal that separates the two colours
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=3)      # each cached background is ~4 MB
 def _split_background(bg_a, bg_b):
     """Dark page, left half in colour A, right half in colour B, with glows, beams, grid, vignette.
 

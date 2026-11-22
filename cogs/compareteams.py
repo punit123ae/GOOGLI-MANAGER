@@ -409,7 +409,7 @@ class CompareTeams(commands.Cog):
                 small = await asyncio.to_thread(_shrink_logo, raw)
             except Exception:
                 small = raw
-        if len(_LOGO_CACHE) >= 24:
+        if len(_LOGO_CACHE) >= 8:
             _LOGO_CACHE.pop(next(iter(_LOGO_CACHE)))
         _LOGO_CACHE[key] = small
         return small

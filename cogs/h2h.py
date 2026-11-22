@@ -40,13 +40,32 @@ COOLDOWN_SECONDS = 8
 _last_use = {}
 
 
+def trim_memory():
+    """Give memory back to the system after drawing an image.
+
+    Pillow builds several 1600x900 layers per image; Python keeps that freed memory for itself,
+    so the process grows after every command. Collecting garbage and asking glibc to release
+    the free pages keeps it flat on small (256 MB) hosts. Harmless where glibc isn't available.
+    """
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 async def render_png(func, *args):
     """Run a Pillow renderer in a worker thread, one at a time."""
     global _RENDER_LOCK
     if _RENDER_LOCK is None:
         _RENDER_LOCK = asyncio.Semaphore(1)
     async with _RENDER_LOCK:
-        return await asyncio.to_thread(func, *args)
+        try:
+            return await asyncio.to_thread(func, *args)
+        finally:
+            trim_memory()
 
 
 def on_cooldown(user_id):

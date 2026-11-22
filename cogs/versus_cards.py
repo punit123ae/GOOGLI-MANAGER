@@ -36,7 +36,7 @@ def pick_colors(left, right):
     return left, right
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=3)
 def _background(left_bg, right_bg):
     """Dark page, left half tinted left_bg, right half tinted right_bg, soft seam in the middle."""
     base = Image.new("RGB", (W, H), (5, 9, 20)).convert("RGBA")

@@ -189,7 +189,7 @@ def _donut(size, pct, color, track, width):
     return layer.resize((size, size), Image.Resampling.LANCZOS)
 
 
-@lru_cache(maxsize=24)
+@lru_cache(maxsize=3)      # each cached page background is ~4 MB
 def _background(accent):
     """Dark page tinted with the team colour: gradient, glows, light beams, grid, vignette."""
     accent2 = _lighten(accent, 0.35)
