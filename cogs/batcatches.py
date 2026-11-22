@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -25,12 +26,41 @@ from .batfds import (
     BOT_OWNER_ID,
     HANDCRICKET_BOT_ID,
     PENDING_TTL_SECONDS,
+    _clean_discord_name,
     find_member_id,
+    invalidate_name_index,
     message_text,
     parse_opportunity,
 )
 
 log = logging.getLogger(__name__)
+
+_QUERY_TRIED: dict = {}
+
+
+async def _resolve_missing(guild: discord.Guild, names) -> None:
+    """Ask Discord for members whose names are not cached, then rebuild the name table.
+
+    Standalone copy of the lookup that used to live in the batfds cog, so batter-catch
+    tracking keeps working with that cog unloaded.
+    """
+    now = time.monotonic()
+    asked = False
+    for name in names:
+        key = _clean_discord_name(name).lstrip("@")
+        if not key or find_member_id(guild, name) is not None:
+            continue
+        if now - _QUERY_TRIED.get((guild.id, key), -1e9) < 600:
+            continue  # asked recently: unknown names must not flood Discord
+        _QUERY_TRIED[(guild.id, key)] = now
+        try:
+            await guild.query_members(query=key[:100], limit=10, cache=True)
+            asked = True
+        except Exception:
+            log.warning("batcatches: member lookup failed (is the Members intent enabled?)")
+            break
+    if asked:
+        invalidate_name_index(guild.id)
 
 
 def _message_kind(message: discord.Message):
@@ -166,13 +196,11 @@ class BatterCatches(commands.Cog):
                 elif opp[1]:
                     batter = find_member_id(message.guild, opp[1])
                     if batter is None:
-                        helper = self.bot.get_cog("BatterFieldingDropStats")
-                        if helper is not None:
-                            try:
-                                await helper._resolve_missing(message.guild, [opp[1]])
-                                batter = find_member_id(message.guild, opp[1])
-                            except Exception:
-                                log.exception("batcatches: member lookup failed")
+                        try:
+                            await _resolve_missing(message.guild, [opp[1]])
+                            batter = find_member_id(message.guild, opp[1])
+                        except Exception:
+                            log.exception("batcatches: member lookup failed")
             if batter:
                 self._pending[cid] = (int(batter), ts, message.id)
             else:
@@ -266,10 +294,9 @@ class BatterCatches(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        helper = self.bot.get_cog("BatterFieldingDropStats")
-        if helper is not None and names:
+        if names:
             try:
-                await helper._resolve_missing(guild, list(names))
+                await _resolve_missing(guild, list(names))
             except Exception:
                 log.exception("batcatches: member lookup failed")
         cache = {}
