@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 
+from .utility import is_bot_owner_id
+
 from .teams1 import TeamCore, ConfirmDeleteAllView, TeamApprovalView, TeamListView, JoinRequestView, LeaveTeamConfirmView, CAPTAIN_EMOJI, VICE_CAPTAIN_EMOJI
 
 class TeamCommandsA:
@@ -84,7 +86,7 @@ class TeamCommandsA:
     @commands.guild_only()
     async def set_ping_cooldown(self, ctx, seconds: int):
         """Configure the per-team ping cooldown; server owner only."""
-        if ctx.author.id not in (ctx.guild.owner_id, 1014568928682459198):
+        if ctx.author.id != ctx.guild.owner_id and not is_bot_owner_id(self.bot, ctx.author.id):
             await ctx.reply("Only the server owner or bot owner can use this command.", mention_author=False)
             return
         if seconds < 0 or seconds > 86400:
