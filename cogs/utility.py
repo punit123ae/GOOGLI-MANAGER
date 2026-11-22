@@ -963,8 +963,7 @@ class Utility(commands.Cog):
 
 
     async def _require_bot_owner(self, ctx):
-        # Owner-only utility commands can be delegated individually, without
-        # changing Bot.is_owner() or granting access to other commands.
+        # Only bot owners can use this command.
         command_name = ctx.command.name if ctx.command else ""
         if await self.command_allowed(ctx, command_name):
             return True
@@ -1011,8 +1010,8 @@ class Utility(commands.Cog):
         if not await self._require_bot_owner(ctx):
             return
         user_id, user = await self._resolve_botban_target(ctx, target)
-        if user_id == BOT_OWNER_ID:
-            await ctx.reply("The bot owner cannot be bot-banned.", mention_author=False)
+        if user_id is not None and self.is_bot_owner(user_id):
+            await ctx.reply("Bot owners cannot be bot-banned.", mention_author=False)
             return
         if user_id is None and user == "ambiguous":
             await ctx.reply("That username matches multiple users. Use a mention or numeric user ID.", mention_author=False)
