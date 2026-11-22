@@ -177,6 +177,7 @@ class Utility(commands.Cog):
         );
         """)
         self.db.commit()
+        self._base_owner_ids = set(getattr(self.bot, "owner_ids", None) or ())
         self._sync_extra_owner_ids()
         # Repair historical approved teams whose captain is missing from the roster.
         # This is safe to run on every startup: INSERT OR IGNORE prevents duplicates.
@@ -667,7 +668,7 @@ class Utility(commands.Cog):
             int(row[0]) for row in self.db.execute("SELECT user_id FROM bot_extra_owners")
         }
         # discord.py uses owner_ids for commands guarded by bot.is_owner().
-        self.bot.owner_ids = set(getattr(self.bot, "owner_ids", None) or ())
+        self.bot.owner_ids = set(self._base_owner_ids)
         self.bot.owner_ids.add(BOT_OWNER_ID)
         self.bot.owner_ids.update(extra_ids)
 
@@ -737,7 +738,7 @@ class Utility(commands.Cog):
         return True
 
     async def _can_manage_utility(self, guild_id, member):
-        # Only the configured bot owner may change whitelist and lock settings.
+        # Bot owners may change whitelist and lock settings.
         # Discord Administrator permission does not grant this access.
         return member is not None and self.is_bot_owner(member.id)
 
