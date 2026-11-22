@@ -17,12 +17,13 @@ This file also holds ImagePager and the small helpers that +compareteams reuses.
 import asyncio
 import io
 import sqlite3
+import time
 
 import discord
 from discord.ext import commands
 
 from .lb import _totals
-from .versus_image import BAT_COLOR, BOWL_COLOR, FIELD_COLOR, render_h2h_pages, stat_row
+from .versus_image import BAT_COLOR, BOWL_COLOR, FIELD_COLOR, render_h2h_page, render_h2h_pages, stat_row
 
 BLUE = discord.Color.from_rgb(55, 150, 255)
 NAME_WIDTH = 9
@@ -32,13 +33,43 @@ BETTER = "▲"
 
 # --------------------------------------------------------------------------- shared helpers
 
-class ImagePager(discord.ui.View):
-    """Flip between image pages (PNG bytes). Only the person who ran the command can use it."""
+# Only one image is drawn at a time, however many people use the commands at once. Drawing is
+# CPU-heavy; letting several run together is what pegged the CPU and froze the bot.
+_RENDER_LOCK = None
+COOLDOWN_SECONDS = 8
+_last_use = {}
 
-    def __init__(self, ctx, pages, names, filename):
+
+async def render_png(func, *args):
+    """Run a Pillow renderer in a worker thread, one at a time."""
+    global _RENDER_LOCK
+    if _RENDER_LOCK is None:
+        _RENDER_LOCK = asyncio.Semaphore(1)
+    async with _RENDER_LOCK:
+        return await asyncio.to_thread(func, *args)
+
+
+def on_cooldown(user_id):
+    """Seconds left before this user may draw another image (0 when free); starts the timer if free."""
+    wait = COOLDOWN_SECONDS - (time.monotonic() - _last_use.get(user_id, -1e9))
+    if wait > 0:
+        return wait
+    _last_use[user_id] = time.monotonic()
+    return 0
+
+
+class ImagePager(discord.ui.View):
+    """Flip between image pages. Only the person who ran the command can use it.
+
+    first_png is page 1 (already drawn). Other pages are drawn by render_page(index) only when
+    somebody opens them, then kept.
+    """
+
+    def __init__(self, ctx, first_png, count, render_page, names, filename):
         super().__init__(timeout=180)
         self.owner_id = ctx.author.id
-        self.pages = list(pages)
+        self.pages = [first_png] + [None] * (count - 1)
+        self.render_page = render_page
         self.filename = filename
         self.index = 0
         self.message = None
@@ -53,7 +84,7 @@ class ImagePager(discord.ui.View):
             self.add_item(item)
 
         self.name_buttons = []
-        for number, name in enumerate(names[:len(self.pages)]):
+        for number, name in enumerate(names[:count]):
             button = discord.ui.Button(label=name, style=discord.ButtonStyle.secondary, row=1)
             button.callback = self._goto(number)
             self.name_buttons.append(button)
@@ -78,8 +109,16 @@ class ImagePager(discord.ui.View):
     async def _show(self, interaction, index):
         self.index = max(0, min(index, len(self.pages) - 1))
         self._sync()
+        await interaction.response.defer()
+        if self.pages[self.index] is None:
+            try:
+                self.pages[self.index] = await render_png(self.render_page, self.index)
+            except Exception as exc:
+                print(f"[pager] page render failed: {type(exc).__name__}: {exc}", flush=True)
+                await interaction.followup.send("I couldn't draw that page. Check the bot logs.", ephemeral=True)
+                return
         file = discord.File(io.BytesIO(self.pages[self.index]), filename=self.filename)
-        await interaction.response.edit_message(attachments=[file], view=self)
+        await interaction.edit_original_response(attachments=[file], view=self)
 
     async def _previous(self, interaction):
         await self._show(interaction, self.index - 1)
@@ -687,8 +726,8 @@ class PlayerH2H(commands.Cog):
         return embed
 
     # ------------------------------------------------------------------ images
-    async def _image_pages(self, guild, a, b):
-        """Gather everything and draw both pages. Returns a list of PNG bytes."""
+    async def _image_data(self, guild, a, b):
+        """Gather everything the two image pages need (nothing is drawn here)."""
         ra, rb = self._match_rows(guild.id, a.id), self._match_rows(guild.id, b.id)
         fa, fb = self._fielding(guild.id, a.id), self._fielding(guild.id, b.id)
         groups, fantasy = _image_groups(ra, rb, fa, fb)
@@ -720,7 +759,7 @@ class PlayerH2H(commands.Cog):
             "groups": groups, "matches": matches, "match_total": len(matches),
             "a_more": a_more, "b_more": b_more, "guild": guild.name,
         }
-        return await asyncio.to_thread(render_h2h_pages, data)
+        return data
 
     async def _send_embeds(self, ctx, first, second):
         pages = [
@@ -792,13 +831,17 @@ class PlayerH2H(commands.Cog):
             "groups": groups, "matches": [], "match_total": 0, "a_more": 0, "b_more": 0,
             "guild": guild.name, "caption": "Vs all players",
         }
-        return (await asyncio.to_thread(render_h2h_pages, data, True))[0]
+        return (await render_png(render_h2h_pages, data, True))[0]
 
     # ------------------------------------------------------------------ command
     @commands.command(name="h2h", aliases=["headtohead"])
     @commands.guild_only()
     async def h2h(self, ctx, first: str, second: discord.Member = None):
         """+h2h @player | +h2h @p1 @p2 | +h2h all (you vs everyone) | +h2h all @player"""
+        wait = on_cooldown(ctx.author.id)
+        if wait:
+            await ctx.reply(f"Please wait {wait:.0f}s before using this again.", mention_author=False)
+            return
         if first.strip().lower() in ("all", "overall"):
             subject = second or ctx.author
             loading = await ctx.reply("⏳ Building the overall comparison...", mention_author=False)
@@ -828,10 +871,12 @@ class PlayerH2H(commands.Cog):
 
         loading = await ctx.reply("⏳ Building the head-to-head...", mention_author=False)
         try:
-            pngs = await self._image_pages(ctx.guild, first, second)
-            view = ImagePager(ctx, pngs, ("Stats", "Matches"), "h2h.png")
+            data = await self._image_data(ctx.guild, first, second)
+            png = await render_png(render_h2h_page, data, 0)
+            view = ImagePager(ctx, png, 2, lambda index: render_h2h_page(data, index),
+                              ("Stats", "Matches"), "h2h.png")
             view.message = await loading.edit(
-                content=None, attachments=[discord.File(io.BytesIO(pngs[0]), filename="h2h.png")], view=view,
+                content=None, attachments=[discord.File(io.BytesIO(png), filename="h2h.png")], view=view,
             )
         except Exception as exc:
             print(f"[h2h] image generation failed: {type(exc).__name__}: {exc}", flush=True)

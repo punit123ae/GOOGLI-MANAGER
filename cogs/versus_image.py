@@ -145,24 +145,34 @@ def pick_sides(color_a, color_b):
 SEAM_TOP, SEAM_BOTTOM = 880, 720      # the diagonal that separates the two colours
 
 
-@lru_cache(maxsize=24)
+@lru_cache(maxsize=8)
 def _split_background(bg_a, bg_b):
-    """Dark page, left half in colour A, right half in colour B, with glows, beams, grid, vignette."""
+    """Dark page, left half in colour A, right half in colour B, with glows, beams, grid, vignette.
+
+    The soft parts (colour fields, glows, beams) are blurred at HALF size and scaled up: they are
+    blurry anyway, and this makes the expensive blurs about 4x cheaper. The result is cached.
+    """
+    k = 0.5
+    sw, sh = int(W * k), int(H * k)
     base = Image.composite(
-        Image.new("RGB", (W, H), (12, 20, 42)),
-        Image.new("RGB", (W, H), (4, 8, 18)),
-        Image.linear_gradient("L").resize((W, H)),
+        Image.new("RGB", (sw, sh), (12, 20, 42)),
+        Image.new("RGB", (sw, sh), (4, 8, 18)),
+        Image.linear_gradient("L").resize((sw, sh)),
     ).convert("RGBA")
 
+    def pts(points):
+        return [(int(x * k), int(y * k)) for x, y in points]
+
     def poly(points, color, alpha, blur):
-        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).polygon(points, fill=color + (alpha,))
-        return layer.filter(ImageFilter.GaussianBlur(blur))
+        layer = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).polygon(pts(points), fill=color + (alpha,))
+        return layer.filter(ImageFilter.GaussianBlur(blur * k))
 
     def glow(cx, cy, rx, ry, color, alpha, blur):
-        layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=color + (alpha,))
-        return layer.filter(ImageFilter.GaussianBlur(blur))
+        layer = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).ellipse(
+            (int((cx - rx) * k), int((cy - ry) * k), int((cx + rx) * k), int((cy + ry) * k)), fill=color + (alpha,))
+        return layer.filter(ImageFilter.GaussianBlur(blur * k))
 
     base = Image.alpha_composite(base, poly([(-300, -300), (SEAM_TOP, -300), (SEAM_BOTTOM, H + 300), (-300, H + 300)], bg_a, 120, 80))
     base = Image.alpha_composite(base, poly([(SEAM_TOP, -300), (W + 300, -300), (W + 300, H + 300), (SEAM_BOTTOM, H + 300)], bg_b, 120, 80))
@@ -171,24 +181,36 @@ def _split_background(bg_a, bg_b):
     base = Image.alpha_composite(base, glow(120, 880, 520, 260, bg_a, 70, 120))
     base = Image.alpha_composite(base, glow(1480, 880, 520, 260, bg_b, 70, 120))
 
-    beams = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    beams = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
     bd = ImageDraw.Draw(beams)
-    bd.polygon([(0, 0), (190, 0), (50, H), (0, H)], fill=bg_a + (34,))
-    bd.polygon([(W, 0), (W - 190, 0), (W - 50, H), (W, H)], fill=bg_b + (34,))
-    bd.polygon([(SEAM_TOP - 4, 0), (SEAM_TOP + 4, 0), (SEAM_BOTTOM + 4, H), (SEAM_BOTTOM - 4, H)], fill=(255, 255, 255, 40))
-    base = Image.alpha_composite(base, beams.filter(ImageFilter.GaussianBlur(7)))
+    bd.polygon(pts([(0, 0), (190, 0), (50, H), (0, H)]), fill=bg_a + (34,))
+    bd.polygon(pts([(W, 0), (W - 190, 0), (W - 50, H), (W, H)]), fill=bg_b + (34,))
+    bd.polygon(pts([(SEAM_TOP - 4, 0), (SEAM_TOP + 4, 0), (SEAM_BOTTOM + 4, H), (SEAM_BOTTOM - 4, H)]), fill=(255, 255, 255, 40))
+    base = Image.alpha_composite(base, beams.filter(ImageFilter.GaussianBlur(7 * k)))
 
+    full = base.resize((W, H), Image.Resampling.BICUBIC)
     grid = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     gd = ImageDraw.Draw(grid)
     for gx in range(0, W, 60):
         gd.line((gx, 0, gx, H), fill=(255, 255, 255, 6))
     for gy in range(0, H, 60):
         gd.line((0, gy, W, gy), fill=(255, 255, 255, 6))
-    base = Image.alpha_composite(base, grid)
+    full = Image.alpha_composite(full, grid)
+    full = Image.alpha_composite(full, _vignette())
+    return full.convert("RGB")
 
-    vignette = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    vignette.putalpha(Image.radial_gradient("L").resize((W, H)).point(lambda v: int(max(0, v - 120) * 1.1)))
-    return Image.alpha_composite(base, vignette).convert("RGB")
+
+@lru_cache(maxsize=1)
+def _vignette():
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    layer.putalpha(Image.radial_gradient("L").resize((W, H)).point(lambda v: int(max(0, v - 120) * 1.1)))
+    return layer
+
+
+@lru_cache(maxsize=1)
+def _sweep():
+    """Black-to-white left-to-right gradient used for the colour wash inside cards."""
+    return Image.linear_gradient("L").rotate(90, expand=True).resize((W, H))
 
 
 class _Canvas:
@@ -213,7 +235,7 @@ class _Canvas:
             gd.rounded_rectangle(box, radius=radius, fill=(8, 14, 30, alpha))
             md.rounded_rectangle(box, radius=radius, fill=255)
         # a faint left-to-right wash of the two side colours inside every card
-        sweep = Image.linear_gradient("L").rotate(90, expand=True).resize((W, H))     # black left, white right
+        sweep = _sweep()     # black left, white right
         wash = Image.composite(
             Image.new("RGBA", (W, H), self.b + (44,)),
             Image.new("RGBA", (W, H), self.a + (44,)),
@@ -453,6 +475,18 @@ def _h2h_matches_page(data, col_a, col_b):
         _text(d, (W // 2, 846), f"…AND {extra} OLDER MATCH(ES)", 14, MUTED, "mm")
     _footer(c, f"GOOGLI MANAGER  •  HEAD TO HEAD  •  MATCHES  •  {a['name']} vs {b['name']}"[:90], data.get("guild"))
     return c.image
+
+
+def render_h2h_page(data, index):
+    """Draw ONE page (0 = stats, 1 = matches) - lets the bot draw page 2 only if somebody opens it."""
+    col_a, col_b = pick_sides(data["a"].get("color"), data["b"].get("color"))
+    return _png((_h2h_stats_page, _h2h_matches_page)[index](data, col_a, col_b))
+
+
+def render_compare_page(data, index):
+    """Draw ONE page (0 = comparison, 1 = top performers)."""
+    col_a, col_b = pick_sides(data["a"].get("color"), data["b"].get("color"))
+    return _png((_compare_main_page, _compare_people_page)[index](data, col_a, col_b))
 
 
 def render_h2h_pages(data, only_first=False):

@@ -15,6 +15,7 @@ counted for the team a player was on when it was played (transfers respected).
 """
 
 import asyncio
+import contextlib
 import io
 import re
 import sqlite3
@@ -24,13 +25,13 @@ import discord
 from discord.ext import commands
 
 from .h2h import (
-    ImagePager, contrasting_overall_color, fetch_avatar, overall_color_for, team_role_color,
+    ImagePager, contrasting_overall_color, fetch_avatar, on_cooldown, overall_color_for, render_png,
+    team_role_color,
 )
 from .versus_image import (
-    BAT_COLOR, BOWL_COLOR, FIELD_COLOR, RECORD_COLOR, render_compare_pages, stat_row,
+    BAT_COLOR, BOWL_COLOR, FIELD_COLOR, RECORD_COLOR, render_compare_page, render_compare_pages, stat_row,
 )
 
-COOLDOWN_SECONDS = 8
 USAGE = (
     "Usage: `+compareteams Team A | Team B`  (or `Team A vs Team B`)\n"
     "`+ctall` (or `+ct overall`) compares your team with the average of all other teams.\n"
@@ -39,12 +40,32 @@ USAGE = (
 )
 
 
+@contextlib.contextmanager
+def _transfers_cached(core):
+    """+teaminfo's team lookups ask the database for a player's transfers once per match row.
+    Remember the answers for the duration of one (synchronous) calculation: far fewer queries."""
+    cache = {}
+    original = core._team_transfer_history
+
+    def cached(guild_id, user_id):
+        key = (guild_id, user_id)
+        if key not in cache:
+            cache[key] = original(guild_id, user_id)
+        return cache[key]
+
+    core._team_transfer_history = cached
+    try:
+        yield
+    finally:
+        del core._team_transfer_history          # back to the normal method
+
+
 class CompareTeams(commands.Cog):
     """+compareteams: two teams side by side."""
 
     def __init__(self, bot):
         self.bot = bot
-        self._last_use = {}
+        self._numbers_cache = {}     # team id -> (time, numbers) for the +ctall average
 
     @property
     def core(self):
@@ -132,8 +153,9 @@ class CompareTeams(commands.Cog):
         except sqlite3.Error:
             total_ids = ordered
 
-        stat_rows = core._team_stat_rows(guild.id, team)
-        fielding = core._team_fielding_totals(guild.id, team)
+        with _transfers_cached(core):
+            stat_rows = core._team_stat_rows(guild.id, team)
+            fielding = core._team_fielding_totals(guild.id, team)
 
         team_rows = [r for uid in total_ids for r in stat_rows.get(uid, [])]
         totals = _totals(team_rows)
@@ -325,8 +347,9 @@ class CompareTeams(commands.Cog):
         except sqlite3.Error:
             pass
         ids = list(dict.fromkeys(ids))
-        stat_rows = core._team_stat_rows(guild.id, team)
-        fielding = core._team_fielding_totals(guild.id, team)
+        with _transfers_cached(core):
+            stat_rows = core._team_stat_rows(guild.id, team)
+            fielding = core._team_fielding_totals(guild.id, team)
         rows = [r for uid in ids for r in stat_rows.get(uid, [])]
         fantasy = sum(
             (fantasy_raw_points(stat_rows[uid])[2] if stat_rows.get(uid) else 0)
@@ -347,16 +370,28 @@ class CompareTeams(commands.Cog):
             "highest": max((r["runs"] for r in rows), default=0),
         }
 
-    def _overall_side(self, guild, own_team):
+    def _numbers_for(self, guild, team):
+        """_team_numbers, remembered for 2 minutes so repeated +ctall calls don't redo the work."""
+        hit = self._numbers_cache.get(int(team["id"]))
+        if hit and time.monotonic() - hit[0] < 120:
+            return hit[1]
+        numbers = self._team_numbers(guild, team)
+        self._numbers_cache[int(team["id"])] = (time.monotonic(), numbers)
+        return numbers
+
+    async def _overall_side(self, guild, own_team):
         """Average of every OTHER approved team: counts are per team, rates are pooled over all of them."""
         from .lb import _totals
 
         teams = self.core.db.execute(
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved'", (int(guild.id),)
         ).fetchall()
-        numbers = [
-            self._team_numbers(guild, t) for t in teams if int(t["id"]) != int(own_team["id"])
-        ]
+        numbers = []
+        for t in teams:
+            if int(t["id"]) == int(own_team["id"]):
+                continue
+            numbers.append(self._numbers_for(guild, t))
+            await asyncio.sleep(0)            # let the bot answer other things between teams
         numbers = [x for x in numbers if x["rows"]]
         n = len(numbers)
         if n == 0:
@@ -402,16 +437,15 @@ class CompareTeams(commands.Cog):
                     mention_author=False,
                 )
                 return
-        wait = COOLDOWN_SECONDS - (time.monotonic() - self._last_use.get(ctx.author.id, -1e9))
-        if wait > 0:
+        wait = on_cooldown(ctx.author.id)
+        if wait:
             await ctx.reply(f"Please wait {wait:.0f}s before comparing again.", mention_author=False)
             return
-        self._last_use[ctx.author.id] = time.monotonic()
 
         loading = await ctx.reply("⏳ Building the overall comparison...", mention_author=False)
         try:
             a = await self._side(ctx, team)
-            b = self._overall_side(ctx.guild, team)
+            b = await self._overall_side(ctx.guild, team)
             if b is None:
                 await loading.edit(content="No other team has recorded matches yet.")
                 return
@@ -422,7 +456,7 @@ class CompareTeams(commands.Cog):
                 "groups": self._groups(a, b, avg_b=True),
                 "leaders": [], "meetings": [], "guild": ctx.guild.name, "caption": "Vs all teams",
             }
-            png = (await asyncio.to_thread(render_compare_pages, data, True))[0]
+            png = (await render_png(render_compare_pages, data, True))[0]
             await loading.edit(content=None, attachments=[discord.File(io.BytesIO(png), filename="ctall.png")])
         except Exception as exc:
             print(f"[ctall] failed: {type(exc).__name__}: {exc}", flush=True)
@@ -476,11 +510,10 @@ class CompareTeams(commands.Cog):
             await ctx.reply("Pick two different teams to compare.", mention_author=False)
             return
 
-        wait = COOLDOWN_SECONDS - (time.monotonic() - self._last_use.get(ctx.author.id, -1e9))
-        if wait > 0:
+        wait = on_cooldown(ctx.author.id)
+        if wait:
             await ctx.reply(f"Please wait {wait:.0f}s before comparing again.", mention_author=False)
             return
-        self._last_use[ctx.author.id] = time.monotonic()
 
         loading = await ctx.reply("⏳ Building the team comparison...", mention_author=False)
         try:
@@ -493,11 +526,12 @@ class CompareTeams(commands.Cog):
                 "meetings": self._meetings(ctx.guild.id, a["name"], b["name"]),
                 "guild": ctx.guild.name,
             }
-            pngs = await asyncio.to_thread(render_compare_pages, data)
-            view = ImagePager(ctx, pngs, ("Comparison", "Top performers"), "compareteams.png")
+            png = await render_png(render_compare_page, data, 0)
+            view = ImagePager(ctx, png, 2, lambda index: render_compare_page(data, index),
+                              ("Comparison", "Top performers"), "compareteams.png")
             view.message = await loading.edit(
                 content=None,
-                attachments=[discord.File(io.BytesIO(pngs[0]), filename="compareteams.png")],
+                attachments=[discord.File(io.BytesIO(png), filename="compareteams.png")],
                 view=view,
             )
         except Exception as exc:
