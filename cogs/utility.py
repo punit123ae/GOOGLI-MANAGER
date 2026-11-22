@@ -15,6 +15,18 @@ RECOVERY_COMMANDS = {
 }
 
 
+def is_bot_owner_id(bot, user_id):
+    """Return whether a user is the configured owner or a persisted extra owner."""
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    if user_id == BOT_OWNER_ID:
+        return True
+    utility = bot.get_cog("Utility") if bot is not None else None
+    return bool(utility and utility.is_bot_owner(user_id))
+
+
 def _normalise_command_name(name):
     return str(name or "").strip().lower().lstrip("+!/").replace(" ", "")
 
@@ -56,7 +68,7 @@ async def owner_or_whitelisted(ctx, command_name=None, app_owner=False):
     author = getattr(ctx, "author", None)
     if bot is None or author is None:
         return False
-    if int(getattr(author, "id", 0)) == BOT_OWNER_ID:
+    if is_bot_owner_id(bot, getattr(author, "id", 0)):
         return True
     if app_owner:
         try:
@@ -157,8 +169,15 @@ class Utility(commands.Cog):
             reason TEXT NOT NULL DEFAULT '',
             banned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS bot_extra_owners (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL DEFAULT '',
+            added_by INTEGER NOT NULL,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         self.db.commit()
+        self._sync_extra_owner_ids()
         # Repair historical approved teams whose captain is missing from the roster.
         # This is safe to run on every startup: INSERT OR IGNORE prevents duplicates.
         self._repair_missing_approved_captains()
@@ -626,7 +645,7 @@ class Utility(commands.Cog):
         channel_id = getattr(ctx_or_interaction, "channel_id", None) or getattr(channel, "id", None)
         name = _normalise_command_name(command_name)
 
-        if member is not None and int(getattr(member, "id", 0)) == BOT_OWNER_ID:
+        if member is not None and self.is_bot_owner(member.id):
             return True
         if not guild_id or member is None:
             return False
@@ -636,6 +655,22 @@ class Utility(commands.Cog):
         # command-specific so one rule can never unlock unrelated commands.
         return has_command_whitelist(self.bot, guild_id, member, name)
 
+    def is_bot_owner(self, user_id):
+        if int(user_id) == BOT_OWNER_ID:
+            return True
+        return self.db.execute(
+            "SELECT 1 FROM bot_extra_owners WHERE user_id=?", (int(user_id),)
+        ).fetchone() is not None
+
+    def _sync_extra_owner_ids(self):
+        extra_ids = {
+            int(row[0]) for row in self.db.execute("SELECT user_id FROM bot_extra_owners")
+        }
+        # discord.py uses owner_ids for commands guarded by bot.is_owner().
+        self.bot.owner_ids = set(getattr(self.bot, "owner_ids", None) or ())
+        self.bot.owner_ids.add(BOT_OWNER_ID)
+        self.bot.owner_ids.update(extra_ids)
+
     def is_bot_banned(self, user_id):
         return self.db.execute(
             "SELECT 1 FROM bot_bans WHERE user_id=?", (int(user_id),)
@@ -643,7 +678,7 @@ class Utility(commands.Cog):
 
     async def global_command_check(self, ctx):
         # Bot bans apply across every server and in DMs, not just one guild.
-        if int(ctx.author.id) == BOT_OWNER_ID:
+        if self.is_bot_owner(ctx.author.id):
             return True
         if self.is_bot_banned(ctx.author.id):
             try:
@@ -680,7 +715,7 @@ class Utility(commands.Cog):
             if not result:
                 return False
 
-        if int(interaction.user.id) == BOT_OWNER_ID:
+        if self.is_bot_owner(interaction.user.id):
             return True
         if self.is_bot_banned(interaction.user.id):
             if not interaction.response.is_done():
@@ -704,7 +739,7 @@ class Utility(commands.Cog):
     async def _can_manage_utility(self, guild_id, member):
         # Only the configured bot owner may change whitelist and lock settings.
         # Discord Administrator permission does not grant this access.
-        return member is not None and int(getattr(member, "id", 0)) == BOT_OWNER_ID
+        return member is not None and self.is_bot_owner(member.id)
 
     async def _require_manager(self, ctx):
         if await self._can_manage_utility(ctx.guild.id, ctx.author):
@@ -714,6 +749,52 @@ class Utility(commands.Cog):
             mention_author=False,
         )
         return False
+
+    @commands.command(name="addbotowner")
+    async def add_bot_owner(self, ctx, user: discord.User):
+        """Grant permanent bot-owner access; only the configured main owner can do this."""
+        if int(ctx.author.id) != BOT_OWNER_ID:
+            await ctx.reply("Only the main bot owner can add or remove bot owners.", mention_author=False)
+            return
+        if int(user.id) == BOT_OWNER_ID:
+            await ctx.reply("That user is already the main bot owner.", mention_author=False)
+            return
+        if self.is_bot_owner(user.id):
+            await ctx.reply(f"{user.mention} is already an extra bot owner.", mention_author=False)
+            return
+        self.db.execute(
+            "INSERT INTO bot_extra_owners (user_id, username, added_by) VALUES (?, ?, ?)",
+            (int(user.id), str(user), int(ctx.author.id)),
+        )
+        self.db.commit()
+        self._sync_extra_owner_ids()
+        await ctx.reply(
+            f"✅ {user.mention} (`{user.id}`) is now an extra bot owner and has bot-owner access.\n"
+            "The main bot owner remains unchanged.",
+            mention_author=False,
+        )
+
+    @commands.command(name="removebotowner")
+    async def remove_bot_owner(self, ctx, user: discord.User):
+        """Revoke an extra bot owner's access; only the configured main owner can do this."""
+        if int(ctx.author.id) != BOT_OWNER_ID:
+            await ctx.reply("Only the main bot owner can add or remove bot owners.", mention_author=False)
+            return
+        if int(user.id) == BOT_OWNER_ID:
+            await ctx.reply("The main bot owner cannot be removed.", mention_author=False)
+            return
+        cursor = self.db.execute(
+            "DELETE FROM bot_extra_owners WHERE user_id=?", (int(user.id),)
+        )
+        self.db.commit()
+        self._sync_extra_owner_ids()
+        if cursor.rowcount == 0:
+            await ctx.reply(f"{user.mention} is not an extra bot owner.", mention_author=False)
+            return
+        await ctx.reply(
+            f"✅ Removed bot-owner access from {user.mention} (`{user.id}`).",
+            mention_author=False,
+        )
 
     @commands.command(name="whitelist")
     @commands.guild_only()
