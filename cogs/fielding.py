@@ -13,6 +13,8 @@ import time
 import discord
 from discord.ext import commands
 
+from .utility import is_bot_owner_id
+
 HANDCRICKET_BOT_ID = 753191385296928808
 BOT_OWNER_ID = 1014568928682459198
 
@@ -1045,7 +1047,7 @@ class CatchTracker(commands.Cog):
     @commands.command(name="testfdstats")
     async def test_fdstats(self, ctx, *, who: str = None):
         """Image preview of +fdstats (bot owner or a whitelisted role). Usage: +testfdstats [@user / id / name]"""
-        from .utility import is_bot_owner_id, owner_or_whitelisted
+        from .utility import owner_or_whitelisted
         if not (is_bot_owner_id(self.bot, ctx.author.id) or await self.bot.is_owner(ctx.author)
                 or (ctx.guild is not None and await owner_or_whitelisted(ctx, "testfdstats"))):
             await ctx.send("❌ Only the bot owner or a role whitelisted for `+testfdstats` can use this command.")
