@@ -21,6 +21,17 @@ TEMPLATE = Path(__file__).with_name("points_table_landscape_bg.png")
 # (+addresult / +setpt). +points just sends the saved files.
 CACHE_DIR = Path("points_cache")
 
+
+def ensure_cache_dir():
+    """Make sure points_cache is a real folder.
+
+    A stray *file* named points_cache (e.g. from a bad upload/extract) makes mkdir fail with
+    [Errno 17] File exists. The folder only holds re-drawable images, so replace the file.
+    """
+    if CACHE_DIR.exists() and not CACHE_DIR.is_dir():
+        CACHE_DIR.unlink()
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 MAX_ROWS = 11
 HEADER_RE = re.compile(
     r"^[#\s_*]*Match\s+([^\n_*]+?)[_*\s]*\n+[\s*_]*(.+?)\s+vs\.?\s+(.+?)[\s*_]*$",
@@ -658,7 +669,7 @@ class PointsTable(commands.Cog):
 
     def _render_and_save_guild(self, guild_id):
         """Draw every group's table and save the PNGs. Runs in a worker thread."""
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_cache_dir()
         for group in self._configured_groups(guild_id):
             group_name, rows = self._group_data(guild_id, group["group_key"])
             if not rows:
@@ -1684,7 +1695,7 @@ class PointsTable(commands.Cog):
         finally:
             conn.close()
 
-        if CACHE_DIR.exists():
+        if CACHE_DIR.is_dir():
             if stage is None:
                 old_files = list(CACHE_DIR.glob(f"points_{ctx.guild.id}_*.png"))
             else:
