@@ -1,6 +1,7 @@
 import asyncio
 import io
 import re
+import time
 import sqlite3
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -54,6 +55,11 @@ def _field_entry(rec):
         f"`{caught}` caught • `{dropped}` dropped • eff `{eff:.1f}%`",
     )
 
+
+
+_AVATAR_CACHE = {}           # (user id, avatar hash) -> PNG bytes
+_TEAMINFO_CACHE = {}          # (guild, team, roster) -> (timestamp, images)
+_TEAMINFO_TTL = 120           # seconds a finished set of team images is reused
 
 
 class TestTeamInfoView(discord.ui.View):
@@ -911,10 +917,12 @@ class TeamCommandsB:
                 raw_saved = bytes(saved)
                 with Image.open(io.BytesIO(raw_saved)) as image:
                     image.load()
-                    normalized = image.convert("RGBA")
-                    output = io.BytesIO()
-                    normalized.save(output, format="PNG", optimize=True)
-                payload = output.getvalue()
+                    if image.format == "PNG" and image.mode == "RGBA":
+                        payload = raw_saved   # already normalised: skip the slow re-encode
+                    else:
+                        output = io.BytesIO()
+                        image.convert("RGBA").save(output, format="PNG", compress_level=3)
+                        payload = output.getvalue()
                 # Repair old/non-normalized backups in place.
                 if payload != raw_saved:
                     self.db.execute(
@@ -992,6 +1000,10 @@ class TeamCommandsB:
         """Avatar PNG bytes; retries, then falls back to a larger size and the default avatar."""
         if member is None:
             return None
+        cache_key = (int(member.id), str(getattr(member.display_avatar, "key", "")))
+        cached = _AVATAR_CACHE.get(cache_key)
+        if cached:
+            return cached
         attempts = (
             lambda: member.display_avatar.replace(size=128, static_format="png"),
             lambda: member.display_avatar.replace(size=256, static_format="png"),
@@ -1000,13 +1012,16 @@ class TeamCommandsB:
         )
         for index, make in enumerate(attempts):
             try:
-                payload = await asyncio.wait_for(make().read(), timeout=12)
+                payload = await asyncio.wait_for(make().read(), timeout=8)
                 if payload and Image.open(io.BytesIO(payload)).verify() is None:
+                    if len(_AVATAR_CACHE) >= 600:
+                        _AVATAR_CACHE.pop(next(iter(_AVATAR_CACHE)))
+                    _AVATAR_CACHE[cache_key] = payload
                     return payload
             except Exception as exc:
                 print(f"[teaminfo][avatar] attempt {index+1} failed for {getattr(member, 'id', '?')}: "
                       f"{type(exc).__name__}: {exc}", flush=True)
-                await asyncio.sleep(0.4 * (index + 1))
+                await asyncio.sleep(0.25 * (index + 1))
         return None
 
     async def _team_profile_data(self, ctx, team, ordered_ids):
@@ -1057,8 +1072,10 @@ class TeamCommandsB:
         resolved_members = await asyncio.gather(*(resolve_member(uid) for uid in member_ids))
         members = dict(zip(member_ids, resolved_members))
 
+        avatar_semaphore = asyncio.Semaphore(10)
+
         async def avatar_of(uid):
-            async with semaphore:
+            async with avatar_semaphore:
                 return await self._fetch_avatar(members[uid])
         print(
             f"[teaminfo][logo:DATA] Team={team['name']!r} "
@@ -1330,8 +1347,19 @@ class TeamCommandsB:
 
         loading = await ctx.send("⏳ Building the team profile...")
         try:
-            data = await self._team_profile_data(ctx, team, ordered_ids)
-            images = await asyncio.to_thread(render_team_pages, data)
+            cache_key = (int(ctx.guild.id), int(team["id"]), tuple(int(u) for u in ordered_ids))
+            hit = _TEAMINFO_CACHE.get(cache_key)
+            if hit and time.time() - hit[0] < _TEAMINFO_TTL:
+                images = hit[1]
+            else:
+                started = time.perf_counter()
+                data = await self._team_profile_data(ctx, team, ordered_ids)
+                fetched = time.perf_counter()
+                images = await asyncio.to_thread(render_team_pages, data)
+                print(f"[teaminfo] data {fetched-started:.1f}s, render {time.perf_counter()-fetched:.1f}s", flush=True)
+                if len(_TEAMINFO_CACHE) >= 20:
+                    _TEAMINFO_CACHE.pop(next(iter(_TEAMINFO_CACHE)))
+                _TEAMINFO_CACHE[cache_key] = (time.time(), images)
             view = TeamInfoMixedView(ctx, roster_embed, images[1:])
             view.message = await loading.edit(
                 content=None, embed=roster_embed, attachments=[], view=view

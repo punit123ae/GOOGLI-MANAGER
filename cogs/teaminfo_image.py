@@ -261,11 +261,12 @@ class _Page:
         logo = self.theme.get("logo")
         if logo is None:
             return
-        print("[teaminfo] watermark: feathered", flush=True)
-        size = 560
-        src = ImageOps.contain(_clean_mark(logo), (size, size), method=Image.Resampling.LANCZOS)
-        alpha = src.getchannel("A").point(lambda v: int(v*0.13))
-        src.putalpha(alpha)
+        src = self.theme.get("_mark")
+        if src is None:   # built once per team, reused by every page
+            size = 560
+            src = ImageOps.contain(_clean_mark(logo), (size, size), method=Image.Resampling.LANCZOS)
+            src.putalpha(src.getchannel("A").point(lambda v: int(v*0.13)))
+            self.theme["_mark"] = src
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         layer.paste(src, ((W-src.width)//2, (H-src.height)//2))
         self.image = Image.alpha_composite(self.image.convert("RGBA"), layer).convert("RGB")
