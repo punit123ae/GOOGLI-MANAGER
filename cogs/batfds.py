@@ -450,7 +450,7 @@ class MarkEndedConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -490,7 +490,7 @@ class MarkAllEndedConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -538,7 +538,7 @@ class FixBatterImpactConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -1399,7 +1399,7 @@ class BatterFieldingDropStats(commands.Cog):
 
         Usage: +previewlb markended [channel_id]
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         db = self.bot.db
         if channel_id is None:
@@ -1445,7 +1445,7 @@ class BatterFieldingDropStats(commands.Cog):
 
         Usage: +previewlb markallended
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         db = self.bot.db
         active = db.execute(
@@ -1475,7 +1475,7 @@ class BatterFieldingDropStats(commands.Cog):
 
     @previewlb.command(name="backups")
     async def previewlb_backups(self, ctx: commands.Context):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         rows = self.bot.db.execute(
             "SELECT backup_no,created_at FROM batter_drop_backups WHERE guild_id=? ORDER BY backup_no DESC",
@@ -1489,7 +1489,7 @@ class BatterFieldingDropStats(commands.Cog):
 
     @previewlb.command(name="delete")
     async def previewlb_delete(self, ctx: commands.Context, backup_no: int):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         db = self.bot.db
         db.execute("DELETE FROM batter_drop_backup_rows WHERE backup_no=? AND backup_no IN "
@@ -1520,14 +1520,14 @@ class BatterFieldingDropStats(commands.Cog):
 
     @previewlb.command(name="view")
     async def previewlb_view(self, ctx: commands.Context, backup_no: int):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         await self._send_backup(ctx, backup_no)
 
     @commands.command(name="commitlb")
     @commands.guild_only()
     async def commitlb(self, ctx: commands.Context):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         self._safe_sweep()
         active = self.bot.db.execute(
@@ -1868,7 +1868,7 @@ class BatterFieldingDropStats(commands.Cog):
                +recoverlb <channel_id> [raw_stats_message_id]
         Final scores are checked against Hand Cricket's raw stats for that match.
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         if channel_id is None:
             return await self._send_recoverable(ctx)
@@ -1968,7 +1968,7 @@ class BatterFieldingDropStats(commands.Cog):
         Usage: +auditbattingimpact [@player]
         Read-only: nothing is changed. Wrong players are listed with what they should have.
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         self._safe_sweep()
         try:
@@ -2080,7 +2080,7 @@ class BatterFieldingDropStats(commands.Cog):
         Usage: +fixbatterimpact
         Same result as running the suggested +setbatterimpact line for each player.
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         self._safe_sweep()
         try:
@@ -2280,7 +2280,7 @@ class BatterFieldingDropStats(commands.Cog):
         who has NO record yet (nothing in +lb or the preview), so nobody is counted twice.
         Without "apply" it only shows what it would add.
         """
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         apply = mode.lower() in ("apply", "confirm")
         hours = max(1, min(int(hours), 24 * 14))
@@ -2429,7 +2429,7 @@ class BatterFieldingDropStats(commands.Cog):
     @commands.guild_only()
     async def set_batter_impact(self, ctx: commands.Context, member: discord.Member,
                                runs_after_drops: int, runs_without_drops: int):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         if runs_after_drops < 0 or runs_without_drops < 0:
             return await ctx.reply("Run values cannot be negative.", mention_author=False)
@@ -2449,7 +2449,7 @@ class BatterFieldingDropStats(commands.Cog):
     @commands.command(name="resetbatterimpact")
     @commands.guild_only()
     async def reset_batter_impact(self, ctx: commands.Context, member: discord.Member = None):
-        if ctx.author.id != BOT_OWNER_ID:
+        if not is_bot_owner_id(self.bot, ctx.author.id):
             return await ctx.reply("You are not allowed to use this command.", mention_author=False)
         if member is None:
             self.bot.db.execute("DELETE FROM batter_drop_lb WHERE guild_id=?", (ctx.guild.id,))
