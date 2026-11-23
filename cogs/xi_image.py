@@ -1,4 +1,5 @@
-"""Images for +xi (3 pages: playing XI, substitutes, bench) and +cxi (2 pages: the two XIs, key players).
+"""Images for +xi (4 pages: playing XI, batting & bowling order, substitutes, bench) and
++cxi (3 pages: the two XIs, key players, rating breakdown).
 
 Pure Pillow. Data comes from cogs/xi.py:
   side = {"name", "logo" (bytes), "color", "guild",
@@ -79,23 +80,23 @@ def _header(page, side, subtitle, number, total, theme):
     _paste(page.image, badge, (74, 38))
     _text(d, (190, 44), subtitle, 16, accent, "la", "bold")
     name = side["name"].upper()
-    _text(d, (190, 70), _clip(d, name, 700, _fit(d, name, 700, 44, 24, "head"), "head"),
-          _fit(d, name, 700, 44, 24, "head"), WHITE, "la", "head")
+    _text(d, (190, 70), _clip(d, name, 630, _fit(d, name, 630, 44, 24, "head"), "head"),
+          _fit(d, name, 630, 44, 24, "head"), WHITE, "la", "head")
     label = f"PAGE {number} / {total}"
     chip_w = int(d.textlength(label, font=font(16))) + 28
     _pill(d, 1550 - 24 - chip_w, 34, label, 16, fill=accent, fg=INK)
     st = side["strength"]
     tiles = [("OVERALL", st["overall"]), ("BATTING", st["batting"]), ("BOWLING", st["bowling"]),
-             ("FIELDING", st["fielding"])]
-    x = 880
+             ("FIELDING", st["fielding"]), ("FORM", st.get("form", 0))]
+    x = 836
     for label, value in tiles:
-        d.rounded_rectangle((x, 74, x + 150, 136), radius=14, fill=BOX, outline=(40, 58, 92), width=1)
-        _text(d, (x + 14, 82), label, 12, MUTED, "la")
-        _text(d, (x + 14, 98), f"{value:.0f}", 30, _rating_color(value), "la", "head")
-        d.rounded_rectangle((x + 66, 114, x + 136, 122), radius=4, fill=TRACK)
-        d.rounded_rectangle((x + 66, 114, x + 66 + int(70 * min(100, value) / 100), 122), radius=4,
+        d.rounded_rectangle((x, 74, x + 130, 136), radius=14, fill=BOX, outline=(40, 58, 92), width=1)
+        _text(d, (x + 12, 82), label, 12, MUTED, "la")
+        _text(d, (x + 12, 98), f"{value:.0f}", 30, _rating_color(value), "la", "head")
+        d.rounded_rectangle((x + 58, 114, x + 118, 122), radius=4, fill=TRACK)
+        d.rounded_rectangle((x + 58, 114, x + 58 + int(60 * min(100, value) / 100), 122), radius=4,
                             fill=_rating_color(value))
-        x += 162
+        x += 138
     return d
 
 
@@ -106,6 +107,28 @@ def _footer(page, side, number, total, what):
 
 
 # --------------------------------------------------------------------------- page 1: the XI
+
+HOT, COLD = (62, 224, 140), (255, 96, 120)
+
+
+def _form_spark(d, right, bottom, p):
+    """Fantasy points of the last matches as small bars (oldest left), plus HOT / COLD / STEADY."""
+    trend = p.get("trend") or []
+    top = max([abs(v) for v in trend] + [1])
+    delta = p.get("form_delta", 0)
+    color = HOT if delta >= 12 else COLD if delta <= -12 else (150, 165, 195)
+    bar_w, gap, height = 7, 4, 18
+    x = right - (bar_w * 5 + gap * 4)
+    for i in range(5):
+        bx = x + i * (bar_w + gap)
+        d.rounded_rectangle((bx, bottom - 3, bx + bar_w, bottom), radius=1, fill=(36, 52, 84))       # empty slot
+        if i < len(trend):
+            h = max(3, int(height * max(0, trend[i]) / top))
+            d.rounded_rectangle((bx, bottom - h, bx + bar_w, bottom), radius=2, fill=color)
+    word = "HOT" if delta >= 12 else "COLD" if delta <= -12 else "STEADY"
+    mark = "▲" if delta >= 12 else "▼" if delta <= -12 else "●"
+    _text(d, (right, bottom - height - 14), f"{mark} {word}", 11, color, "ra", "bold")
+
 
 def _xi_card(page, side, box, p, accent):
     x1, y1, x2, y2 = box
@@ -121,7 +144,9 @@ def _xi_card(page, side, box, p, accent):
     shown = _clip(d, name, room, _fit(d, name, room, 25, 17, "head"), "head")
     _text(d, (x1 + 134, y1 + 48), shown, _fit(d, shown, room, 25, 17, "head"), WHITE, "la", "head")
     _pill(d, x1 + 134, y1 + 86, p["label"].upper(), 13, fill=None, fg=color, outline=color, pad=12, h=28)
-    _text(d, (x1 + 134, y1 + 124), f"{p['matches']} MATCHES  •  {p['fantasy']:.0f} FANTASY", 12, MUTED, "la")
+    style = p["style"] if p["role"] != "Bowler" else (p.get("bstyle") or "Balanced")
+    _text(d, (x1 + 134, y1 + 126), style.upper(), 12, MUTED, "la", "bold")
+    _form_spark(d, x2 - 18, y1 + 138, p)
     _tag_pill(d, x2, y1 + 12, p.get("tag"), accent)
     stats = _stat_values(p)
     gap, left = 8, x1 + 16
@@ -170,14 +195,14 @@ def _page_xi(side, theme):
         slots.append((x1, y1, x1 + card_w, y1 + card_h))
     for box in slots:
         page.card(box, 24)
-    d = _header(page, side, "BEST PLAYING XI  •  PICKED FROM THE STATS", 1, 3, theme)
+    d = _header(page, side, "BEST PLAYING XI  •  CAREER STATS + RECENT FORM", 1, 4, theme)
     for box, p in zip(slots, xi):
         _xi_card(page, side, box, p, accent)
     if len(xi) < 12:
         _balance_card(page, side, slots[min(11, max(len(xi), 11))], accent)
     if not xi:
         _text(d, (800, 500), "NO PLAYERS IN THIS TEAM YET", 28, DIM, "mm")
-    _footer(page, side, 1, 3, "BEST PLAYING XI")
+    _footer(page, side, 1, 4, "BEST PLAYING XI")
     return page.image
 
 
@@ -229,14 +254,14 @@ def _page_subs(side, theme):
     boxes = [(start + i * (width + gap), 170, start + i * (width + gap) + width, 852) for i in range(count)]
     for box in boxes:
         page.card(box, 26)
-    d = _header(page, side, "SUBSTITUTES  •  NEXT IN LINE", 2, 3, theme)
+    d = _header(page, side, "SUBSTITUTES  •  NEXT IN LINE", 3, 4, theme)
     if subs:
         for box, p in zip(boxes, subs):
             _sub_card(page, side, box, p, accent)
     else:
         _text(d, (800, 480), "NO SUBSTITUTES", 34, DIM, "mm", "head")
         _text(d, (800, 530), "EVERY PLAYER ON THE ROSTER IS IN THE XI", 16, DIM, "mm")
-    _footer(page, side, 2, 3, "SUBSTITUTES")
+    _footer(page, side, 3, 4, "SUBSTITUTES")
     return page.image
 
 
@@ -256,7 +281,7 @@ def _page_bench(side, theme):
     accent = theme["accent"]
     bench = side["bench"][:9]
     page.card((50, 170, 1550, 852), 26)
-    d = _header(page, side, "BENCH  •  OUTSIDE THE XI AND SUBS", 3, 3, theme)
+    d = _header(page, side, "BENCH  •  OUTSIDE THE XI AND SUBS", 4, 4, theme)
     if not bench:
         _text(d, (800, 480), "NOBODY ON THE BENCH", 34, DIM, "mm", "head")
         _text(d, (800, 530), "THE XI AND THE SUBSTITUTES USE THE WHOLE ROSTER", 16, DIM, "mm")
@@ -280,13 +305,106 @@ def _page_bench(side, theme):
             for _label, x, fn in BENCH_COLUMNS:
                 _text(d, (x, y + 30), fn(p), 20, WHITE, "mm", "head")
             _badge(d, 1472, y + 30, 22, p["value"], 20)
-    _footer(page, side, 3, 3, "BENCH")
+    _footer(page, side, 4, 4, "BENCH")
+    return page.image
+
+
+def _slot(p):
+    return {"Opener": "OPENER", "Middle Order": "MIDDLE ORDER"}.get(p["label"], p["label"].upper())
+
+
+def _page_order(side, theme):
+    page = _Page(theme)
+    accent = theme["accent"]
+    left, right = (50, 170, 790, 852), (810, 170, 1550, 852)
+    page.card(left, 26)
+    page.card(right, 26)
+    d = _header(page, side, "BATTING ORDER  •  BOWLING ORDER", 2, 4, theme)
+    xi, attack = side["xi"], side.get("bowl_order", [])
+
+    # ---- batting order
+    x1, y1, x2, y2 = left
+    _text(d, (x1 + 26, y1 + 18), "BATTING ORDER", 18, BAT_COLOR, "la", "head")
+    if len(xi) >= 2:
+        a, b = xi[0], xi[1]
+        na, nb = _who(side, a)[0], _who(side, b)[0]
+        note = (f"OPENING PAIR  {na.upper()} ({a['style'].upper()})  +  {nb.upper()} ({b['style'].upper()})")
+        _text(d, (x1 + 26, y1 + 46), _clip(d, note, x2 - x1 - 52, 12, "bold"), 12, MUTED, "la", "bold")
+    _text(d, (x2 - 112, y1 + 62), "AVG", 11, MUTED, "ma")
+    _text(d, (x2 - 48, y1 + 62), "SR", 11, MUTED, "ma")
+    pitch = 50
+    for i, p in enumerate(xi[:11]):
+        y = y1 + 80 + i * pitch
+        color = ROLE_COLOR[p["role"]]
+        name, avatar = _who(side, p)
+        d.rounded_rectangle((x1 + 16, y, x2 - 16, y + pitch - 6), radius=14,
+                            fill=BOX if i % 2 == 0 else (14, 24, 46), outline=accent if i < 2 else None, width=2)
+        _text(d, (x1 + 40, y + (pitch - 6) / 2), str(p["order"]), 20, accent if i < 2 else DIM, "mm", "head")
+        ring = _round_image(avatar, 34, ring=color, ring_w=2, initial=name[:1])
+        _paste(page.image, ring, (x1 + 60, y + 5))
+        tag = f" ({p['tag']})" if p.get("tag") else ""
+        _text(d, (x1 + 104, y + (pitch - 6) / 2), _clip(d, name + tag, 190, 17, "head"), 17, WHITE, "lm", "head")
+        label = _slot(p)
+        pw = int(d.textlength(label, font=font(11))) + 18
+        _pill(d, x1 + 306, y + 8, label, 11, fill=None, fg=color, outline=color, pad=9, h=28)
+        _text(d, (x1 + 306 + pw + 10, y + (pitch - 6) / 2), p["style"].upper(), 11,
+              HOT if p["style"] == "Aggressor" else (110, 170, 255) if p["style"] == "Anchor" else MUTED,
+              "lm", "bold")
+        avg = "—" if p["bat_avg"] is None else f"{p['bat_avg']:.1f}"
+        sr = "—" if p["strike_rate"] is None else f"{p['strike_rate']:.0f}"
+        _text(d, (x2 - 112, y + (pitch - 6) / 2), avg, 17, WHITE, "mm", "head")
+        _text(d, (x2 - 48, y + (pitch - 6) / 2), sr, 17, WHITE, "mm", "head")
+
+    # ---- bowling order
+    x1, y1, x2, y2 = right
+    _text(d, (x1 + 26, y1 + 18), "BOWLING ORDER", 18, BOWL_COLOR, "la", "head")
+    if not attack:
+        _text(d, ((x1 + x2) / 2, 480), "NO BOWLERS IN THE XI", 26, DIM, "mm", "head")
+    else:
+        opening = [p for p in attack if p["spell"] == "Opening"]
+        if len(opening) == 2:
+            note = (f"NEW BALL  {_who(side, opening[0])[0].upper()}  +  {_who(side, opening[1])[0].upper()}"
+                    f"  ({opening[0]['bstyle'].upper()} / {opening[1]['bstyle'].upper()})")
+            _text(d, (x1 + 26, y1 + 46), _clip(d, note, x2 - x1 - 52, 12, "bold"), 12, MUTED, "la", "bold")
+        spells = [("OPENING", "Opening", "NEW BALL  •  WICKETS AND CONTROL", BOWL_COLOR),
+                  ("MIDDLE OVERS", "Middle", "KEEP IT TIGHT, TAKE WICKETS", (110, 170, 255)),
+                  ("DEATH", "Death", "LOWEST ECONOMY CLOSES IT", COLD)]
+        y = y1 + 76
+        for title, key, blurb, color in spells:
+            group = [p for p in attack if p["spell"] == key]
+            if not group:
+                continue
+            d.rounded_rectangle((x1 + 16, y, x2 - 16, y + 28), radius=10, fill=(20, 32, 58))
+            d.rounded_rectangle((x1 + 16, y + 4, x1 + 22, y + 24), radius=3, fill=color)
+            _text(d, (x1 + 36, y + 14), title, 13, color, "lm", "head")
+            _text(d, (x2 - 30, y + 14), blurb, 11, MUTED, "rm", "bold")
+            y += 36
+            for p in group:
+                name, avatar = _who(side, p)
+                d.rounded_rectangle((x1 + 16, y, x2 - 16, y + 70), radius=14, fill=BOX)
+                _text(d, (x1 + 40, y + 35), str(p["bowl_pos"]), 20, color, "mm", "head")
+                ring = _round_image(avatar, 46, ring=color, ring_w=2, initial=name[:1])
+                _paste(page.image, ring, (x1 + 62, y + 12))
+                tag = f" ({p['tag']})" if p.get("tag") else ""
+                _text(d, (x1 + 122, y + 24), _clip(d, name + tag, 190, 18, "head"), 18, WHITE, "lm", "head")
+                _text(d, (x1 + 122, y + 50), p["bstyle"].upper(), 11, MUTED, "lm", "bold")
+                cols = [("WKTS", str(p["wickets"])),
+                        ("ECO", "—" if p["economy"] is None else f"{p['economy']:.1f}"),
+                        ("AVG", "—" if p["bowl_avg"] is None else f"{p['bowl_avg']:.1f}"),
+                        ("SR", "—" if p["bowl_sr"] is None else f"{p['bowl_sr']:.1f}")]
+                for j, (label, value) in enumerate(cols):
+                    cx = x1 + 372 + j * 82
+                    _text(d, (cx, y + 18), label, 11, MUTED, "mm")
+                    _text(d, (cx, y + 44), value, 20, WHITE, "mm", "head")
+                y += 78
+            y += 6
+    _footer(page, side, 2, 4, "BATTING & BOWLING ORDER")
     return page.image
 
 
 def render_xi_page(side, index):
     theme = side.setdefault("_theme", _theme(side))
-    page = (_page_xi, _page_subs, _page_bench)[index](side, theme)
+    page = (_page_xi, _page_order, _page_subs, _page_bench)[index](side, theme)
     return _png(page)
 
 
@@ -379,7 +497,7 @@ def _page_cxi_main(a, b):
     _xi_list(c, left, a, c.a, False)
     _xi_list(c, right, b, c.b, True)
     _centre_bars(c, mid, a, b)
-    _text(d, (60, 874), f"{a.get('guild', '').upper()}  •  XI COMPARISON  •  1/2", 13, DIM)
+    _text(d, (60, 874), f"{a.get('guild', '').upper()}  •  XI COMPARISON  •  1/3", 13, DIM)
     return c.image
 
 
@@ -464,10 +582,63 @@ def _page_cxi_key(a, b):
         verdict = (f"{lead['name'].upper()} RATED HIGHER  •  OVERALL {sa['overall']:.0f} vs {sb['overall']:.0f}"
                    f"  •  STRONGER IN {', '.join(better) if better else 'NOTHING ELSE'}")
     _text(d, (800, (vy1 + vy2) / 2), _clip(d, verdict, 1400, 20, "head"), 20, WHITE, "mm", "head")
-    _text(d, (60, 874), f"{a.get('guild', '').upper()}  •  XI COMPARISON  •  2/2", 13, DIM)
+    _text(d, (60, 874), f"{a.get('guild', '').upper()}  •  XI COMPARISON  •  2/3", 13, DIM)
+    return c.image
+
+
+def _rating_table(c, box, side, color, mirror):
+    x1, y1, x2, y2 = box
+    d = c.d
+    name = side["name"].upper()
+    _text(d, (x1 + 26, y1 + 18), _clip(d, name, 420, 20, "head"), 20, color, "la", "head")
+    cols = [("BAT", 330), ("BOWL", 400), ("FIELD", 470), ("FORM", 540), ("RATING", 640)]
+    for label, off in cols:
+        _text(d, (x1 + off, y1 + 62), label, 11, MUTED, "mm")
+    pitch = 44
+    for i, p in enumerate(side["xi"][:11]):
+        y = y1 + 82 + i * pitch
+        who, avatar = _who(side, p)
+        d.rounded_rectangle((x1 + 14, y, x2 - 14, y + pitch - 5), radius=12, fill=BOX if i % 2 == 0 else (14, 24, 46))
+        ring = _round_image(avatar, 30, ring=ROLE_COLOR[p["role"]], ring_w=2, initial=who[:1])
+        _paste(c.image, ring, (x1 + 24, y + 4))
+        _text(d, (x1 + 64, y + (pitch - 5) / 2), _clip(d, who, 190, 16, "head"), 16, WHITE, "lm", "head")
+        values = [p["bat"], p["bowl"], p["field"], p["form"]]
+        for (label, off), value in zip(cols, values):
+            if value is None:
+                _text(d, (x1 + off, y + (pitch - 5) / 2), "—", 16, DIM, "mm", "head")
+            else:
+                _text(d, (x1 + off, y + (pitch - 5) / 2), f"{value:.0f}", 17, _rating_color(value), "mm", "head")
+        _badge(d, x1 + 640, y + (pitch - 5) / 2, 18, p["value"], 16)
+
+
+def _page_cxi_ratings(a, b):
+    col_a, col_b = pick_sides(a["color"], b["color"])
+    c = _Canvas(col_a, col_b)
+    left, right = (50, 140, 790, 700), (810, 140, 1550, 700)
+    c.card((50, 22, 1550, 120), 26)
+    c.card(left, 26)
+    c.card(right, 26)
+    c.card((50, 716, 1550, 852), 26)
+    d = c.seal()
+    _text(d, (800, 56), "HOW EACH PLAYER IS RATED", 34, WHITE, "mm", "head")
+    _text(d, (800, 94), "EVERY NUMBER IS 0-100, RANKED AGAINST EVERY PLAYER IN THE SERVER", 13, MUTED, "mm", "bold")
+    _rating_table(c, left, a, c.a, False)
+    _rating_table(c, right, b, c.b, True)
+    lines = [
+        ("BAT", "average, total runs and runs per match (strike rate only 5%), plus a little for matches played"),
+        ("BOWL", "wickets, wickets per match, bowling average, bowling strike rate and economy"),
+        ("FIELD", "catches, catches per match and catch rate (catches vs drops)"),
+        ("FORM", "his last 5 matches against everyone else's last 5; it also moves BAT and BOWL a little"),
+        ("RATING", "40% his best skill + 15% his other skill + 15% fantasy + 10% fielding + 12% form + 8% experience"),
+    ]
+    for i, (label, text) in enumerate(lines):
+        y = 736 + i * 22
+        _text(d, (80, y), label, 12, _rating_color(70), "la", "head")
+        _text(d, (160, y), text, 12, MUTED, "la", "bold")
+    _text(d, (60, 874), f"{a.get('guild', '').upper()}  •  XI COMPARISON  •  3/3", 13, DIM)
     return c.image
 
 
 def render_cxi_page(a, b, index):
-    page = (_page_cxi_main, _page_cxi_key)[index](a, b)
+    page = (_page_cxi_main, _page_cxi_key, _page_cxi_ratings)[index](a, b)
     return _png(page)

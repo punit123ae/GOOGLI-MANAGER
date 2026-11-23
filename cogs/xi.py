@@ -7,7 +7,7 @@
 
 The XI is picked from real stats (see xi_engine.py): batting average, runs, matches played,
 wickets, bowling average and strike rate, catches and fantasy points. Strike rate hardly counts.
-Pages: 1 playing XI, 2 substitutes, 3 bench (+cxi: 1 the two XIs, 2 key players).
+Pages: 1 playing XI, 2 batting & bowling order, 3 substitutes, 4 bench (+cxi: 1 the two XIs, 2 key players, 3 rating breakdown).
 """
 import asyncio
 import io
@@ -107,6 +107,7 @@ class PlayingXI(commands.Cog):
         side = {"name": str(team["name"]), "logo": logo, "color": color, "guild": guild.name,
                 "xi": result["xi"], "subs": result["subs"], "bench": result["bench"],
                 "strength": result["strength"], "roster": len(roster), "size": result["size"],
+                "bowl_order": result["bowl_order"],
                 "people": people}
         if len(self._side_cache) >= 4:
             self._side_cache.pop(next(iter(self._side_cache)))
@@ -170,8 +171,8 @@ class PlayingXI(commands.Cog):
         try:
             side = await self.build_side(ctx, found[0])
             png = await render_png(render_xi_page, side, 0)
-            view = ImagePager(ctx, png, 3, lambda index: render_xi_page(side, index),
-                              ("Playing XI", "Substitutes", "Bench"), "xi.png")
+            view = ImagePager(ctx, png, 4, lambda index: render_xi_page(side, index),
+                              ("Playing XI", "Batting & Bowling", "Substitutes", "Bench"), "xi.png")
             view.message = await loading.edit(content=None,
                                               attachments=[discord.File(io.BytesIO(png), filename="xi.png")],
                                               view=view)
@@ -202,8 +203,8 @@ class PlayingXI(commands.Cog):
             a = await self.build_side(ctx, found[0])
             b = await self.build_side(ctx, found[1])
             png = await render_png(render_cxi_page, a, b, 0)
-            view = ImagePager(ctx, png, 2, lambda index: render_cxi_page(a, b, index),
-                              ("Both XIs", "Key players"), "cxi.png")
+            view = ImagePager(ctx, png, 3, lambda index: render_cxi_page(a, b, index),
+                              ("Both XIs", "Key players", "Ratings"), "cxi.png")
             view.message = await loading.edit(content=None,
                                               attachments=[discord.File(io.BytesIO(png), filename="cxi.png")],
                                               view=view)
