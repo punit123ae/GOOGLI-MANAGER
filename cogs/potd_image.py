@@ -180,7 +180,7 @@ def _visible(color):
     return color
 
 
-def render_potd(data):
+def render_potd_fallback(data):
     team_col = _visible(tuple(data.get("team_color") or (46, 134, 222)))
     dark = _mix(team_col, (6, 14, 30), .72)
     img = _background(_mix((120, 170, 220), team_col, .35)).convert("RGBA")
@@ -281,4 +281,111 @@ def render_potd(data):
 
     out = io.BytesIO()
     img.convert("RGB").save(out, "PNG", optimize=False)
+    return out.getvalue()
+
+
+# --------------------------------------------------------------------------- template version
+BG_PATH = HERE / "potd_background.png"
+_TPL = {}
+PHOTO_BOX = (330, 470, 805, 905)        # inside the big glowing frame
+LOGO_BOX = (46, 552, 290, 832)          # the small left frame
+NAME_CENTER = (570, 954)
+WHITE = (255, 255, 255)
+STAT_BOXES = [(70, 1122, 395, 1245), (415, 1122, 725, 1245), (745, 1122, 1058, 1245)]
+
+
+def _pf(size, bold=True):
+    for p in (HERE / "fonts" / ("Poppins-BoldItalic.ttf" if bold else "Poppins-MediumItalic.ttf"),
+              HERE / "Agrandir-TextBold.otf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(str(p), int(size))
+        except OSError:
+            continue
+    return ImageFont.load_default(int(size))
+
+
+def _tracked(d, cx, y, text, font, fill, spacing):
+    """Centred text with extra letter spacing."""
+    widths = [d.textlength(ch, font=font) for ch in text]
+    total = sum(widths) + spacing * (len(text) - 1)
+    x = cx - total / 2
+    for ch, w in zip(text, widths):
+        d.text((x, y), ch, font=font, fill=fill, anchor="lm")
+        x += w + spacing
+
+
+def _fit_pf(d, text, width, size, minimum=20, bold=True):
+    while size > minimum and d.textlength(text, font=_pf(size, bold)) > width:
+        size -= 2
+    return _pf(size, bold)
+
+
+def render_potd(data):
+    if not BG_PATH.exists():
+        return render_potd_fallback(data)
+    if "bg" not in _TPL:
+        _TPL["bg"] = Image.open(BG_PATH).convert("RGBA")
+    img = _TPL["bg"].copy()
+    if img.size != (W, H):
+        img = img.resize((W, H), Image.LANCZOS)
+    d = ImageDraw.Draw(img, "RGBA")
+
+    stage = (data.get("stage") or "").strip()
+    if stage:
+        _tracked(d, W // 2, 64, stage.upper(), _pf(18, False), (20, 44, 92), 5)
+
+    # photo inside the big frame
+    x1, y1, x2, y2 = PHOTO_BOX
+    pw, ph = x2 - x1, y2 - y1
+    photo = _open(data.get("photo"))
+    if photo is None:
+        pic = Image.new("RGBA", (pw, ph), (8, 24, 60, 255))
+        ImageDraw.Draw(pic).text((pw // 2, ph // 2), (data.get("player") or "?")[:1].upper(),
+                                 font=_pf(260), fill=(255, 255, 255, 190), anchor="mm")
+    else:
+        pic = ImageOps.fit(photo, (pw, ph), Image.LANCZOS, centering=(.5, .3))
+    mask = Image.new("L", (pw, ph), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, pw - 1, ph - 1), radius=34, fill=255)
+    img.paste(pic, (x1, y1), mask)
+    d = ImageDraw.Draw(img, "RGBA")
+
+    # team logo + name in the left frame
+    lx1, ly1, lx2, ly2 = LOGO_BOX
+    cx = (lx1 + lx2) // 2
+    logo = _open(data.get("team_logo"))
+    size = 150
+    if logo is not None:
+        lg = ImageOps.contain(logo, (size, size), Image.LANCZOS)
+        img.alpha_composite(lg, (cx - lg.size[0] // 2, ly1 + 26 + (size - lg.size[1]) // 2))
+    else:
+        ring = _circle(img, None, size, (255, 255, 255), data.get("team") or "T")
+        img.alpha_composite(ring, (cx - size // 2, ly1 + 26))
+    d = ImageDraw.Draw(img, "RGBA")
+    team = (data.get("team") or "").upper()
+    words = team.split()
+    lines = [team] if len(words) < 2 else [" ".join(words[:-1]), words[-1]]
+    ty = ly1 + 26 + size + 30
+    for i, line in enumerate(lines[:2]):
+        f = _fit_pf(d, line, lx2 - lx1 - 30, 28 if i == 0 else 34, 14, bold=(i == 1))
+        d.text((cx, ty + i * 34), line, font=f, fill=(225, 238, 255), anchor="mm")
+
+    # name plate
+    name = data.get("player") or "Player"
+    f = _fit_pf(d, name, 640, 58, 28)
+    d.text(NAME_CENTER, name, font=f, fill=WHITE, anchor="mm")
+    _tracked(d, NAME_CENTER[0], 1032, (data.get("team") or "").upper()[:28], _pf(22, False), (205, 225, 250), 6)
+
+    # versus
+    if data.get("opponent"):
+        d.text((434, 1085), data["opponent"], font=_fit_pf(d, data["opponent"], 480, 34, 20), fill=WHITE, anchor="lm")
+
+    # stat boxes
+    for (bx1, by1, bx2, by2), label, value in zip(
+            STAT_BOXES, ("BATTING", "BOWLING", "FIELDING"),
+            (data.get("batting") or "DNB", data.get("bowling") or "DNB", data.get("fielding") or "DNF")):
+        mx = (bx1 + bx2) // 2
+        d.text((mx, by1 + 78), str(value), font=_fit_pf(d, str(value), bx2 - bx1 - 60, 50, 24), fill=WHITE, anchor="mm")
+
+    out = io.BytesIO()
+    img.convert("RGB").save(out, "PNG")
     return out.getvalue()
