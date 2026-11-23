@@ -7,6 +7,7 @@ Any field can be overridden in the same message:
     +potd @Ahmad vs=OrDer stage="Intermediate Stage • Round 1" batting="74 (19)" bowling="2/18 (4.0)"
     fielding="2 catches" team="Kashmir Titans" title="Kashmir Titans" match=<result message id>
 """
+import io
 import re
 import types
 
@@ -94,6 +95,9 @@ class PlayerOfTheDay(commands.Cog):
         if member is None:
             return await ctx.send("Usage: `+potd @player` (optional: attach a photo, `vs=Team stage=\"Round 1\" "
                                   "batting=\"74 (19)\" bowling=\"2/18 (4.0)\" fielding=\"2 catches\"`)")
+        await self._send_card(ctx, member, opts)
+
+    async def _send_card(self, ctx, member, opts):
         match_id = int(opts["match"]) if opts.get("match", "").isdigit() else None
         info = self._latest(ctx.guild.id, member.id, match_id)
         if info is None and not (opts.get("batting") or opts.get("bowling")):
@@ -153,8 +157,37 @@ class PlayerOfTheDay(commands.Cog):
                 "batting": batting, "bowling": bowling, "fielding": fielding,
             }
             png = await render_png(render_potd, data)
-        import io
         await ctx.send(file=discord.File(io.BytesIO(png), filename="player_of_the_day.png"))
+
+    @commands.command(name="randompotd", aliases=["rpotd", "randomplayeroftheday"])
+    @commands.guild_only()
+    async def randompotd(self, ctx):
+        """A POTD card for a random player from the latest imported matches (same options as +potd)."""
+        if not await owner_or_whitelisted(ctx, "potd", app_owner=True):
+            return await ctx.send("You are not allowed to use this command.")
+        if self.core is None:
+            return await ctx.send("The team system is not loaded.")
+        rows = self.core.db.execute(
+            "SELECT DISTINCT p.user_id FROM player_match_stats p JOIN stats_imports i "
+            "ON i.source_message_id=p.source_message_id WHERE i.guild_id=? "
+            "AND (p.balls_faced>0 OR p.balls_bowled>0) ORDER BY i.imported_at DESC LIMIT 200",
+            (ctx.guild.id,)).fetchall()
+        import random
+        ids = [int(r["user_id"]) for r in rows]
+        random.shuffle(ids)
+        member = None
+        for uid in ids:
+            member = ctx.guild.get_member(uid)
+            if member is not None:
+                break
+        if member is None:
+            return await ctx.send("No player with imported match stats was found.")
+        opts = {}
+        for m in _PAIR.finditer(ctx.message.content):
+            if m.group(1).lower() in KEYS:
+                opts[m.group(1).lower()] = next(g for g in m.groups()[1:] if g is not None)
+        opts.pop("match", None)
+        await self._send_card(ctx, member, opts)
 
 
 async def setup(bot):
