@@ -49,7 +49,7 @@ class PlayerOfTheDay(commands.Cog):
             return None
 
     def _latest(self, guild_id, user_id, match_id=None):
-        db = self.core.db
+        db = self.bot.db
         sql = ("SELECT p.*, i.imported_at FROM player_match_stats p JOIN stats_imports i "
                "ON i.source_message_id=p.source_message_id WHERE i.guild_id=? AND p.user_id=? ")
         args = [guild_id, user_id]
@@ -98,6 +98,13 @@ class PlayerOfTheDay(commands.Cog):
         await self._send_card(ctx, member, opts)
 
     async def _send_card(self, ctx, member, opts):
+        try:
+            await self._send_card_inner(ctx, member, opts)
+        except Exception as exc:
+            print(f"[potd] failed: {type(exc).__name__}: {exc}")
+            await ctx.send(f"Could not make the POTD card: `{type(exc).__name__}: {exc}`")
+
+    async def _send_card_inner(self, ctx, member, opts):
         match_id = int(opts["match"]) if opts.get("match", "").isdigit() else None
         info = self._latest(ctx.guild.id, member.id, match_id)
         if info is None and not (opts.get("batting") or opts.get("bowling")):
@@ -167,7 +174,7 @@ class PlayerOfTheDay(commands.Cog):
             return await ctx.send("You are not allowed to use this command.")
         if self.core is None:
             return await ctx.send("The team system is not loaded.")
-        rows = self.core.db.execute(
+        rows = self.bot.db.execute(
             "SELECT DISTINCT p.user_id FROM player_match_stats p JOIN stats_imports i "
             "ON i.source_message_id=p.source_message_id WHERE i.guild_id=? "
             "AND (p.balls_faced>0 OR p.balls_bowled>0) ORDER BY i.imported_at DESC LIMIT 200",
