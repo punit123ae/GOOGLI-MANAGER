@@ -117,6 +117,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.moderation",
             "cogs.compareteams",
             "cogs.matchpreview",
+            "cogs.xi",
             "cogs.memory_trim",
             "cogs.testversus",
         ):

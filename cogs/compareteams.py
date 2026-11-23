@@ -385,7 +385,28 @@ class CompareTeams(commands.Cog):
         except Exception:
             pass
 
-        result = {"stats": stats, "fielding": fielding}
+        # The same rows regrouped per player (all teams he has played for), for +xi / +cxi.
+        players, field_players = {}, {}
+        for per_team in stats.values():
+            for uid, rows in per_team.items():
+                players.setdefault(uid, []).extend(rows)
+        for per_team in fielding.values():
+            for uid, (caught, dropped) in per_team.items():
+                c0, d0 = field_players.get(uid, (0, 0))
+                field_players[uid] = (c0 + caught, d0 + dropped)
+        sizes = []
+        try:
+            sizes = sorted(int(r[0]) for r in db.execute(
+                """SELECT COUNT(*) FROM match_teams mt
+                   JOIN stats_imports i ON i.source_message_id=mt.source_message_id
+                   WHERE i.guild_id=? AND COALESCE(i.competition, 'MAIN TOURNAMENT')='MAIN TOURNAMENT'
+                   GROUP BY mt.source_message_id, mt.team_name""", (int(guild_id),)).fetchall())
+        except Exception:
+            pass
+        typical = sizes[len(sizes) // 2] if sizes else 0      # usual number of players in a team per match
+
+        result = {"stats": stats, "fielding": fielding, "players": players,
+                  "fielding_players": field_players, "typical": typical}
         self._index_cache[int(guild_id)] = (time.monotonic(), result)
         return result
 
