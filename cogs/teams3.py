@@ -1040,7 +1040,7 @@ class TeamCommandsB:
             try:
                 payload = await asyncio.wait_for(make().read(), timeout=8)
                 if payload and Image.open(io.BytesIO(payload)).verify() is None:
-                    if len(_AVATAR_CACHE) >= 200:
+                    if len(_AVATAR_CACHE) >= 120:
                         _AVATAR_CACHE.pop(next(iter(_AVATAR_CACHE)))
                     _AVATAR_CACHE[cache_key] = payload
                     return payload
@@ -1392,7 +1392,7 @@ class TeamCommandsB:
                 data = await self._team_profile_data(ctx, team, ordered_ids)
                 renderer = await asyncio.to_thread(TeamPageRenderer, data)
                 print(f"[teaminfo] data ready in {time.perf_counter()-started:.1f}s (pages draw on demand)", flush=True)
-                if len(_TEAMINFO_CACHE) >= 3:
+                if len(_TEAMINFO_CACHE) >= 2:
                     _TEAMINFO_CACHE.pop(next(iter(_TEAMINFO_CACHE)))
                 _TEAMINFO_CACHE[cache_key] = (time.time(), renderer)
             view = TeamInfoMixedView(ctx, roster_embed, renderer)

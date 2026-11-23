@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -9,6 +10,12 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+
+try:   # fewer glibc memory arenas: image threads otherwise each keep their own pile of freed memory
+    import ctypes
+    ctypes.CDLL("libc.so.6").mallopt(-8, 2)       # M_ARENA_MAX = 2
+except Exception:
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -72,6 +79,10 @@ class GoogIManagerBot(commands.Bot):
         print("Slash commands synced to the configured server.")
 
     async def setup_hook(self):
+        # Drawing images happens in worker threads; two are plenty and keep memory down.
+        import concurrent.futures
+        asyncio.get_running_loop().set_default_executor(
+            concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="googli"))
         # Load each feature as a separate module.
         for extension in (
             "cogs.utility",
@@ -120,6 +131,7 @@ bot = GoogIManagerBot(
     command_prefix=("+"),
     intents=intents,
     help_command=None,
+    max_messages=200,          # default 1000 cached messages is a lot on a 256 MB host
 )
 
 bot.db = sqlite3.connect(DB_FILE)

@@ -5,7 +5,8 @@ The three places that announce a match (/match_schedule, the captains' agreed ti
 listens for it and replies to the announcement with the card. Nothing here can break an
 announcement: the card is drawn afterwards, one at a time, and any failure is only logged.
 
-+testmatchpreview Team A | Team B   draw the same card on demand (owner / whitelisted role)
++winprobability Team A | Team B   (+wp, +mp, +tmp) draw the same card on demand;
+                                     with one team name it is your own team against that team
 """
 import asyncio
 import io
@@ -16,7 +17,7 @@ import discord
 from discord.ext import commands
 
 from .compareteams import predict
-from .h2h import render_png
+from .h2h import on_cooldown, render_png
 from .match_preview_image import render_match_preview
 
 
@@ -82,24 +83,26 @@ class MatchPreview(commands.Cog):
                 print(f"[matchpreview] skipped: {type(exc).__name__}: {exc}", flush=True)
             await asyncio.sleep(1)              # breathing space if many matches are announced together
 
-    # ------------------------------------------------------------------ test command
-    @commands.command(name="testmatchpreview")
+    # ------------------------------------------------------------------ command
+    @commands.command(name="winprobability",
+                      aliases=["winprobabilty", "wp", "mp", "tmp", "matchpreview", "testmatchpreview"])
     @commands.guild_only()
-    async def test_match_preview(self, ctx, *, teams: str = ""):
-        """Test: draw the match preview card. Usage: +testmatchpreview Team A | Team B"""
-        from .utility import is_bot_owner_id, owner_or_whitelisted
-        if not (is_bot_owner_id(self.bot, ctx.author.id) or await self.bot.is_owner(ctx.author)
-                or await owner_or_whitelisted(ctx, "testmatchpreview")):
-            await ctx.reply("Only the bot owner or a role whitelisted for `+testmatchpreview` can use this.",
-                            mention_author=False)
+    async def win_probability_command(self, ctx, *, teams: str = ""):
+        """Win probability card. +wp Team A | Team B, or +wp Team (your own team vs that team)."""
+        compare, core = self.compare, self.bot.get_cog("TeamRegistration")
+        if compare is None or core is None:
+            await ctx.reply("The team system isn't loaded right now.", mention_author=False)
             return
-        compare = self.compare
-        if compare is None:
-            await ctx.reply("The team comparison isn't loaded.", mention_author=False)
-            return
+        usage = "Usage: `+wp Team A | Team B`, or `+wp Team` to play your own team against it."
         parts = [p.strip() for p in re.split(r"\s*\|\s*|\s+vs\.?\s+", teams, flags=re.I) if p.strip()]
+        if len(parts) == 1:                     # one name: your own team against that one
+            mine = core._membership(ctx.guild.id, ctx.author.id)
+            if not mine:
+                await ctx.reply(usage, mention_author=False)
+                return
+            parts = [str(mine["name"]), parts[0]]
         if len(parts) != 2:
-            await ctx.reply("Usage: `+testmatchpreview Team A | Team B`", mention_author=False)
+            await ctx.reply(usage, mention_author=False)
             return
         found = []
         for query in parts:
@@ -111,9 +114,20 @@ class MatchPreview(commands.Cog):
         if int(found[0]["id"]) == int(found[1]["id"]):
             await ctx.reply("Pick two different teams.", mention_author=False)
             return
-        async with ctx.typing():
-            png = await self.build_png(ctx.guild, found[0], found[1])
-        await ctx.reply(file=discord.File(io.BytesIO(png), filename="match_preview.png"), mention_author=False)
+        wait = on_cooldown(ctx.author.id)
+        if wait:
+            await ctx.reply(f"Please wait {wait:.0f}s before drawing another image.", mention_author=False)
+            return
+        async with self._lock, ctx.typing():
+            try:
+                png = await self.build_png(ctx.guild, found[0], found[1])
+            except Exception as exc:
+                print(f"[matchpreview] command failed: {type(exc).__name__}: {exc}", flush=True)
+                await ctx.reply("I couldn't draw the win probability card. Check the bot logs.",
+                                mention_author=False)
+                return
+        await ctx.reply(file=discord.File(io.BytesIO(png), filename="win_probability.png"),
+                        mention_author=False)
 
 
 async def setup(bot):
