@@ -119,6 +119,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.matchpreview",
             "cogs.xi",
             "cogs.potd",
+            "cogs.insights",
             "cogs.memory_trim",
             "cogs.testversus",
         ):
