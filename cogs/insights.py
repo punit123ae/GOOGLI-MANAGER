@@ -158,18 +158,37 @@ class Insights(commands.Cog):
             if not who["p"]["matches"]:
                 await loading.edit(content=f"**{who['name']}** has no imported matches yet.")
                 return
-            rows = sorted(self.compare._guild_rows(ctx.guild.id)["players"].get(uid, []), key=lambda r: r["mid"])
-            total = len(rows)
+            rows = sorted(self.compare._guild_rows(ctx.guild.id)["players"].get(uid, []),
+                          key=lambda r: r["mid"], reverse=True)[:5]          # newest first
+            mids = [r["mid"] for r in rows]
+            teams, field = {}, {}
+            if mids:
+                marks = ",".join("?" * len(mids))
+                for t in self.bot.db.execute(
+                        f"SELECT source_message_id, user_id, team_name FROM match_teams "
+                        f"WHERE source_message_id IN ({marks})", mids).fetchall():
+                    teams.setdefault(int(t["source_message_id"]), {})[int(t["user_id"])] = t["team_name"]
+                for f in self.bot.db.execute(
+                        f"SELECT source_message_id, catches_taken, catches_dropped FROM player_match_fielding "
+                        f"WHERE user_id=? AND source_message_id IN ({marks})", [uid] + mids).fetchall():
+                    field[int(f["source_message_id"])] = (int(f["catches_taken"]), int(f["catches_dropped"]))
             shown = []
-            for i, r in enumerate(rows[-5:], start=total - min(5, total) + 1):
+            for r in rows:
                 bat = "DNB"
                 if r["balls_faced"] or r["runs"]:
                     bat = f"{r['runs']}{'*' if r['not_out'] else ''} ({r['balls_faced']})"
                 bowl = "DNB"
                 if r["balls_bowled"]:
                     bowl = f"{r['wickets']}/{r['runs_conceded']} ({r['balls_bowled'] // 6}.{r['balls_bowled'] % 6})"
-                shown.append({"label": f"MATCH {i}", "bat": bat, "bowl": bowl,
-                              "fantasy": float(fantasy_raw_points([r])[2])})
+                caught, dropped = field.get(r["mid"], (0, 0))
+                fld = "DNF"
+                if caught or dropped:
+                    fld = f"{caught} catch{'es' if caught != 1 else ''}" + (f", {dropped} drop{'s' if dropped != 1 else ''}" if dropped else "")
+                per = teams.get(r["mid"], {})
+                mine = per.get(uid)
+                opp = next((n for n in per.values() if n and n != mine), None)
+                shown.append({"team": mine or who["team"], "opp": opp, "bat": bat, "bowl": bowl, "field": fld,
+                              "fantasy": float(fantasy_raw_points([r])[2]) + caught * 5 - dropped * 10})
             png = await render_png(render_form, {"who": who, "matches": shown, "guild": ctx.guild.name})
             await self._send(ctx, loading, png, "form.png")
         except Exception as exc:

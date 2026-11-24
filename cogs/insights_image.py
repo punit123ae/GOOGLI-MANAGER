@@ -142,27 +142,28 @@ def render_compare_players(data):
 def render_form(data):
     who, p = data["who"], data["who"]["p"]
     c = _canvas(who.get("color"), None)
-    matches = data["matches"]                      # oldest to newest, each {label, bat, bowl, fantasy}
-    boxes = [(50 + i * 304, 360, 50 + i * 304 + 284, 640) for i in range(5)]
-    c.card((50, 30, 1550, 330), 26)
+    matches = data["matches"]                      # newest first, each {team, opp, bat, bowl, field, fantasy}
+    boxes = [(50 + i * 304, 310, 50 + i * 304 + 284, 662) for i in range(5)]
+    c.card((50, 24, 1550, 286), 26)
     for b in boxes:
         c.card(b, 22)
-    c.card((50, 660, 1550, 848), 24)
+    c.card((50, 678, 1550, 848), 24)
     c.seal()
     d = c.d
-    _avatar(c, who, 200, (80, 80), c.a)
-    _name(d, who["name"], 310, 70, 620, 56)
-    _team_pill(d, 310, 146, who.get("team"), c.a)
-    _text(d, (310, 196), f"{_role_text(p)}  •  {p['style'].upper()}", 16, MUTED)
-    _text(d, (310, 222), f"{p['matches']} MATCHES  •  LAST {p['r_matches']} COUNTED", 15, DIM)
+    _avatar(c, who, 170, (80, 62), c.a)
+    _name(d, who["name"], 300, 58, 620, 54)
+    _team_pill(d, 300, 130, who.get("team"), c.a)
+    _text(d, (300, 180), f"{_role_text(p)}  •  {p['style'].upper()}", 16, MUTED)
+    _text(d, (300, 206), f"{p['matches']} MATCHES  •  LAST {p['r_matches']} COUNTED", 15, DIM)
     delta = p.get("form_delta", 0)
     color = HOT if delta >= 12 else COLD if delta <= -12 else (150, 165, 195)
     word = "HOT" if delta >= 12 else "COLD" if delta <= -12 else "STEADY"
     mark = "▲" if delta >= 12 else "▼" if delta <= -12 else "●"
-    _text(d, (1470, 64), "FORM RATING", 15, MUTED, "ra")
-    _title(d, (1470, 80), f"{p['form']:.0f}", 130, _rating_color(p["form"]), "ra", "head")
-    _pill(d, 1470 - 190, 232, f"{mark} {word}", 22, fill=color, fg=INK, pad=22, h=44)
-    _text(d, (1470, 292), f"{delta:+.0f} vs season fantasy rating", 14, DIM, "ra")
+    _text(d, (1470, 48), "FORM RATING", 15, MUTED, "ra")
+    _title(d, (1470, 62), f"{p['form']:.0f}", 120, _rating_color(p["form"]), "ra", "head")
+    _pill(d, 1470 - 190, 196, f"{mark} {word}", 22, fill=color, fg=INK, pad=22, h=44)
+    _text(d, (1470, 256), f"{delta:+.0f} vs season fantasy rating", 14, DIM, "ra")
+    _text(d, (80, 256), "NEWEST  →  OLDEST", 13, DIM)
 
     top = max([abs(m["fantasy"]) for m in matches] + [1])
     for i, box in enumerate(boxes):
@@ -171,17 +172,22 @@ def render_form(data):
             _text(d, ((x1 + x2) // 2, (y1 + y2) // 2), "NO MATCH", 18, DIM, "mm")
             continue
         m = matches[i]
-        _text(d, (x1 + 20, y1 + 18), m["label"], 15, color if i == len(matches) - 1 else MUTED, "la", "bold")
-        _text(d, (x1 + 20, y1 + 56), "BATTING", 12, MUTED)
-        _text(d, (x1 + 20, y1 + 74), m["bat"], 28, BAT_COLOR, "la", "head")
-        _text(d, (x1 + 20, y1 + 124), "BOWLING", 12, MUTED)
-        _text(d, (x1 + 20, y1 + 142), m["bowl"], 28, BOWL_COLOR, "la", "head")
-        _text(d, (x1 + 20, y1 + 192), "FANTASY", 12, MUTED)
-        _text(d, (x1 + 20, y1 + 208), f"{m['fantasy']:.0f}", 26, WHITE, "la", "head")
-        d.rounded_rectangle((x1 + 20, y2 - 22, x2 - 20, y2 - 12), radius=5, fill=TRACK)
+        room = x2 - x1 - 40
+        _text(d, (x1 + 20, y1 + 16), _clip(d, (m["team"] or "").upper(), room, 12), 12, color if i == 0 else MUTED, "la", "bold")
+        vs = _clip(d, "vs " + (m["opp"] or "?").upper(), room, 20, "head")
+        _text(d, (x1 + 20, y1 + 36), vs, 20, WHITE, "la", "head")
+        d.line((x1 + 20, y1 + 70, x2 - 20, y1 + 70), fill=EDGE, width=1)
+        for j, (label, text, col) in enumerate((("BATTING", m["bat"], BAT_COLOR), ("BOWLING", m["bowl"], BOWL_COLOR),
+                                                ("FIELDING", m["field"], FIELD_COLOR))):
+            y = y1 + 82 + j * 62
+            _text(d, (x1 + 20, y), label, 12, MUTED)
+            _text(d, (x1 + 20, y + 16), text, 26, col if text not in ("DNB", "DNF") else DIM, "la", "head")
+        _text(d, (x2 - 20, y1 + 82), "FANTASY", 12, MUTED, "ra")
+        _text(d, (x2 - 20, y1 + 98), f"{m['fantasy']:.0f}", 26, WHITE, "ra", "head")
+        d.rounded_rectangle((x1 + 20, y2 - 24, x2 - 20, y2 - 14), radius=5, fill=TRACK)
         w = int((x2 - x1 - 40) * max(0, m["fantasy"]) / top)
         if w > 0:
-            d.rounded_rectangle((x1 + 20, y2 - 22, x1 + 20 + max(10, w), y2 - 12), radius=5, fill=color)
+            d.rounded_rectangle((x1 + 20, y2 - 24, x1 + 20 + max(10, w), y2 - 14), radius=5, fill=color)
 
     tiles = [
         ("RUNS / MATCH", p["runs"] / max(1, p["matches"]) if p["bat_inn"] else None, p["r_rpm"], 1, True),
@@ -189,20 +195,20 @@ def render_form(data):
         ("WKTS / MATCH", p["wickets"] / max(1, p["matches"]) if p["balls_bowled"] >= 6 else None, p["r_wpm"], 2, True),
         ("ECONOMY", p["economy"], p["r_econ"], 2, False),
     ]
-    _text(d, (80, 680), "SEASON  →  LAST 5", 15, MUTED)
+    _text(d, (80, 694), "SEASON  →  LAST 5", 15, MUTED)
     for i, (label, season, recent, dec, high) in enumerate(tiles):
         cx = 80 + i * 360
-        _text(d, (cx, 716), label, 14, MUTED)
-        s = "—" if season is None else f"{season:.{dec}f}"
-        r = "—" if recent is None else f"{recent:.{dec}f}"
-        _text(d, (cx, 748), s, 34, MUTED, "la", "head")
-        sw = int(d.textlength(s, font=font(34, "head")))
+        _text(d, (cx, 724), label, 14, MUTED)
+        sv = "—" if season is None else f"{season:.{dec}f}"
+        rv = "—" if recent is None else f"{recent:.{dec}f}"
+        _text(d, (cx, 748), sv, 32, MUTED, "la", "head")
+        sw = int(d.textlength(sv, font=font(32, "head")))
         _text(d, (cx + sw + 14, 756), "→", 26, DIM, "la", "head")
         better = None if season is None or recent is None else (recent > season if high else recent < season)
         col = WHITE if better is None else (HOT if better else COLD)
-        _text(d, (cx + sw + 52, 748), r, 40, col, "la", "head")
+        _text(d, (cx + sw + 52, 744), rv, 38, col, "la", "head")
         if better is not None and recent != season:
-            _text(d, (cx, 800), ("▲ IMPROVING" if better else "▼ DROPPING"), 13, col, "la", "bold")
+            _text(d, (cx, 802), ("▲ IMPROVING" if better else "▼ DROPPING"), 13, col, "la", "bold")
     _footer(c, f"GOOGLI MANAGER  •  PLAYER FORM  •  {who['name']}"[:90], data.get("guild"))
     return _png(c.image)
 
