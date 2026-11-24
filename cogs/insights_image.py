@@ -143,7 +143,7 @@ def render_form(data):
     who, p = data["who"], data["who"]["p"]
     c = _canvas(who.get("color"), None)
     matches = data["matches"]                      # oldest to newest, each {label, bat, bowl, fantasy}
-    boxes = [(50 + i * 296, 360, 50 + i * 296 + 276, 640) for i in range(5)]
+    boxes = [(50 + i * 304, 360, 50 + i * 304 + 284, 640) for i in range(5)]
     c.card((50, 30, 1550, 330), 26)
     for b in boxes:
         c.card(b, 22)

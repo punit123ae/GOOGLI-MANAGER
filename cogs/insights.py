@@ -1,6 +1,7 @@
 """Player / team insight commands built on the XI rating engine.
 
     +compareplayers   two players side by side (alias +cp)
+    +form             last 5 matches, trend and season-vs-recent for one player
 """
 import io
 import re
@@ -10,9 +11,10 @@ from discord.ext import commands
 
 from . import xi_engine
 from .h2h import fetch_avatar, on_cooldown, render_png, team_role_color
-from .insights_image import render_compare_players
+from .insights_image import render_compare_players, render_form
 
 MENTION = re.compile(r"<@!?(\d+)>")
+USAGE_FORM = "Use `+form` (yourself) or `+form @player`."
 USAGE_CP = "Use `+compareplayers @player` (you vs them) or `+compareplayers @player | @player`."
 
 
@@ -131,6 +133,52 @@ class Insights(commands.Cog):
             except Exception:
                 pass
             await ctx.send("I couldn't compare those players. Check the bot logs.")
+
+    # ------------------------------------------------------------------ +form
+    @commands.command(name="form", aliases=["playerform", "recentform"])
+    @commands.guild_only()
+    async def form(self, ctx, *, player: str = ""):
+        """Recent form: +form (you) or +form @player."""
+        if self.compare is None or self.core is None or self.bot.get_cog("PlayingXI") is None:
+            return await ctx.reply("The team system isn't loaded right now.", mention_author=False)
+        if player.strip():
+            ids = await self.members_from(ctx, player, USAGE_FORM, need=1, max_n=1)
+            if not ids:
+                return
+            uid = ids[0]
+        else:
+            uid = ctx.author.id
+        if await self._busy(ctx):
+            return
+        loading = await ctx.reply("⏳ Checking recent form...", mention_author=False)
+        try:
+            from .stats import fantasy_raw_points
+            rated = self.rated_all(ctx.guild.id)
+            who = await self.person(ctx.guild, uid, rated)
+            if not who["p"]["matches"]:
+                await loading.edit(content=f"**{who['name']}** has no imported matches yet.")
+                return
+            rows = sorted(self.compare._guild_rows(ctx.guild.id)["players"].get(uid, []), key=lambda r: r["mid"])
+            total = len(rows)
+            shown = []
+            for i, r in enumerate(rows[-5:], start=total - min(5, total) + 1):
+                bat = "DNB"
+                if r["balls_faced"] or r["runs"]:
+                    bat = f"{r['runs']}{'*' if r['not_out'] else ''} ({r['balls_faced']})"
+                bowl = "DNB"
+                if r["balls_bowled"]:
+                    bowl = f"{r['wickets']}/{r['runs_conceded']} ({r['balls_bowled'] // 6}.{r['balls_bowled'] % 6})"
+                shown.append({"label": f"MATCH {i}", "bat": bat, "bowl": bowl,
+                              "fantasy": float(fantasy_raw_points([r])[2])})
+            png = await render_png(render_form, {"who": who, "matches": shown, "guild": ctx.guild.name})
+            await self._send(ctx, loading, png, "form.png")
+        except Exception as exc:
+            print(f"[form] failed: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+            await ctx.send("I couldn't build the form card. Check the bot logs.")
 
 
 async def setup(bot):
