@@ -14,7 +14,7 @@ import math
 from functools import lru_cache
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE / "lb_card_template.png"
@@ -60,6 +60,68 @@ BAR_LEFT_CX, BAR_RIGHT_CX = 318, 815
 def _template() -> Image.Image:
     """Decoded once and reused; each card is drawn on a copy."""
     return Image.open(TEMPLATE).convert("RGB")
+
+@lru_cache(maxsize=1)
+def _modern_template() -> Image.Image:
+    """Portrait glass-and-glow background matching the teaminfo / stats image family."""
+    w, h = 1024, 1535
+    top, bottom = (11, 24, 48), (3, 8, 20)
+    image = Image.new("RGB", (w, h))
+    gradient = ImageDraw.Draw(image)
+    for y in range(h):
+        t = y / max(1, h - 1)
+        col = tuple(int(top[k] * (1 - t) + bottom[k] * t) for k in range(3))
+        gradient.line((0, y, w, y), fill=col)
+    image = image.convert("RGBA")
+
+    def glow(cx, cy, rx, ry, color, alpha, blur):
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).ellipse((cx-rx, cy-ry, cx+rx, cy+ry), fill=color + (alpha,))
+        return layer.filter(ImageFilter.GaussianBlur(blur))
+
+    image = Image.alpha_composite(image, glow(930, 130, 420, 360, (35, 125, 255), 105, 145))
+    image = Image.alpha_composite(image, glow(90, 1330, 420, 360, (30, 190, 165), 62, 150))
+    image = Image.alpha_composite(image, glow(510, 760, 500, 260, (45, 95, 190), 30, 150))
+
+    beams = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(beams)
+    bd.polygon([(0, 0), (105, 0), (25, h), (0, h)], fill=(80, 150, 255, 25))
+    bd.polygon([(130, 0), (151, 0), (76, h), (55, h)], fill=(85, 210, 220, 16))
+    bd.polygon([(850, 0), (1024, 0), (1024, 230), (925, 650), (880, 650)], fill=(65, 145, 255, 17))
+    image = Image.alpha_composite(image, beams.filter(ImageFilter.GaussianBlur(9)))
+
+    grid = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grid)
+    for gx in range(0, w, 52):
+        gd.line((gx, 0, gx, h), fill=(220, 238, 255, 5))
+    for gy in range(0, h, 52):
+        gd.line((0, gy, w, gy), fill=(220, 238, 255, 5))
+    image = Image.alpha_composite(image, grid)
+
+    # Glass panels follow the existing leaderboard layout, keeping content positions unchanged.
+    panels = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(panels)
+    panel = (5, 15, 32, 188)
+    edge = (72, 137, 205, 105)
+    pd.rounded_rectangle((35, 35, 989, 365), radius=34, fill=(7, 17, 34, 95),
+                         outline=(75, 145, 220, 95), width=2)
+    pd.rounded_rectangle((38, 395, 986, 548), radius=27, fill=(12, 23, 41, 215),
+                         outline=(255, 200, 50, 180), width=2)
+    pd.rounded_rectangle((38, 575, 986, 1185), radius=27, fill=panel, outline=edge, width=2)
+    for y in (694, 753, 812, 871, 930, 989, 1048, 1107):
+        pd.line((62, y, 962, y), fill=(130, 165, 205, 35), width=1)
+    pd.rounded_rectangle((38, 1210, 986, 1375), radius=27, fill=panel, outline=edge, width=2)
+    pd.rounded_rectangle((38, 1382, 986, 1475), radius=24, fill=(8, 19, 37, 220),
+                         outline=(80, 155, 220, 115), width=2)
+    pd.rounded_rectangle((38, 575, 986, 583), radius=4, fill=(65, 175, 235, 150))
+    pd.rounded_rectangle((38, 1210, 986, 1217), radius=4, fill=(65, 175, 235, 125))
+    image = Image.alpha_composite(image, panels)
+
+    vignette = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    vignette.putalpha(Image.radial_gradient("L").resize((w, h)).point(
+        lambda v: int(max(0, v - 112) * 0.82)
+    ))
+    return Image.alpha_composite(image, vignette).convert("RGB")
 
 
 @lru_cache(maxsize=None)
@@ -251,7 +313,7 @@ def _draw_title(d: ImageDraw.ImageDraw, stat_label: str) -> None:
 # ---------------------------------------------------------------- card
 def render_card(category: str, stat_label: str, top: dict | None, rows: list[dict],
                 you: dict | None, page_text: str = "", guild_icon: bytes | None = None,
-                player_to_watch: str = "—") -> bytes:
+                player_to_watch: str = "—", modern_background: bool = False) -> bytes:
     """
     top  : {"rank", "name", "value", "avatar", "delta"} for the gold box (first player of the page)
     rows : up to 9 dicts like top, each with its real rank
@@ -259,7 +321,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
     delta: places moved since the last stats update (+ up, - down, 0 unchanged, None no marker)
     avatar / guild_icon are PNG/JPEG bytes or None. Returns JPEG bytes.
     """
-    img = _template().copy()
+    img = (_modern_template() if modern_background else _template()).copy()
     d = ImageDraw.Draw(img)
 
     # server icon in the top-left ring (the right corner stays clear)
