@@ -401,24 +401,36 @@ class Qualify(commands.Cog):
             fixtures = [(a, b, None) for _ in range(legs) for a, b in combinations([r["team_name"] for r in rows], 2)]
         fixtures = [(names[norm(a)], names[norm(b)], day) for a, b, day in fixtures if norm(a) in names and norm(b) in names]
 
-        # results already recorded between pairs of this group
+        # Count only results whose stored team keys belong to this exact
+        # stage/group. Team names alone are not enough: the same two teams can
+        # meet again in a later stage, and an older-stage result must not mark
+        # the new-stage fixture as played.
         pconn = mod.connect_points_db()
         try:
-            results = pconn.execute("SELECT winner_team_key, loser_team_key FROM imported_match_results WHERE guild_id=?",
-                                    (guild_id,)).fetchall()
+            first = (mod.first_stage_key(guild_id) == stage_key)
+            storage_to_name = {}
+            for row in rows:
+                storage_key = mod.points_storage_key(
+                    pconn, guild_id, row["team_name_key"], legacy_ok=first
+                )
+                storage_to_name[str(storage_key)] = norm(row["team_name"])
+            results = pconn.execute(
+                "SELECT winner_team_key, loser_team_key FROM imported_match_results WHERE guild_id=?",
+                (guild_id,),
+            ).fetchall()
         finally:
             pconn.close()
-        first = (mod.first_stage_key(guild_id) == stage_key)
+
         played = {}
-        for r in results:
-            ends = []
-            for key in (r["winner_team_key"], r["loser_team_key"]):
-                prefix, _, rest = str(key).rpartition("::")
-                if (prefix == stage_key) or (not prefix and first):
-                    ends.append(norm(rest))
-            if len(ends) == 2 and ends[0] in names and ends[1] in names:
-                pair = frozenset(ends)
-                played[pair] = played.get(pair, 0) + 1
+        for result in results:
+            winner_key = str(result["winner_team_key"])
+            loser_key = str(result["loser_team_key"])
+            winner_name = storage_to_name.get(winner_key)
+            loser_name = storage_to_name.get(loser_key)
+            if winner_name is None or loser_name is None:
+                continue
+            pair = frozenset((winner_name, loser_name))
+            played[pair] = played.get(pair, 0) + 1
         remaining, seen = [], {}
         for a, b, day in fixtures:
             pair = frozenset((norm(a), norm(b)))
@@ -521,57 +533,6 @@ class Qualify(commands.Cog):
                 pass
             await ctx.send(f"I couldn't work out the qualification chances: `{type(exc).__name__}: {exc}`")
 
-
-    @commands.command(name="qualifydebug")
-    @commands.guild_only()
-    @commands.has_guild_permissions(administrator=True)
-    async def qualifydebug(self, ctx, *, team: str):
-        """Temporary diagnostic for qualification fixtures and imported results."""
-        from .groups import norm
-        pts = self.bot.get_cog("PointsTable")
-        if pts is None:
-            return await ctx.reply("Points table is not loaded.", mention_author=False)
-        mod = sys.modules[type(pts).__module__]
-        stage = mod.get_active_stage(ctx.guild.id)
-        gconn = sqlite3.connect(mod.GROUP_DB)
-        gconn.row_factory = sqlite3.Row
-        try:
-            rows = gconn.execute(
-                "SELECT team_name, group_key FROM team_groups WHERE guild_id=? AND team_name=? COLLATE NOCASE",
-                (ctx.guild.id, team.strip())).fetchall()
-            if not rows:
-                return await ctx.reply(f"Could not find **{team}** in team groups.", mention_author=False)
-            group_key = next((r["group_key"] for r in rows
-                              if stage and r["group_key"].split("::", 1)[0].casefold() == stage[0].casefold()),
-                             rows[-1]["group_key"])
-            fixtures = gconn.execute(
-                "SELECT team_one, team_two, day_no FROM generated_fixtures WHERE guild_id=? AND group_key=? ORDER BY day_no, id",
-                (ctx.guild.id, group_key)).fetchall()
-        finally:
-            gconn.close()
-        pconn = mod.connect_points_db()
-        try:
-            results = pconn.execute(
-                "SELECT match_no, winner_team_key, loser_team_key FROM imported_match_results WHERE guild_id=? ORDER BY match_no",
-                (ctx.guild.id,)).fetchall()
-        finally:
-            pconn.close()
-        target = norm(team)
-        lines = [f"QUALIFY DEBUG — {team}", f"Active stage: {stage}", f"Group key: {group_key}", "FIXTURES:"]
-        for f in fixtures:
-            lines.append(f"• {f['team_one']} vs {f['team_two']} (day {f['day_no']})")
-        lines.append("IMPORTED RESULTS INVOLVING THIS TEAM:")
-        found = 0
-        for r in results:
-            w, l = str(r["winner_team_key"]), str(r["loser_team_key"])
-            if target in (norm(w.rpartition("::")[2]), norm(l.rpartition("::")[2])):
-                found += 1
-                lines.append(f"• Match #{r['match_no']}: WINNER=[{w}] LOSER=[{l}]")
-        if not found:
-            lines.append("• No imported result matched this team name.")
-        message = "\n".join(lines)
-        for start in range(0, len(message), 1800):
-            await ctx.send(message[start:start+1800], allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="qualifyspots", aliases=["setqualifyspots"])
     @commands.guild_only()
