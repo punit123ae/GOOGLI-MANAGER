@@ -395,11 +395,16 @@ class Qualify(commands.Cog):
         return group_name, rows, remaining
 
     async def _data(self, ctx, team, want_team=True):
-        compare, core, guild = self.compare, compare.core, ctx.guild
+        compare, guild = self.compare, ctx.guild
+        core = compare.core
         got = await asyncio.to_thread(self._group, guild.id, team["name"])
         if got is None:
             return None
         group_name, rows, remaining = got
+        canon = next((r["team_name"] for r in rows if str(r["team_name"]).casefold() == str(team["name"]).casefold()), None)
+        if canon is None:
+            return None
+        team = {"name": canon}
         spots = max(1, min(self.spots(guild.id), len(rows)))
         record = {r["team_name"]: (int(r["matches_won"]), int(r["matches_lost"])) for r in rows}
         points = {r["team_name"]: int(r["points"]) for r in rows}
@@ -468,12 +473,14 @@ class Qualify(commands.Cog):
             view.message = await loading.edit(
                 content=None, attachments=[discord.File(io.BytesIO(png), filename="qualify.png")], view=view)
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             print(f"[qualify] failed: {type(exc).__name__}: {exc}", flush=True)
             try:
                 await loading.delete()
             except Exception:
                 pass
-            await ctx.send("I couldn't work out the qualification chances. Check the bot logs.")
+            await ctx.send(f"I couldn't work out the qualification chances: `{type(exc).__name__}: {exc}`")
 
     @commands.command(name="qualifyspots", aliases=["setqualifyspots"])
     @commands.guild_only()

@@ -228,12 +228,14 @@ class Streaks(commands.Cog):
             png = await render_png(render_streaks, data)
             await loading.edit(content=None, attachments=[discord.File(io.BytesIO(png), filename="streaks.png")])
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             print(f"[streaks] failed: {type(exc).__name__}: {exc}", flush=True)
             try:
                 await loading.delete()
             except Exception:
                 pass
-            await ctx.send("I couldn't build the streaks. Check the bot logs.")
+            await ctx.send(f"I couldn't build the streaks: `{type(exc).__name__}: {exc}`")
 
 
 async def setup(bot):
