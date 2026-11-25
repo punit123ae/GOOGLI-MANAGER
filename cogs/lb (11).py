@@ -500,9 +500,10 @@ class PageButton(discord.ui.Button):
 
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, cog: "LeaderboardCog", ctx: commands.Context):
+    def __init__(self, cog: "LeaderboardCog", ctx: commands.Context, modern_background: bool = False):
         super().__init__(timeout=300)
         self.cog = cog
+        self.modern_background = bool(modern_background)
         self.ctx = ctx
         self.owner_id = ctx.author.id
         self.competition = "KASHMIR TITANS S1"
@@ -802,7 +803,7 @@ class LeaderboardView(discord.ui.View):
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(
             None, lambda: render_card(f"{self.competition} • {self.category}", self.metric_label, top, rows, you, page_text,
-                                      guild_icon, watch_name))
+                                      guild_icon, watch_name, self.modern_background))
         for child in self.children:
             if isinstance(child, PageButton):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)
@@ -1036,6 +1037,23 @@ class LeaderboardCog(commands.Cog):
         except Exception as exc:
             print(f"[lb] Failed to generate leaderboard: {type(exc).__name__}: {exc}")
             await ctx.send("I couldn't generate the leaderboard. Check the bot console for the error.")
+
+    @commands.command(name="testlb")
+    @commands.guild_only()
+    async def test_leaderboard(self, ctx: commands.Context):
+        """Preview the experimental glass background without changing +lb."""
+        try:
+            self.rows_by_user = self._rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.fielding_by_user = self._fielding_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            self.batter_impact_by_user = self._batter_impact_rows(ctx.guild.id, "MAIN TOURNAMENT")
+            view = LeaderboardView(self, ctx, modern_background=True)
+            async with ctx.typing():
+                embed, card = await view.make_payload()
+            message = await ctx.send(embed=embed, file=card, view=view)
+            view.message = message
+        except Exception as exc:
+            print(f"[testlb] Failed to generate leaderboard preview: {type(exc).__name__}: {exc}")
+            await ctx.send("I couldn't generate the test leaderboard. Check the bot console for the error.")
 
 
 async def setup(bot: commands.Bot):
