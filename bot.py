@@ -123,6 +123,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.memory_trim",
             "cogs.testversus",
             "cogs.awards",
+            "cogs.similar",
         ):
             await self.load_extension(extension)
 
