@@ -56,31 +56,31 @@ def status(through, outright=None, tied=0.0):
     """(label, colour) for a team from its chance of going through."""
     outright = through if outright is None else outright
     if through >= 0.995:
-        return "QUALIFIED", GREEN
+        return "LOCKED IN", GREEN
     if through + tied <= 0.005 or (through <= 0.005 and tied <= 0.005):
         return "ELIMINATED", RED
     if outright < 0.02 and through >= 0.03:
-        return "TIE-BREAKER ROUTE", AMBER
+        return "TIE-BREAKER PATH", AMBER
     if through >= 0.7:
-        return "STRONG POSITION", GREEN
+        return "FAVOURITE", GREEN
     if through >= 0.4:
-        return "IN THE MIX", AMBER
+        return "CONTENDER", AMBER
     if through >= 0.1:
-        return "LONG SHOT", ORANGE
-    return "NEEDS A MIRACLE", RED
+        return "UNDERDOG", ORANGE
+    return "NEEDS LUCK", RED
 
 
 def row_note(row):
     k = row["left"]
     if row["chance"] >= 0.995:
-        return "Qualified" if not k else f"Strong position — {k} to play"
+        return "Locked in" if not k else f"Locked in, {k} still to play"
     if row["chance"] <= 0.005 and row["tied"] <= 0.005:
-        return "Cannot qualify"
+        return "Out of the race"
     if row["outright"] < 0.02 and row["tied"] >= 0.05:
-        return "Likely to end level — the tie-breaker decides"
+        return "Heading for a tie-breaker"
     if row["tied"] >= 0.15:
-        return "Likely to end level — the tie-breaker decides"
-    return (f"{'Strong position' if row['chance'] >= 0.7 else 'Needs results to go its way'} — {k} to play" if k
+        return "Heading for a tie-breaker"
+    return (f"{'In control' if row['chance'] >= 0.7 else 'Needs help'}, {k} to play" if k
             else "All matches played")
 
 
@@ -96,21 +96,21 @@ def need_lines(t):
     sure = next((w for w, s in sorted(scen, key=lambda x: x[0]) if s["outright"] >= 0.995), None)
     if sure is None:
         best = scen[0][1]
-        lines.append(f"Even winning all {k} you can't be sure: {pct_text(best['through'])} (needs other results).")
+        lines.append(f"Even a clean sweep of {k} leaves it open: {pct_text(best['through'])}, other results decide.")
     elif sure == k:
-        lines.append(f"Win all {k} of your {k} matches and you're through for sure." if k > 1
-                     else "Win your last match and you're through for sure.")
+        lines.append(f"Win all {k} of your {k} matches and you're safe." if k > 1
+                     else "Win your last match and you're safe.")
     else:
-        lines.append(f"Win {sure} of your {k} matches and you're through for sure.")
+        lines.append(f"Win {sure} of your {k} matches and you're safe.")
     zero = dict(scen)[0]
     if zero["through"] <= 0.005:
-        lines.append("Lose every match and you're out.")
+        lines.append("Lose them all and you're out.")
     else:
-        lines.append(f"Even losing all {k} you'd still have a {pct_text(zero['through'])} chance (needs help).")
+        lines.append(f"Lose them all and you still keep {pct_text(zero['through'])}, if others slip.")
     if t["tied"] >= 0.005:
         win = t["tie_win"]
-        lines.append(f"{pct_text(t['tied'])} of outcomes leave you level at the cut: a tie-breaker, "
-                     f"which you'd win {pct_text(win)} of the time.")
+        lines.append(f"{pct_text(t['tied'])} of outcomes end level at the cut. Tie-breaker: "
+                     f"you'd win it {pct_text(win)} of the time.")
     return lines
 
 
@@ -193,7 +193,7 @@ def _page_overview(data):
     state, color = t["status"]
 
     x1, y1, x2, y2 = 50, 126, 790, 484
-    _tile_title(c, (x1, y1, x2, y2), color, "QUALIFICATION CHANCE",
+    _tile_title(c, (x1, y1, x2, y2), color, "QUALIFY ODDS",
                 f"TOP {data['spots']} OF {data['group'].upper()} QUALIFY  •  LEVEL AT THE CUT = TIE-BREAKER", "star")
     gx, gy, r = x1 + 170, y1 + 196, 88
     _halo(c, gx, gy, r, color)
@@ -211,14 +211,14 @@ def _page_overview(data):
                               f"{t['left']} MATCH{'ES' if t['left'] != 1 else ''} LEFT")):
         _text(d, (tx, y1 + 230 + i * 27), line, 17, WHITE if i == 0 else MUTED, "la", "bold")
     via = max(0.0, t["chance"] - t["outright"])
-    _stack_bar(d, x1 + 30, x2 - 30, y1 + 306, 14, [(t["outright"], GREEN), (via, AMBER)])
-    _text(d, (x1 + 30, y1 + 326), f"OUTRIGHT {pct_text(t['outright'])}", 13, GREEN, "la", "bold")
-    _text(d, ((x1 + x2) // 2, y1 + 326), f"VIA TIE-BREAKER {pct_text(via)}", 13, AMBER, "ma", "bold")
-    _text(d, (x2 - 30, y1 + 326), f"OUT {pct_text(max(0.0, 1 - t['chance']))}", 13, RED, "ra", "bold")
+    _stack_bar(d, x1 + 30, x2 - 30, y1 + 318, 14, [(t["outright"], GREEN), (via, AMBER)])
+    _text(d, (x1 + 30, y1 + 338), f"OUTRIGHT {pct_text(t['outright'])}", 13, GREEN, "la", "bold")
+    _text(d, ((x1 + x2) // 2, y1 + 338), f"VIA TIE-BREAKER {pct_text(via)}", 13, AMBER, "ma", "bold")
+    _text(d, (x2 - 30, y1 + 338), f"OUT {pct_text(max(0.0, 1 - t['chance']))}", 13, RED, "ra", "bold")
 
     # ---- what you need
     x1, y1, x2, y2 = 810, 126, 1550, 484
-    _tile_title(c, (x1, y1, x2, y2), BLUE, "WHAT YOU NEED", "PLAIN ENGLISH, THEN EVERY NUMBER OF WINS", "bars")
+    _tile_title(c, (x1, y1, x2, y2), BLUE, "PATH TO THE TOP", "WHAT YOUR WINS ARE WORTH", "bars")
     for i, line in enumerate(need_lines(t)[:3]):
         _text(d, (x1 + 30, y1 + 92 + i * 27), _clip(d, line, x2 - x1 - 60, 16), 16, WHITE if i == 0 else MUTED, "la",
               "bold" if i == 0 else "reg")
@@ -233,8 +233,8 @@ def _page_overview(data):
         _text(d, (x1 + 30, y + 16), label, 17, WHITE, "lm", "bold")
         ch = s["through"]
         sure = s["outright"] >= 0.995
-        text, col = (("THROUGH FOR SURE", GREEN) if sure else ("OUT", RED) if ch <= 0.005
-                     else (f"{pct_text(ch)} TO QUALIFY", status(ch, s["outright"], s["tied"])[1]))
+        text, col = (("SAFE", GREEN) if sure else ("OUT", RED) if ch <= 0.005
+                     else (f"{pct_text(ch)} CHANCE", status(ch, s["outright"], s["tied"])[1]))
         _chip(d, x1 + 190, y, text, col, 14, 32)
         if not sure and ch > 0.005:
             extra = f"{pct_text(s['outright'])} outright"
@@ -277,8 +277,8 @@ def _page_matches(data):
     d = c.d
     _header(c, data, 1)
     x1, y1, x2, y2 = 50, 126, 790, 856
-    _tile_title(c, (x1, y1, x2, y2), AMBER, "YOUR REMAINING MATCHES",
-                "CHANCE OF QUALIFYING AFTER EACH RESULT (OTHER MATCHES STILL COUNT)", "up")
+    _tile_title(c, (x1, y1, x2, y2), AMBER, "FIXTURES AHEAD",
+                "YOUR ODDS AFTER EACH POSSIBLE RESULT", "up")
     swings = sorted(t["swings"], key=lambda s: -(s["win"]["through"] - s["lose"]["through"]))[:5]
     if not swings:
         _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NO REMAINING MATCHES", 24, DIM, "mm", "head")
@@ -289,24 +289,24 @@ def _page_matches(data):
         _text(d, (x1 + 46, y + 20), f"MATCH {i + 1}", 12, MUTED)
         _text(d, (x1 + 46, y + 40), _clip(d, "VS " + s["opp"].upper(), 330, 24, "head"), 24, WHITE, "la", "head")
         _text(d, (x1 + 46, y + 78), f"YOUR WIN CHANCE {s['p'] * 100:.0f}%", 13, MUTED)
-        for j, (lab, v, col) in enumerate((("IF YOU WIN", s["win"], GREEN), ("IF YOU LOSE", s["lose"], RED))):
+        for j, (lab, v, col) in enumerate((("ON A WIN", s["win"], GREEN), ("ON A LOSS", s["lose"], RED))):
             bx = x1 + 400 + j * 160
             _text(d, (bx, y + 24), lab, 12, col, "la", "bold")
             _text(d, (bx, y + 44), pct_text(v["through"]), 34, WHITE, "la", "head")
             if v["tied"] >= 0.005:
                 _text(d, (bx, y + 88), f"{pct_text(v['tied'])} tie-break", 11, MUTED)
     x1, y1, x2, y2 = 810, 126, 1550, 856
-    _tile_title(c, (x1, y1, x2, y2), BLUE, "RESULTS ELSEWHERE THAT MATTER",
-                "HOW MUCH EACH OTHER MATCH CHANGES YOUR CHANCE", "bars")
+    _tile_title(c, (x1, y1, x2, y2), BLUE, "OTHER GAMES TO WATCH",
+                "THE RESULTS THAT MOVE YOUR ODDS THE MOST", "bars")
     rows = [e for e in t["elsewhere"] if e["swing"] >= 0.005][:7]
     if not rows:
         _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NOTHING ELSEWHERE CHANGES YOUR CHANCE", 20, DIM, "mm", "head")
     for i, e in enumerate(rows):
         y = y1 + 104 + i * 88
-        _text(d, (x1 + 30, y + 6), _clip(d, f"{e['winner']} beating {e['loser']}".upper(), 460, 18, "head"), 18, WHITE,
+        _text(d, (x1 + 30, y + 6), _clip(d, f"{e['winner']} BEAT {e['loser']}".upper(), 460, 18, "head"), 18, WHITE,
               "la", "head")
-        _text(d, (x1 + 30, y + 36), f"YOUR CHANCE {pct_text(e['if_win'])} IF IT HAPPENS  •  {pct_text(e['if_lose'])} IF NOT", 12, MUTED)
-        _chip(d, x2 - 30 - 150, y + 8, f"+{e['swing'] * 100:.0f}% FOR YOU", GREEN, 14, 34)
+        _text(d, (x1 + 30, y + 36), f"YOU: {pct_text(e['if_win'])} IF SO  •  {pct_text(e['if_lose'])} IF NOT", 12, MUTED)
+        _chip(d, x2 - 30 - 150, y + 8, f"BOOST +{e['swing'] * 100:.0f}%", GREEN, 14, 34)
         d.line((x1 + 30, y + 74, x2 - 30, y + 74), fill=_mix(BLUE, _INK, 0.85), width=1)
     _footer(c, f"GOOGLI MANAGER  •  QUALIFY  •  {t['name']}"[:90], data.get("guild"))
     return c.image
@@ -322,9 +322,9 @@ def _page_tiebreak(data):
 
     x1, y1, x2, y2 = 50, 126, 790, 856
     _tile_title(c, (x1, y1, x2, y2), AMBER, "TIE-BREAKER CHANCES — ALL TEAMS",
-                "LEVEL AT THE CUT: EVERYONE PLAYS EVERYONE ONCE, MOST WINS GOES THROUGH", "bars")
+                "LEVEL AT THE CUT: EVERYONE PLAYS EVERYONE ONCE, MOST WINS ADVANCES", "bars")
     table = data["table"]
-    for label, x in (("TEAM", x1 + 84), ("LEVEL", x1 + 440), ("WIN IT", x1 + 540), ("THROUGH", x1 + 640)):
+    for label, x in (("TEAM", x1 + 84), ("LEVEL", x1 + 440), ("WIN IT", x1 + 540), ("ADVANCE", x1 + 640)):
         _text(d, (x, y1 + 104), label, 12, MUTED)
     n = max(1, len(table))
     step = min(66, (y2 - y1 - 190) // n)
@@ -344,14 +344,14 @@ def _page_tiebreak(data):
               WHITE if lv else DIM, "lm", "bold")
         _text(d, (x1 + 640, y), pct_text(row["tied"] * (row["tie_win"] or 0.0)) if lv else "—", 18,
               GREEN if lv else DIM, "lm", "bold")
-    _text(d, (x1 + 30, y2 - 34), "LEVEL = ENDS LEVEL AT THE CUT   •   WIN IT = WINS THE TIE-BREAKER   •   THROUGH = THROUGH THIS WAY",
+    _text(d, (x1 + 30, y2 - 34), "LEVEL = ENDS LEVEL AT THE CUT   •   WIN IT = WINS THE TIE-BREAKER   •   ADVANCE = ADVANCES THIS WAY",
           11, DIM, "lm")
 
     x1, y1, x2, y2 = 810, 126, 1550, 440
     _tile_title(c, (x1, y1, x2, y2), color := (status(t["chance"], t["outright"], t["tied"])[1]), "YOUR TIE-BREAKER ODDS",
                 f"{t['name'].upper()}", "star")
     cells = [("LEVEL AT THE CUT", t["tied"], AMBER), ("YOU WIN IT", t["tie_win"], GREEN),
-             ("THROUGH THIS WAY", (t["tied"] * (t["tie_win"] or 0.0)), WHITE)]
+             ("ADVANCES VIA IT", (t["tied"] * (t["tie_win"] or 0.0)), WHITE)]
     for i, (label, v, col) in enumerate(cells):
         bx = x1 + 30 + i * 230
         _text(d, (bx, y1 + 100), label, 12, MUTED)
@@ -375,7 +375,7 @@ def _page_tiebreak(data):
         _text(d, (x2 - 30, y), f"HAPPENS {pct_text(s['p'])}", 14, AMBER, "ra", "bold")
         mine = s["win"].get(t["name"])
         if mine is not None:
-            _text(d, (x2 - 30, y + 24), f"YOU GO THROUGH {pct_text(mine)}", 13, GREEN, "ra", "bold")
+            _text(d, (x2 - 30, y + 24), f"YOU ADVANCE {pct_text(mine)}", 13, GREEN, "ra", "bold")
     _footer(c, f"GOOGLI MANAGER  •  TIE-BREAKER  •  {t['name']}"[:90], data.get("guild"))
     return c.image
 
@@ -387,7 +387,7 @@ def _page_group(data):
     pages = len(PAGES) if data.get("team") else 1
     _header(c, data, pages - 1)
     x1, y1, x2, y2 = 50, 126, 1550, 856
-    _tile_title(c, (x1, y1, x2, y2), BLUE, f"{data['group'].upper()} — WHO QUALIFIES",
+    _tile_title(c, (x1, y1, x2, y2), BLUE, f"{data['group'].upper()} — THE RACE",
                 f"TOP {data['spots']} QUALIFY  •  LEVEL AT THE CUT = ROUND-ROBIN TIE-BREAKER", "bars")
     cols = [("#", x1 + 34), ("TEAM", x1 + 84), ("W-L", x1 + 470), ("PTS", x1 + 550), ("LEFT", x1 + 620),
             ("CHANCE", x1 + 710), ("TIE-BREAK", x1 + 1060)]
@@ -410,7 +410,7 @@ def _page_group(data):
         _text(d, (x1 + 620, y), str(row["left"]), 18, MUTED, "lm", "bold")
         bx1, bx2 = x1 + 710, x1 + 1000
         _stack_bar(d, bx1, bx2, y - 8, 16, [(row["outright"], col), (max(0.0, row["chance"] - row["outright"]), _mix(col, WHITE, 0.45))])
-        _text(d, (bx1, y - 20), f"through in {pct_text(row['chance'])} · up to {pct_text(min(1.0, row['outright'] + row['tied']))}", 11, MUTED, "lm")
+        _text(d, (bx1, y - 20), f"ON POINTS {pct_text(row['outright'])}  ·  WITH TIE-BREAKER {pct_text(row['chance'])}", 11, MUTED, "lm")
         _text(d, (bx1, y + 22), row_note(row), 12, WHITE, "lm")
         _text(d, (x1 + 1060, y), pct_text(row["tied"]) if row["tied"] >= 0.005 else "—", 18,
               AMBER if row["tied"] >= 0.005 else DIM, "lm", "bold")
@@ -419,8 +419,7 @@ def _page_group(data):
         _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NO GROUP DATA", 26, DIM, "mm", "head")
     cutline = y1 + 140 + min(data["spots"], n) * step
     d.line((x1 + 28, cutline, x2 - 28, cutline), fill=GREEN, width=2)
-    _text(d, (x1 + 30, y2 - 24), "SOLID BAR = THROUGH ON POINTS ALONE   •   LIGHT BAR = THROUGH ONLY BY WINNING THE TIE-BREAKER "
-          "(LEVEL TEAMS PLAY A ROUND-ROBIN)", 12, MUTED, "lm", "bold")
+    _text(d, (x1 + 30, y2 - 24), "SOLID = SAFE ON POINTS   •   PALE = ONLY IF THE TIE-BREAKER IS WON", 12, MUTED, "lm", "bold")
     _footer(c, f"GOOGLI MANAGER  •  QUALIFY  •  {data['group']}"[:90], data.get("guild"))
     return c.image
 
