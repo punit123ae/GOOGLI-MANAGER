@@ -124,6 +124,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.testversus",
             "cogs.awards",
             "cogs.similar",
+            "cogs.strengths",
         ):
             await self.load_extension(extension)
 
