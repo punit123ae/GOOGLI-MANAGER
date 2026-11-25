@@ -15,16 +15,21 @@ here is runs, averages, wickets and bowling averages.
                40% his better skill + 15% his other skill (all-rounders gain here)
                + 15% fantasy points + 10% fielding + 8% matches played + 12% recent form
 
-Ratings are pulled towards a cautious 40 until a player has a few matches behind him (3 matches
-= half way), so one lucky game never makes a star.
+Each skill score blends where a player ranks in the server (60%) with how big his numbers really are
+between the server's 10th and 95th percentile (40%), so a 60 average beats a 45 average by more than
+one rank. Scores are pulled towards a cautious 45 until a player has a few matches (1.5 matches = half
+way), so one lucky game never makes a star, but a good newcomer is not buried either. The 0-100 result
+is then stretched to the rating you see: an average regular is about 62, a top player 90+.
 
 Roles: Bowler / All-Rounder / Batsman (Opener or Middle Order, by his place in the batting order).
 Selection: best by value, then swaps until the side has enough genuine batters and bowlers; the
 captain plays.
 """
+import math
 from bisect import bisect_left, bisect_right
 
-PRIOR = 40.0
+PRIOR = 45.0
+TRUST_K = 1.5                 # matches at which a player's own numbers count for half
 RECENT = 5                    # matches that count as "recent form"
 MIN_BALLS_TO_BOWL = 6          # a player who has bowled less than one over is not treated as a bowler
 
@@ -104,6 +109,30 @@ class Pool:
         score = (below + (upto - below) / 2) / len(values) * 100
         return score if higher else 100 - score
 
+    def score(self, key, value, higher=True):
+        """60% rank in the server + 40% size of the number between the 10th and 95th percentile."""
+        if value is None:
+            return None
+        rank = self.pct(key, value, higher)
+        values = self.lists.get(key)
+        if not values or len(values) < 4:
+            return rank
+        lo = values[int(0.10 * (len(values) - 1))]
+        hi = values[int(0.95 * (len(values) - 1))]
+        if hi <= lo:
+            return rank
+        size = max(0.0, min(1.0, (value - lo) / (hi - lo))) * 100
+        return 0.6 * rank + 0.4 * (size if higher else 100 - size)
+
+
+def display(x):
+    """Internal 0-100 score -> the rating shown. Median 62, top end ~96, weak players around 40."""
+    if x is None:
+        return None
+    if x >= 50:
+        return 62.0 + 37.0 * (1 - math.exp(-(x - 50.0) / 22.0))
+    return max(8.0, 62.0 - (50.0 - x) * 1.05)
+
 
 def _mean(pairs):
     """Weighted mean of (weight, value) skipping missing values; None if nothing is left."""
@@ -113,55 +142,55 @@ def _mean(pairs):
 
 
 def rate(p, pool):
-    """Fill in bat / bowl / field / value (0-100) and the role for one profile."""
+    """Fill in bat / bowl / field / value (shown ratings) and the role for one profile."""
     m = _metrics(p)
-    trust = p["matches"] / (p["matches"] + 3)          # 0 matches = 0, 3 matches = 0.5, 12 = 0.8
+    trust = p["matches"] / (p["matches"] + TRUST_K)    # 0 matches = 0, 1.5 matches = 0.5, 6 = 0.8
 
     def shrink(raw):
         return PRIOR * (1 - trust) + raw * trust
 
     experience = pool.pct("matches", p["matches"]) if p["matches"] else 0
     bat_raw = _mean([
-        (0.35, pool.pct("bat_avg", m["bat_avg"])), (0.25, pool.pct("runs", m["runs"])),
-        (0.25, pool.pct("rpm", m["rpm"])), (0.05, pool.pct("sr", m["sr"])),
+        (0.35, pool.score("bat_avg", m["bat_avg"])), (0.25, pool.score("runs", m["runs"])),
+        (0.25, pool.score("rpm", m["rpm"])), (0.05, pool.pct("sr", m["sr"])),
     ])
-    bat = shrink(bat_raw * 0.9 + experience * 0.1) if bat_raw is not None else 15.0
+    bat = shrink(bat_raw * 0.94 + experience * 0.06) if bat_raw is not None else 15.0
 
     bowls = p["balls_bowled"] >= MIN_BALLS_TO_BOWL
     bowl = None
     if bowls:
         # no wickets yet = no average / strike rate: those parts count as the worst (0)
         raw = _mean([
-            (0.25, pool.pct("wickets", m["wickets"])), (0.20, pool.pct("wpm", m["wpm"])),
-            (0.25, pool.pct("bowl_avg", m["bowl_avg"], higher=False) if m["bowl_avg"] is not None else 0.0),
-            (0.15, pool.pct("bowl_sr", m["bowl_sr"], higher=False) if m["bowl_sr"] is not None else 0.0),
-            (0.15, pool.pct("economy", m["economy"], higher=False)),
+            (0.25, pool.score("wickets", m["wickets"])), (0.20, pool.score("wpm", m["wpm"])),
+            (0.25, pool.score("bowl_avg", m["bowl_avg"], higher=False) if m["bowl_avg"] is not None else 0.0),
+            (0.15, pool.score("bowl_sr", m["bowl_sr"], higher=False) if m["bowl_sr"] is not None else 0.0),
+            (0.15, pool.score("economy", m["economy"], higher=False)),
         ])
         bowl = shrink(raw)
 
     field_raw = _mean([
-        (0.40, pool.pct("catches", m["catches"])), (0.20, pool.pct("cpm", m["cpm"])),
-        (0.40, pool.pct("eff", m["eff"]) if m["eff"] is not None else None),
+        (0.40, pool.score("catches", m["catches"])), (0.20, pool.score("cpm", m["cpm"])),
+        (0.40, pool.score("eff", m["eff"]) if m["eff"] is not None else None),
     ])
     field = shrink(field_raw) if p["matches"] else 20.0
 
-    fantasy = shrink(pool.pct("fantasy", m["fantasy"])) if p["matches"] else 20.0
+    fantasy = shrink(pool.score("fantasy", m["fantasy"])) if p["matches"] else 20.0
 
     # recent form: how the last 5 matches compare with everybody else's last 5. It nudges the batting
     # and bowling ratings (25% of the gap) and is its own rating, which counts in the selection.
     rtrust = p["r_matches"] / (p["r_matches"] + 2)
-    form_bat = _mean([(0.5, pool.pct("r_rpm", m["r_rpm"])), (0.5, pool.pct("r_avg", m["r_avg"]))])
-    form_bowl = _mean([(0.5, pool.pct("r_wpm", m["r_wpm"])),
-                       (0.5, pool.pct("r_econ", m["r_econ"], higher=False))])
+    form_bat = _mean([(0.5, pool.score("r_rpm", m["r_rpm"])), (0.5, pool.score("r_avg", m["r_avg"]))])
+    form_bowl = _mean([(0.5, pool.score("r_wpm", m["r_wpm"])),
+                       (0.5, pool.score("r_econ", m["r_econ"], higher=False))])
     if form_bat is not None:
         bat += 0.25 * rtrust * (form_bat - bat)
     if bowl is not None and form_bowl is not None:
         bowl += 0.25 * rtrust * (form_bowl - bowl)
-    form = PRIOR * (1 - rtrust) + (pool.pct("r_fpm", m["r_fpm"]) or 0) * rtrust if p["r_matches"] else 20.0
+    form = PRIOR * (1 - rtrust) + (pool.score("r_fpm", m["r_fpm"]) or 0) * rtrust if p["r_matches"] else 20.0
 
     strong, weak = (bat, bowl if bowl is not None else 0.0) if bat >= (bowl or 0) else (bowl, bat)
-    value = (0.40 * strong + 0.15 * weak + 0.15 * fantasy + 0.10 * field
-             + 0.08 * shrink(experience) + 0.12 * form)
+    value = (0.43 * strong + 0.15 * weak + 0.15 * fantasy + 0.10 * field
+             + 0.05 * shrink(experience) + 0.12 * form)
 
     if bowl is None:
         role = "Batsman"
@@ -179,10 +208,12 @@ def rate(p, pool):
     eco_pct = pool.pct("economy", m["economy"], higher=False) if m["economy"] is not None else 50.0
     style = "Aggressor" if sr_pct >= 58 else ("Anchor" if sr_pct <= 42 else "Balanced")
     bstyle = "Strike bowler" if wk_pct - eco_pct >= 12 else ("Economical" if eco_pct - wk_pct >= 12 else "Balanced")
+    # form_delta stays on the internal scale: +/-12 means clearly hot / cold
     p.update(sr_pct=round(sr_pct, 1), wk_pct=round(wk_pct, 1), eco_pct=round(eco_pct, 1),
-             style=style, bstyle=bstyle, form=round(form, 1), form_delta=round(form - fantasy, 1))
-    p.update(bat=round(bat, 1), bowl=None if bowl is None else round(bowl, 1), field=round(field, 1),
-             fantasy_rating=round(fantasy, 1), value=round(value, 1), role=role)
+             style=style, bstyle=bstyle, form_delta=round(form - fantasy, 1))
+    p.update(bat=round(display(bat), 1), bowl=None if bowl is None else round(display(bowl), 1),
+             field=round(display(field), 1), form=round(display(form), 1),
+             fantasy_rating=round(display(fantasy), 1), value=round(display(value), 1), role=role)
     return p
 
 

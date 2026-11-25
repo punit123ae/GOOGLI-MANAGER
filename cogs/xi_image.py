@@ -30,11 +30,11 @@ def _theme(side):
 
 
 def _rating_color(value):
-    if value >= 75:
+    if value >= 82:
         return (255, 205, 70)
-    if value >= 60:
+    if value >= 66:
         return (62, 224, 140)
-    if value >= 45:
+    if value >= 52:
         return (110, 170, 255)
     return (170, 180, 200)
 
@@ -633,7 +633,7 @@ def _page_cxi_ratings(a, b):
     ]
     for i, (label, text) in enumerate(lines):
         y = 736 + i * 22
-        _text(d, (80, y), label, 12, _rating_color(70), "la", "head")
+        _text(d, (80, y), label, 12, _rating_color(75), "la", "head")
         _text(d, (160, y), text, 12, MUTED, "la", "bold")
     _text(d, (60, 874), f"{a.get('guild', '').upper()}  •  XI COMPARISON  •  3/3", 13, DIM)
     return c.image

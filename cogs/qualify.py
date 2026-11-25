@@ -9,8 +9,12 @@ fixture list of the group (+generateschedule), and the number of qualifying plac
 (+qualifyspots <n>, default 2). Without a saved fixture list every pair plays "legs per pair" matches (+setformat).
 
 Chances come from simulating the rest of the group 4000 times. A match is won with the "log5" chance of the two
-teams' win rates so far (a smoothed record, so teams with few matches stay close to 50%). Ties on points at the
-cut are settled at random, because net run rate is not stored.
+teams' win rates so far (a smoothed record, so teams with few matches stay close to 50%).
+
+Tie-breakers follow the tournament rule: when teams are level on points at the qualification cut and there are
+fewer places than teams (for example 14 points, then four teams on 10 for the last 3 of 4 places), the level teams
+play a round-robin among themselves, each team once against each other. Most wins goes through; if teams are still
+level at the cut they play another round.
 """
 import asyncio
 import io
@@ -48,8 +52,29 @@ def win_chance(a, b, prior=1.0):
     return 0.5 if den <= 0 else ra * (1 - rb) / den
 
 
-def _run(points, fixtures, spots, rng, forced=None):
-    """One simulated finish. Returns the set of qualifying teams."""
+def _playoff(tied, need, prob, rng):
+    """Tie-breaker: the level teams play each other once (round-robin) for the `need` places left.
+
+    Most wins in that mini-league go through; if teams are still level at the cut they play again."""
+    through, tied = set(), list(tied)
+    for _ in range(8):
+        wins = dict.fromkeys(tied, 0)
+        for a, b in combinations(tied, 2):
+            wins[a if rng.random() < prob(a, b) else b] += 1
+        order = sorted(tied, key=lambda t: (-wins[t], rng.random()))
+        cut = wins[order[need - 1]]
+        through |= {t for t in tied if wins[t] > cut}
+        level = [t for t in tied if wins[t] == cut]
+        need -= sum(1 for t in tied if wins[t] > cut)
+        if len(level) <= need:
+            return through | set(level)
+        tied = level
+    rng.shuffle(tied)                                      # eight dead heats in a row: draw lots
+    return through | set(tied[:need])
+
+
+def _run(points, fixtures, spots, rng, prob, forced=None):
+    """One simulated finish. Returns (teams that qualify, the teams level at the cut or None)."""
     pts = dict(points)
     for i, (a, b, p) in enumerate(fixtures):
         if forced is not None and i in forced:
@@ -57,19 +82,34 @@ def _run(points, fixtures, spots, rng, forced=None):
         else:
             win_a = rng.random() < p
         pts[a if win_a else b] += 2
-    order = sorted(pts, key=lambda t: (-pts[t], rng.random()))
-    return set(order[:spots])
+    if spots >= len(pts):
+        return set(pts), None
+    cut = sorted(pts.values(), reverse=True)[spots - 1]
+    safe = {t for t in pts if pts[t] > cut}
+    level = [t for t in pts if pts[t] == cut]
+    room = spots - len(safe)
+    if len(level) <= room:
+        return safe | set(level), None
+    return safe | _playoff(level, room, prob, rng), set(level)
 
 
-def chances(points, fixtures, spots, rng, sims=SIMS):
-    count = {t: 0 for t in points}
+def chances(points, fixtures, spots, rng, prob, sims=SIMS):
+    """{team: chance of qualifying}, {team: chance of being level at the cut}, {team: chance of winning the tie-breaker}."""
+    count = dict.fromkeys(points, 0)
+    tied = dict.fromkeys(points, 0)
+    won = dict.fromkeys(points, 0)
     for _ in range(sims):
-        for t in _run(points, fixtures, spots, rng):
+        through, level = _run(points, fixtures, spots, rng, prob)
+        for t in through:
             count[t] += 1
-    return {t: count[t] / sims for t in points}
+        for t in level or ():
+            tied[t] += 1
+            won[t] += t in through
+    return ({t: count[t] / sims for t in points}, {t: tied[t] / sims for t in points},
+            {t: (won[t] / tied[t] if tied[t] else None) for t in points})
 
 
-def team_chance(team, points, fixtures, spots, rng, sims, own_wins=None, forced=None):
+def team_chance(team, points, fixtures, spots, rng, prob, sims, own_wins=None, forced=None):
     """P(team qualifies) when exactly own_wins of its remaining matches are won (random ones) or forced results."""
     own = [i for i, f in enumerate(fixtures) if team in (f[0], f[1])]
     hit = 0
@@ -79,28 +119,28 @@ def team_chance(team, points, fixtures, spots, rng, sims, own_wins=None, forced=
             winners = set(rng.sample(own, own_wins))
             for i in own:
                 f[i] = team if i in winners else (fixtures[i][1] if fixtures[i][0] == team else fixtures[i][0])
-        if team in _run(points, fixtures, spots, rng, f):
+        if team in _run(points, fixtures, spots, rng, prob, f)[0]:
             hit += 1
     return hit / sims
 
 
-def analyse(team, points, fixtures, spots, seed):
+def analyse(team, points, fixtures, spots, seed, prob):
     """Everything +qualify shows for one team."""
     rng = random.Random(seed)
-    base = chances(points, fixtures, spots, rng)
+    base, tied, tie_win = chances(points, fixtures, spots, rng, prob)
     own = [i for i, f in enumerate(fixtures) if team in (f[0], f[1])]
     k = len(own)
-    scen = [(w, team_chance(team, points, fixtures, spots, rng, SCEN_SIMS, own_wins=w)) for w in range(k, -1, -1)]
+    scen = [(w, team_chance(team, points, fixtures, spots, rng, prob, SCEN_SIMS, own_wins=w)) for w in range(k, -1, -1)]
     swings = []
     for i in own:
         a, b, p = fixtures[i]
         opp = b if a == team else a
         pw = p if a == team else 1 - p
-        win = team_chance(team, points, fixtures, spots, rng, SCEN_SIMS, forced={i: team})
-        lose = team_chance(team, points, fixtures, spots, rng, SCEN_SIMS, forced={i: opp})
+        win = team_chance(team, points, fixtures, spots, rng, prob, SCEN_SIMS, forced={i: team})
+        lose = team_chance(team, points, fixtures, spots, rng, prob, SCEN_SIMS, forced={i: opp})
         swings.append({"opp": opp, "p": pw, "win": win, "lose": lose, "idx": i})
     need = next((w for w, c in sorted(scen, key=lambda s: s[0]) if c >= 0.5), None)
-    return {"base": base, "scen": scen, "swings": swings, "need": need, "left": k}
+    return {"base": base, "tied": tied, "tie_win": tie_win, "scen": scen, "swings": swings, "need": need, "left": k}
 
 
 def status(chance):
@@ -176,7 +216,7 @@ def _page_team(data):
     # ---- chance
     x1, y1, x2, y2 = boxes[0]
     _tile_title(c, boxes[0], color, "QUALIFICATION CHANCE",
-                f"TOP {data['spots']} OF {data['group'].upper()} QUALIFY", "star")
+                f"TOP {data['spots']} OF {data['group'].upper()} QUALIFY  •  LEVEL AT THE CUT = TIE-BREAKER", "star")
     gx, gy, r = x1 + 190, y1 + 232, 100
     _halo(c, gx, gy, r, color)
     _gauge(c, gx, gy, r, t["chance"], color)
@@ -192,7 +232,11 @@ def _page_team(data):
     lines = [f"RANK #{t['rank']} OF {t['of']}", f"{t['w']}W – {t['l']}L  •  {t['pts']} PTS",
              f"{t['left']} MATCH{'ES' if t['left'] != 1 else ''} LEFT"]
     for i, line in enumerate(lines):
-        _text(d, (tx, y1 + 250 + i * 30), line, 18, WHITE if i == 0 else MUTED, "la", "bold")
+        _text(d, (tx, y1 + 244 + i * 28), line, 18, WHITE if i == 0 else MUTED, "la", "bold")
+    if t.get("tied", 0) >= 0.005:
+        win = t.get("tie_win")
+        _text(d, (tx, y1 + 244 + 3 * 28), f"IN A TIE-BREAKER {pct_text(t['tied'])}"
+              + (f"  •  WINS IT {pct_text(win)}" if win is not None else ""), 15, AMBER, "la", "bold")
 
     # ---- scenarios
     x1, y1, x2, y2 = boxes[1]
@@ -259,9 +303,9 @@ def _page_group(data):
     _header(c, "QUALIFICATION", data, pages - 1, pages)
     x1, y1, x2, y2 = box
     _tile_title(c, box, BLUE, f"{data['group'].upper()} — WHO QUALIFIES",
-                f"TOP {data['spots']} QUALIFY  •  4,000 SIMULATIONS OF THE REMAINING MATCHES", "bars")
+                f"TOP {data['spots']} QUALIFY  •  LEVEL AT THE CUT = ROUND-ROBIN TIE-BREAKER  •  4,000 SIMULATIONS", "bars")
     for label, x in (("#", x1 + 34), ("TEAM", x1 + 90), ("W-L", x1 + 520), ("PTS", x1 + 620), ("LEFT", x1 + 720),
-                     ("CHANCE", x1 + 840)):
+                     ("CHANCE", x1 + 840), ("TIE-BREAK", x1 + 1190)):
         _text(d, (x, y1 + 104), label, 13, MUTED)
     n = max(1, len(table))
     step = min(78, (y2 - y1 - 160) // n)
@@ -284,6 +328,8 @@ def _page_group(data):
         if w > 0:
             d.rounded_rectangle((bx1, y - 9, bx1 + max(18, w), y + 9), radius=9, fill=col)
         _text(d, (bx2 + 20, y), pct_text(row["chance"]), 24, col, "lm", "head")
+        _text(d, (x1 + 1190, y), pct_text(row["tied"]) if row.get("tied", 0) >= 0.005 else "—", 18,
+              AMBER if row.get("tied", 0) >= 0.005 else DIM, "lm", "bold")
         _pill(d, x2 - 30 - 190, y - 15, state, 12, fill=_mix(col, _INK, 0.7), fg=WHITE, outline=col, pad=10, h=30, kind="head")
     if not table:
         _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NO GROUP DATA", 26, DIM, "mm", "head")
@@ -413,7 +459,8 @@ class Qualify(commands.Cog):
         key = (guild.id, team["name"], seed, spots)
         analysis = self._cache.get(key)
         if analysis is None:
-            analysis = await asyncio.to_thread(analyse, team["name"], points, fixtures, spots, seed)
+            analysis = await asyncio.to_thread(analyse, team["name"], points, fixtures, spots, seed,
+                                               lambda a, b: win_chance(record[a], record[b]))
             self._cache = {key: analysis}
         shim = types.SimpleNamespace(guild=guild)
         by_name = {str(t["name"]).casefold(): t for t in core.db.execute(
@@ -425,6 +472,7 @@ class Qualify(commands.Cog):
             table.append({
                 "name": r["team_name"], "rank": position, "w": int(r["matches_won"]), "l": int(r["matches_lost"]),
                 "pts": int(r["points"]), "left": left, "chance": analysis["base"][r["team_name"]],
+                "tied": analysis["tied"][r["team_name"]], "tie_win": analysis["tie_win"][r["team_name"]],
                 "logo": await compare._logo_for(shim, reg) if reg is not None else None,
                 "color": (team_role_color(core, guild, reg) if reg is not None else None) or DEFAULT_ACCENT,
             })
@@ -437,7 +485,7 @@ class Qualify(commands.Cog):
             data["team"] = {
                 "name": team["name"], "logo": mine["logo"], "color": mine["color"], "rank": mine["rank"], "of": len(rows),
                 "w": mine["w"], "l": mine["l"], "pts": mine["pts"], "left": analysis["left"],
-                "chance": mine["chance"], "status": status(mine["chance"]), "scen": analysis["scen"],
+                "chance": mine["chance"], "status": status(mine["chance"]), "tied": mine["tied"], "tie_win": mine["tie_win"], "scen": analysis["scen"],
                 "swings": analysis["swings"], "need": analysis["need"],
             }
         return data
