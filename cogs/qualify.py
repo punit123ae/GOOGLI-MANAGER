@@ -1,25 +1,20 @@
-"""+qualify [team]: qualification chances for the team's group, with the "if we win this match" scenarios.
+"""+qualify [team]: qualification chances for the team's group, in four pages.
 
-Page 1  one team: qualification chance, what happens for every number of wins left, and the remaining matches
-        that swing it most (chance if the team wins that match / loses it).
-Page 2  the whole group: chance of every team.
+Overview      chance split into outright / through a tie-breaker, what the team needs, best and worst case
+Matches       the team's remaining matches (chance if it wins / loses each) and the results elsewhere that matter
+Tie-breaker   how the round-robin tie-breaker would go: who is level, how many matches, the team's odds
+Group         every team: chance, tie-breaker chance, status (and the special benefit, if one is set)
 
 Inputs (all already in the bot): the group table and results of the active stage (points table), the saved
-fixture list of the group (+generateschedule), and the number of qualifying places per group
-(+qualifyspots <n>, default 2). Without a saved fixture list every pair plays "legs per pair" matches (+setformat).
+fixture list of the group (+generateschedule), the number of qualifying places per group
+(+qualifyspots <n>, default 2) and an optional special benefit for the top N (+qualifybonus <n> <name>).
 
-Chances come from simulating the rest of the group 4000 times. A match is won with the "log5" chance of the two
-teams' win rates so far (a smoothed record, so teams with few matches stay close to 50%).
-
-Tie-breakers follow the tournament rule: when teams are level on points at the qualification cut and there are
-fewer places than teams (for example 14 points, then four teams on 10 for the last 3 of 4 places), the level teams
-play a round-robin among themselves, each team once against each other. Most wins goes through; if teams are still
-level at the cut they play another round.
+Tie-breaker rule: when teams are level on points at the cut and there are fewer places than teams, the level
+teams play a round-robin among themselves (each team once against each other), most wins goes through, and
+a new round is played if teams are still level. The maths is in qualify_engine.py.
 """
 import asyncio
 import io
-import math
-import random
 import sqlite3
 import sys
 import types
@@ -28,141 +23,81 @@ from itertools import combinations
 import discord
 from discord.ext import commands
 
+from . import qualify_engine as engine
 from .awards import _glow_text, _halo, _icon, _tile_glass
 from .h2h import ImagePager, on_cooldown, render_png, team_role_color
+from .qualify_engine import win_chance
 from .teaminfo_image import (
     DEFAULT_ACCENT, DIM, MUTED, WHITE, _clip, _fit, _mix, _open, _paste, _pill, _round_image, _text, font,
 )
 from .utility import owner_or_whitelisted
 from .versus_image import SIDE_B_FALLBACK, _Canvas, _footer, _png, _title
 
-GREEN, RED, AMBER, BLUE = (62, 224, 172), (240, 95, 95), (255, 206, 90), (100, 185, 255)
+GREEN, RED, AMBER, BLUE, VIOLET = (62, 224, 172), (240, 95, 95), (255, 206, 90), (100, 185, 255), (190, 140, 255)
+ORANGE = (255, 150, 70)
 _INK = (12, 18, 32)
 DEFAULT_SPOTS = 2
-SIMS, SCEN_SIMS = 4000, 1000
+PAGES = ("Overview", "Matches", "Tie-breaker", "Group")
 
 
-# =========================================================================== rules (no Discord, no images)
-
-def win_chance(a, b, prior=1.0):
-    """Chance that team a beats team b. a, b = (wins, losses). log5 on smoothed win rates."""
-    ra = (a[0] + prior) / (a[0] + a[1] + 2 * prior)
-    rb = (b[0] + prior) / (b[0] + b[1] + 2 * prior)
-    den = ra * (1 - rb) + rb * (1 - ra)
-    return 0.5 if den <= 0 else ra * (1 - rb) / den
-
-
-def _playoff(tied, need, prob, rng):
-    """Tie-breaker: the level teams play each other once (round-robin) for the `need` places left.
-
-    Most wins in that mini-league go through; if teams are still level at the cut they play again."""
-    through, tied = set(), list(tied)
-    for _ in range(8):
-        wins = dict.fromkeys(tied, 0)
-        for a, b in combinations(tied, 2):
-            wins[a if rng.random() < prob(a, b) else b] += 1
-        order = sorted(tied, key=lambda t: (-wins[t], rng.random()))
-        cut = wins[order[need - 1]]
-        through |= {t for t in tied if wins[t] > cut}
-        level = [t for t in tied if wins[t] == cut]
-        need -= sum(1 for t in tied if wins[t] > cut)
-        if len(level) <= need:
-            return through | set(level)
-        tied = level
-    rng.shuffle(tied)                                      # eight dead heats in a row: draw lots
-    return through | set(tied[:need])
-
-
-def _run(points, fixtures, spots, rng, prob, forced=None):
-    """One simulated finish. Returns (teams that qualify, the teams level at the cut or None)."""
-    pts = dict(points)
-    for i, (a, b, p) in enumerate(fixtures):
-        if forced is not None and i in forced:
-            win_a = forced[i] == a
-        else:
-            win_a = rng.random() < p
-        pts[a if win_a else b] += 2
-    if spots >= len(pts):
-        return set(pts), None
-    cut = sorted(pts.values(), reverse=True)[spots - 1]
-    safe = {t for t in pts if pts[t] > cut}
-    level = [t for t in pts if pts[t] == cut]
-    room = spots - len(safe)
-    if len(level) <= room:
-        return safe | set(level), None
-    return safe | _playoff(level, room, prob, rng), set(level)
-
-
-def chances(points, fixtures, spots, rng, prob, sims=SIMS):
-    """{team: chance of qualifying}, {team: chance of being level at the cut}, {team: chance of winning the tie-breaker}."""
-    count = dict.fromkeys(points, 0)
-    tied = dict.fromkeys(points, 0)
-    won = dict.fromkeys(points, 0)
-    for _ in range(sims):
-        through, level = _run(points, fixtures, spots, rng, prob)
-        for t in through:
-            count[t] += 1
-        for t in level or ():
-            tied[t] += 1
-            won[t] += t in through
-    return ({t: count[t] / sims for t in points}, {t: tied[t] / sims for t in points},
-            {t: (won[t] / tied[t] if tied[t] else None) for t in points})
-
-
-def team_chance(team, points, fixtures, spots, rng, prob, sims, own_wins=None, forced=None):
-    """P(team qualifies) when exactly own_wins of its remaining matches are won (random ones) or forced results."""
-    own = [i for i, f in enumerate(fixtures) if team in (f[0], f[1])]
-    hit = 0
-    for _ in range(sims):
-        f = dict(forced or {})
-        if own_wins is not None:
-            winners = set(rng.sample(own, own_wins))
-            for i in own:
-                f[i] = team if i in winners else (fixtures[i][1] if fixtures[i][0] == team else fixtures[i][0])
-        if team in _run(points, fixtures, spots, rng, prob, f)[0]:
-            hit += 1
-    return hit / sims
-
-
-def analyse(team, points, fixtures, spots, seed, prob):
-    """Everything +qualify shows for one team."""
-    rng = random.Random(seed)
-    base, tied, tie_win = chances(points, fixtures, spots, rng, prob)
-    own = [i for i, f in enumerate(fixtures) if team in (f[0], f[1])]
-    k = len(own)
-    scen = [(w, team_chance(team, points, fixtures, spots, rng, prob, SCEN_SIMS, own_wins=w)) for w in range(k, -1, -1)]
-    swings = []
-    for i in own:
-        a, b, p = fixtures[i]
-        opp = b if a == team else a
-        pw = p if a == team else 1 - p
-        win = team_chance(team, points, fixtures, spots, rng, prob, SCEN_SIMS, forced={i: team})
-        lose = team_chance(team, points, fixtures, spots, rng, prob, SCEN_SIMS, forced={i: opp})
-        swings.append({"opp": opp, "p": pw, "win": win, "lose": lose, "idx": i})
-    need = next((w for w, c in sorted(scen, key=lambda s: s[0]) if c >= 0.5), None)
-    return {"base": base, "tied": tied, "tie_win": tie_win, "scen": scen, "swings": swings, "need": need, "left": k}
-
-
-def status(chance):
-    if chance >= 0.995:
-        return "QUALIFIED", GREEN
-    if chance <= 0.005:
-        return "ELIMINATED", RED
-    if chance >= 0.7:
-        return "STRONG POSITION", GREEN
-    if chance >= 0.4:
-        return "IN THE MIX", AMBER
-    if chance >= 0.1:
-        return "LONG SHOT", (255, 150, 70)
-    return "NEEDS A MIRACLE", RED
-
+# =========================================================================== wording
 
 def pct_text(v):
+    if v is None:
+        return "—"
     if v >= 0.995:
         return "100%"
     if v <= 0.005:
         return "0%"
-    return f"{v * 100:.0f}%" if 0.01 <= v <= 0.99 else (f"{v * 100:.1f}%")
+    return f"{v * 100:.0f}%" if 0.01 <= v <= 0.99 else f"{v * 100:.1f}%"
+
+
+def status(through, outright=None, tied=0.0):
+    """(label, colour) for a team from its chance of going through."""
+    outright = through if outright is None else outright
+    if through >= 0.995:
+        return "QUALIFIED", GREEN
+    if through + tied <= 0.005 or (through <= 0.005 and tied <= 0.005):
+        return "ELIMINATED", RED
+    if outright < 0.02 and through >= 0.03:
+        return "TIE-BREAKER ROUTE", AMBER
+    if through >= 0.7:
+        return "STRONG POSITION", GREEN
+    if through >= 0.4:
+        return "IN THE MIX", AMBER
+    if through >= 0.1:
+        return "LONG SHOT", ORANGE
+    return "NEEDS A MIRACLE", RED
+
+
+def need_lines(t):
+    """Plain-English 'what you need' sentences for the team page."""
+    k, scen = t["left"], t["scen"]
+    if not k:
+        label = t["status"][0]
+        return [f"No matches left. Final result: {label.lower()}."] + (
+            [f"It finishes level at the cut in {pct_text(t['tied'])} of outcomes and goes to a tie-breaker."]
+            if t["tied"] >= 0.005 else [])
+    lines = []
+    sure = next((w for w, s in sorted(scen, key=lambda x: x[0]) if s["outright"] >= 0.995), None)
+    if sure is None:
+        best = scen[0][1]
+        lines.append(f"Even winning all {k} you can't be sure: {pct_text(best['through'])} (needs other results).")
+    elif sure == k:
+        lines.append(f"Win all {k} of your {k} matches and you're through for sure." if k > 1
+                     else "Win your last match and you're through for sure.")
+    else:
+        lines.append(f"Win {sure} of your {k} matches and you're through for sure.")
+    zero = dict(scen)[0]
+    if zero["through"] <= 0.005:
+        lines.append("Lose every match and you're out.")
+    else:
+        lines.append(f"Even losing all {k} you'd still have a {pct_text(zero['through'])} chance (needs help).")
+    if t["tied"] >= 0.005:
+        win = t["tie_win"]
+        lines.append(f"{pct_text(t['tied'])} of outcomes leave you level at the cut: a tie-breaker, "
+                     f"which you'd win {pct_text(win)} of the time.")
+    return lines
 
 
 # =========================================================================== drawing
@@ -182,15 +117,18 @@ def _gauge(c, cx, cy, r, value, color):
     c.image.paste(layer, (cx - r - 20, cy - r - 20), layer)
 
 
-def _header(c, title, data, page, pages):
+def _header(c, data, page):
     d = c.d
-    _title(d, (76, 58), title, 50, WHITE, "lm", "head")
+    _title(d, (76, 58), "QUALIFICATION", 50, WHITE, "lm", "head")
     for i in range(380):
         d.line((76 + i, 90, 76 + i, 93), fill=_mix(DEFAULT_ACCENT, SIDE_B_FALLBACK, i / 379))
     _text(d, (1524, 52), f"{data.get('guild', '')}  •  {data.get('group', '')}".upper(), 16, MUTED, "rm")
+    pages = len(PAGES) if data.get("team") else 1
     for n in range(pages):
         cx = 1524 - (pages - 1 - n) * 22
         d.ellipse((cx - 6, 78, cx + 6, 90), fill=(255, 255, 255) if n == page else (70, 86, 120))
+    if pages > 1:
+        _text(d, (1524 - (pages - 1) * 22 - 18, 84), PAGES[page].upper(), 12, MUTED, "rm", "bold")
 
 
 def _tile_title(c, box, color, title, subtitle, icon):
@@ -202,147 +140,315 @@ def _tile_title(c, box, color, title, subtitle, icon):
     _icon(c, icon, x2 - 52, y1 + 50, color)
 
 
-def _page_team(data):
-    t = data["team"]
-    c = _Canvas(t.get("color") or DEFAULT_ACCENT, SIDE_B_FALLBACK)
-    boxes = [(50, 126, 790, 484), (810, 126, 1550, 484), (50, 498, 1550, 856)]
+def _canvas(color, tiles):
+    c = _Canvas(color or DEFAULT_ACCENT, SIDE_B_FALLBACK)
     c.card((50, 22, 1550, 106), 24, 170)
-    for b in boxes:
+    for b in tiles:
         c.card(b, 26, 150)
-    d = c.seal()
-    _header(c, "QUALIFICATION", data, 0, 2)
+    c.seal()
+    return c
+
+
+def _chip(d, x, y, text, color, size=15, h=32, fill=True):
+    w = int(d.textlength(text, font=font(size, "head"))) + 28
+    _pill(d, x, y, text, size, fill=_mix(color, _INK, 0.7) if fill else None, fg=WHITE, outline=color, pad=14, h=h,
+          kind="head")
+    return w
+
+
+def _stack_bar(d, x1, x2, y, h, parts):
+    """parts [(share, colour)] left to right, rest dark."""
+    d.rounded_rectangle((x1, y, x2, y + h), radius=h // 2, fill=_mix(BLUE, _INK, 0.88))
+    x = x1
+    total = x2 - x1
+    for share, color in parts:
+        w = int(total * share)
+        if w >= 3:
+            d.rounded_rectangle((x, y, min(x2, x + max(h, w)), y + h), radius=h // 2, fill=color) if x == x1 else \
+                d.rectangle((x, y, min(x2, x + w), y + h), fill=color)
+        x += w
+
+
+def _page_overview(data):
+    t = data["team"]
+    bonus = data.get("bonus")
+    c = _canvas(t.get("color"), [(50, 126, 790, 484), (810, 126, 1550, 484), (50, 498, 790, 856), (810, 498, 1550, 856)])
+    d = c.d
+    _header(c, data, 0)
     state, color = t["status"]
 
-    # ---- chance
-    x1, y1, x2, y2 = boxes[0]
-    _tile_title(c, boxes[0], color, "QUALIFICATION CHANCE",
+    x1, y1, x2, y2 = 50, 126, 790, 484
+    _tile_title(c, (x1, y1, x2, y2), color, "QUALIFICATION CHANCE",
                 f"TOP {data['spots']} OF {data['group'].upper()} QUALIFY  •  LEVEL AT THE CUT = TIE-BREAKER", "star")
-    gx, gy, r = x1 + 190, y1 + 232, 100
+    gx, gy, r = x1 + 170, y1 + 196, 88
     _halo(c, gx, gy, r, color)
     _gauge(c, gx, gy, r, t["chance"], color)
     value = pct_text(t["chance"])
-    _glow_text(c, (gx - d.textlength(value, font=font(52, "head")) / 2, gy - 34), value, 52, color)
-    tx = x1 + 340
-    logo = _round_image(_open(t.get("logo")), 56, ring=color, ring_w=3, initial=t["name"][:1])
-    _paste(c.image, logo, (tx, y1 + 112))
+    _glow_text(c, (gx - d.textlength(value, font=font(46, "head")) / 2, gy - 30), value, 46, color)
+    tx = x1 + 300
+    logo = _round_image(_open(t.get("logo")), 54, ring=color, ring_w=3, initial=t["name"][:1])
+    _paste(c.image, logo, (tx, y1 + 104))
     name = t["name"].upper()
-    size = _fit(d, name, x2 - tx - 100, 28, 16, "head")
-    _title(d, (tx + 76, y1 + 124), _clip(d, name, x2 - tx - 100, size, "head"), size, WHITE, "la", "head")
-    _pill(d, tx, y1 + 190, state, 17, fill=_mix(color, _INK, 0.7), fg=WHITE, outline=color, pad=18, h=38, kind="head")
-    lines = [f"RANK #{t['rank']} OF {t['of']}", f"{t['w']}W – {t['l']}L  •  {t['pts']} PTS",
-             f"{t['left']} MATCH{'ES' if t['left'] != 1 else ''} LEFT"]
-    for i, line in enumerate(lines):
-        _text(d, (tx, y1 + 244 + i * 28), line, 18, WHITE if i == 0 else MUTED, "la", "bold")
-    if t.get("tied", 0) >= 0.005:
-        win = t.get("tie_win")
-        _text(d, (tx, y1 + 244 + 3 * 28), f"IN A TIE-BREAKER {pct_text(t['tied'])}"
-              + (f"  •  WINS IT {pct_text(win)}" if win is not None else ""), 15, AMBER, "la", "bold")
+    size = _fit(d, name, x2 - tx - 96, 26, 16, "head")
+    _title(d, (tx + 72, y1 + 116), _clip(d, name, x2 - tx - 96, size, "head"), size, WHITE, "la", "head")
+    _chip(d, tx, y1 + 176, state, color, 16, 36)
+    for i, line in enumerate((f"RANK #{t['rank']} OF {t['of']}", f"{t['w']}W – {t['l']}L  •  {t['pts']} PTS",
+                              f"{t['left']} MATCH{'ES' if t['left'] != 1 else ''} LEFT")):
+        _text(d, (tx, y1 + 230 + i * 27), line, 17, WHITE if i == 0 else MUTED, "la", "bold")
+    via = max(0.0, t["chance"] - t["outright"])
+    _stack_bar(d, x1 + 30, x2 - 30, y1 + 306, 14, [(t["outright"], GREEN), (via, AMBER)])
+    _text(d, (x1 + 30, y1 + 326), f"OUTRIGHT {pct_text(t['outright'])}", 13, GREEN, "la", "bold")
+    _text(d, ((x1 + x2) // 2, y1 + 326), f"VIA TIE-BREAKER {pct_text(via)}", 13, AMBER, "ma", "bold")
+    _text(d, (x2 - 30, y1 + 326), f"OUT {pct_text(max(0.0, 1 - t['chance']))}", 13, RED, "ra", "bold")
 
-    # ---- scenarios
-    x1, y1, x2, y2 = boxes[1]
-    need = t["need"]
-    sub = ("NOTHING LEFT TO PLAY" if not t["left"] else
-           "ALREADY SAFE ON ANY RESULT" if t["scen"] and t["scen"][-1][1] >= 0.995 else
-           f"NEEDS {need} OF {t['left']} WINS FOR A BETTER-THAN-EVEN CHANCE" if need else
-           "BELOW 50% EVEN IF EVERY MATCH IS WON")
-    _tile_title(c, boxes[1], BLUE, "IF THEY WIN…", sub, "bars")
+    # ---- what you need
+    x1, y1, x2, y2 = 810, 126, 1550, 484
+    _tile_title(c, (x1, y1, x2, y2), BLUE, "WHAT YOU NEED", "PLAIN ENGLISH, THEN EVERY NUMBER OF WINS", "bars")
+    for i, line in enumerate(need_lines(t)[:3]):
+        _text(d, (x1 + 30, y1 + 92 + i * 27), _clip(d, line, x2 - x1 - 60, 16), 16, WHITE if i == 0 else MUTED, "la",
+              "bold" if i == 0 else "reg")
     rows = t["scen"]
-    if len(rows) > 5:
-        rows = rows[:4] + [rows[-1]]
-    for i, (w, ch) in enumerate(rows):
-        y = y1 + 112 + i * 49
-        k = t["left"]
-        label = "NO MATCHES LEFT" if k == 0 else (f"ALL {k}" if w == k and k > 1 else
-                                                  "LOSE ALL" if w == 0 else f"{w} OF {k}")
-        _text(d, (x1 + 30, y + 13), label, 17, WHITE, "lm", "bold")
-        col = status(ch)[1]
-        d.rounded_rectangle((x1 + 230, y + 3, x2 - 150, y + 23), radius=10, fill=_mix(col, _INK, 0.85))
-        wbar = int((x2 - 150 - x1 - 230) * ch)
-        if wbar > 0:
-            d.rounded_rectangle((x1 + 230, y + 3, x1 + 230 + max(20, wbar), y + 23), radius=10, fill=col)
-        _text(d, (x2 - 30, y + 13), pct_text(ch), 24, col, "rm", "head")
+    k = t["left"]
+    if len(rows) > 4:
+        rows = rows[:3] + [rows[-1]]
+    for i, (w, s) in enumerate(rows):
+        y = y1 + 200 + i * 40
+        label = "NO MATCHES LEFT" if k == 0 else (f"Win all {k}" if w == k and k > 1 else
+                                                  f"Lose all {k}" if w == 0 else f"Win {w} of {k}")
+        _text(d, (x1 + 30, y + 16), label, 17, WHITE, "lm", "bold")
+        ch = s["through"]
+        sure = s["outright"] >= 0.995
+        text, col = (("THROUGH FOR SURE", GREEN) if sure else ("OUT", RED) if ch <= 0.005
+                     else (f"{pct_text(ch)} TO QUALIFY", status(ch, s["outright"], s["tied"])[1]))
+        _chip(d, x1 + 190, y, text, col, 14, 32)
+        if not sure and ch > 0.005:
+            extra = f"{pct_text(s['outright'])} outright"
+            if s["tied"] >= 0.005:
+                extra += f" · +{pct_text(max(0.0, ch - s['outright']))} via tie-breaker"
+            _text(d, (x2 - 30, y + 16), _clip(d, extra, 260, 13), 13, MUTED, "rm")
 
-    # ---- matches that matter
-    x1, y1, x2, y2 = boxes[2]
-    _tile_title(c, boxes[2], AMBER, "MATCHES THAT MATTER",
-                "CHANCE OF QUALIFYING IF THEY WIN OR LOSE EACH REMAINING MATCH  •  BIGGEST SWING FIRST", "up")
-    swings = sorted(t["swings"], key=lambda s: -(s["win"] - s["lose"]))[:6]
-    if not swings:
-        _text(d, ((x1 + x2) // 2, y1 + 220), "NO REMAINING MATCHES", 24, DIM, "mm", "head")
-    cw = 240
-    start = x1 + (x2 - x1 - (len(swings) * cw + (len(swings) - 1) * 15)) // 2
-    for i, s in enumerate(swings):
-        cx1 = start + i * (cw + 15)
-        cy1, cy2 = y1 + 100, y2 - 24
-        d.rounded_rectangle((cx1, cy1, cx1 + cw, cy2), radius=18, fill=_mix(AMBER, _INK, 0.9),
-                            outline=_mix(AMBER, _INK, 0.55), width=1)
-        mid = cx1 + cw // 2
-        _text(d, (mid, cy1 + 18), "VS", 13, MUTED, "mm", "bold")
-        nm = s["opp"].upper()
-        size = _fit(d, nm, cw - 24, 20, 12, "head")
-        _text(d, (mid, cy1 + 42), _clip(d, nm, cw - 24, size, "head"), size, WHITE, "mm", "head")
-        _text(d, (mid, cy1 + 68), f"WIN CHANCE {s['p'] * 100:.0f}%", 12, MUTED, "mm", "bold")
-        for j, (lab, v, col) in enumerate((("IF WIN", s["win"], GREEN), ("IF LOSE", s["lose"], RED))):
-            yy = cy1 + 100 + j * 60
-            _text(d, (mid, yy), lab, 12, col, "mm", "bold")
-            _text(d, (mid, yy + 24), pct_text(v), 34, WHITE, "mm", "head")
-        swing = (s["win"] - s["lose"]) * 100
-        _text(d, (mid, cy2 - 14), f"SWING {swing:.0f}%", 12, AMBER, "mm", "bold")
+    # ---- outlook
+    x1, y1, x2, y2 = 50, 498, 790, 856
+    _tile_title(c, (x1, y1, x2, y2), GREEN, "OUTLOOK", "WHAT THE REMAINING MATCHES CAN DO TO THE POINTS", "up")
+    cells = [("BEST CASE", f"{t['best']} PTS", GREEN), ("WORST CASE", f"{t['worst']} PTS", RED),
+             ("MATCHES LEFT", str(t["left"]), WHITE),
+             ("IN YOUR HANDS", "YES" if t["scen"][0][1]["outright"] >= 0.995 else "NO",
+              GREEN if t["scen"][0][1]["outright"] >= 0.995 else AMBER)]
+    for i, (label, val, col) in enumerate(cells):
+        bx = x1 + 30 + (i % 2) * 340
+        by = y1 + 100 + (i // 2) * 120
+        d.rounded_rectangle((bx, by, bx + 320, by + 104), radius=18, fill=_mix(col, _INK, 0.9),
+                            outline=_mix(col, _INK, 0.55), width=1)
+        _text(d, (bx + 20, by + 18), label, 13, MUTED)
+        _text(d, (bx + 20, by + 44), val, 36, col, "la", "head")
+
+    # ---- special benefit or tie-breaker pointer
+    x1, y1, x2, y2 = 810, 498, 1550, 856
+    if bonus:
+        _tile_title(c, (x1, y1, x2, y2), VIOLET, f"SPECIAL BENEFIT — {bonus['label'].upper()}",
+                    f"FINISH IN THE TOP {bonus['places']} OF THE GROUP", "star")
+        v = t["bonus"] or 0.0
+        _glow_text(c, (x1 + 30, y1 + 108), pct_text(v), 74, VIOLET)
+        _text(d, (x1 + 30, y1 + 200), "OF THE RESULT COMBINATIONS PUT YOU THERE", 14, MUTED)
+        _stack_bar(d, x1 + 30, x2 - 30, y1 + 236, 16, [(t.get("bonus_outright") or 0.0, VIOLET),
+                                                     (max(0.0, v - (t.get("bonus_outright") or 0.0)), _mix(VIOLET, WHITE, 0.35))])
+        _text(d, (x1 + 30, y1 + 266), f"OUTRIGHT {pct_text(t.get('bonus_outright') or 0.0)}   •   "
+              "LEVEL AT THE CUT = TIE-BREAKER", 13, MUTED)
+        _text(d, (x1 + 30, y1 + 304), "Ties for these places are also settled by a round-robin tie-breaker.", 14, MUTED)
+    else:
+        _tile_title(c, (x1, y1, x2, y2), AMBER, "TIE-BREAKER RISK",
+                    "SEE THE TIE-BREAKER PAGE FOR THE LINE-UPS", "bars")
+        _glow_text(c, (x1 + 30, y1 + 108), pct_text(t["tied"]), 74, AMBER)
+        _text(d, (x1 + 30, y1 + 200), "OF OUTCOMES LEAVE YOU LEVEL ON POINTS AT THE CUT", 14, MUTED)
+        win = t["tie_win"]
+        _text(d, (x1 + 30, y1 + 252), "YOU WOULD WIN IT" if win is not None else "", 14, MUTED)
+        _title(d, (x1 + 30, y1 + 274), pct_text(win) if win is not None else "", 40, WHITE, "la", "head")
     _footer(c, f"GOOGLI MANAGER  •  QUALIFY  •  {t['name']}"[:90], data.get("guild"))
+    return c.image
+
+
+def _page_matches(data):
+    t = data["team"]
+    c = _canvas(t.get("color"), [(50, 126, 790, 856), (810, 126, 1550, 856)])
+    d = c.d
+    _header(c, data, 1)
+    x1, y1, x2, y2 = 50, 126, 790, 856
+    _tile_title(c, (x1, y1, x2, y2), AMBER, "YOUR REMAINING MATCHES",
+                "CHANCE OF QUALIFYING AFTER EACH RESULT (OTHER MATCHES STILL COUNT)", "up")
+    swings = sorted(t["swings"], key=lambda s: -(s["win"]["through"] - s["lose"]["through"]))[:5]
+    if not swings:
+        _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NO REMAINING MATCHES", 24, DIM, "mm", "head")
+    for i, s in enumerate(swings):
+        y = y1 + 104 + i * 124
+        d.rounded_rectangle((x1 + 24, y, x2 - 24, y + 112), radius=18, fill=_mix(AMBER, _INK, 0.9),
+                            outline=_mix(AMBER, _INK, 0.6), width=1)
+        _text(d, (x1 + 46, y + 20), f"MATCH {i + 1}", 12, MUTED)
+        _text(d, (x1 + 46, y + 40), _clip(d, "VS " + s["opp"].upper(), 330, 24, "head"), 24, WHITE, "la", "head")
+        _text(d, (x1 + 46, y + 78), f"YOUR WIN CHANCE {s['p'] * 100:.0f}%", 13, MUTED)
+        for j, (lab, v, col) in enumerate((("IF YOU WIN", s["win"], GREEN), ("IF YOU LOSE", s["lose"], RED))):
+            bx = x1 + 400 + j * 160
+            _text(d, (bx, y + 24), lab, 12, col, "la", "bold")
+            _text(d, (bx, y + 44), pct_text(v["through"]), 34, WHITE, "la", "head")
+            if v["tied"] >= 0.005:
+                _text(d, (bx, y + 88), f"{pct_text(v['tied'])} tie-break", 11, MUTED)
+    x1, y1, x2, y2 = 810, 126, 1550, 856
+    _tile_title(c, (x1, y1, x2, y2), BLUE, "RESULTS ELSEWHERE THAT MATTER",
+                "HOW MUCH EACH OTHER MATCH CHANGES YOUR CHANCE", "bars")
+    rows = [e for e in t["elsewhere"] if e["swing"] >= 0.005][:7]
+    if not rows:
+        _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NOTHING ELSEWHERE CHANGES YOUR CHANCE", 20, DIM, "mm", "head")
+    for i, e in enumerate(rows):
+        y = y1 + 104 + i * 88
+        _text(d, (x1 + 30, y + 6), _clip(d, f"{e['winner']} beating {e['loser']}".upper(), 460, 18, "head"), 18, WHITE,
+              "la", "head")
+        _text(d, (x1 + 30, y + 36), f"YOUR CHANCE {pct_text(e['if_win'])} IF IT HAPPENS  •  {pct_text(e['if_lose'])} IF NOT", 12, MUTED)
+        _chip(d, x2 - 30 - 150, y + 8, f"+{e['swing'] * 100:.0f}% FOR YOU", GREEN, 14, 34)
+        d.line((x1 + 30, y + 74, x2 - 30, y + 74), fill=_mix(BLUE, _INK, 0.85), width=1)
+    _footer(c, f"GOOGLI MANAGER  •  QUALIFY  •  {t['name']}"[:90], data.get("guild"))
+    return c.image
+
+
+def _page_tiebreak(data):
+    t = data["team"]
+    c = _canvas(t.get("color"), [(50, 126, 790, 856), (810, 126, 1550, 440), (810, 454, 1550, 856)])
+    d = c.d
+    _header(c, data, 2)
+    scenes = t["scenes"] or data.get("all_scenes") or []
+    main = scenes[0] if scenes else None
+
+    x1, y1, x2, y2 = 50, 126, 790, 856
+    _tile_title(c, (x1, y1, x2, y2), AMBER, "THE TIE-BREAKER",
+                "LEVEL AT THE CUT: EVERYONE PLAYS EVERYONE ONCE", "bars")
+    if main is None:
+        _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 - 10), "NO TIE-BREAKER LIKELY", 28, DIM, "mm", "head")
+        _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 30), "Teams are not close enough on points at the cut.", 15, MUTED, "mm")
+    else:
+        teams, room = main["teams"], main["room"]
+        n = len(teams)
+        _text(d, (x1 + 30, y1 + 98), "MOST LIKELY LINE-UP" + ("" if t["scenes"] else " IN THE GROUP"), 13, MUTED)
+        _text(d, (x1 + 30, y1 + 120),
+              f"{n} TEAMS LEVEL  •  {room} PLACE{'S' if room != 1 else ''}  •  {n * (n - 1) // 2} MATCHES", 20, WHITE,
+              "la", "head")
+        for i, name in enumerate(teams[:6]):
+            row = data["names"].get(name, {})
+            logo = _round_image(_open(row.get("logo")), 36, ring=row.get("color") or DEFAULT_ACCENT, ring_w=2,
+                                initial=name[:1])
+            yy = y1 + 168 + i * 50
+            _paste(c.image, logo, (x1 + 30, yy))
+            mine = name == t["name"]
+            _text(d, (x1 + 82, yy + 18), _clip(d, name.upper(), 360, 20, "head"), 20, AMBER if mine else WHITE, "lm", "head")
+            _text(d, (x2 - 30, yy + 18), f"GOES THROUGH {pct_text(main['win'].get(name))}", 15, MUTED, "rm", "bold")
+        top = y1 + 168 + min(6, n) * 50 + 12
+        _text(d, (x1 + 30, top), "THE MATCHES  (CHANCE OF EACH TEAM WINNING)", 13, MUTED)
+        allp = list(combinations(teams, 2))
+        pairs = allp[:12]
+        for i, (a, b) in enumerate(pairs):
+            col, row = i % 2, i // 2
+            px = x1 + 30 + col * 350
+            py = top + 26 + row * 46
+            pa = data["pair"].get((a, b), 0.5)
+            d.rounded_rectangle((px, py, px + 330, py + 38), radius=10, fill=_mix(AMBER, _INK, 0.9))
+            _text(d, (px + 12, py + 19), _clip(d, a.upper(), 110, 13, "head"), 13, WHITE, "lm", "head")
+            _text(d, (px + 165, py + 19), f"{pa * 100:.0f} – {(1 - pa) * 100:.0f}", 15, AMBER, "mm", "head")
+            _text(d, (px + 318, py + 19), _clip(d, b.upper(), 110, 13, "head"), 13, WHITE, "rm", "head")
+        end = top + 26 + ((len(pairs) + 1) // 2) * 46 + 8
+        if len(allp) > 12:
+            _text(d, (x1 + 30, end), f"…and {len(allp) - 12} more matches", 12, DIM)
+            end += 22
+        if end < y2 - 120:
+            _text(d, (x1 + 30, end + 6), "HOW IT IS DECIDED", 13, MUTED)
+            for j, line in enumerate((f"1. The {n} teams level at the cut each play every other one once ({n * (n - 1) // 2} matches).",
+                                      f"2. Most wins takes the {room} place{'s' if room != 1 else ''}; the rest are out.",
+                                      "3. Still level? Another round-robin among those teams, until it is settled.")):
+                _text(d, (x1 + 30, end + 32 + j * 26), _clip(d, line, x2 - x1 - 60, 15), 15, WHITE if j == 0 else MUTED)
+
+    x1, y1, x2, y2 = 810, 126, 1550, 440
+    _tile_title(c, (x1, y1, x2, y2), color := (status(t["chance"], t["outright"], t["tied"])[1]), "YOUR TIE-BREAKER ODDS",
+                f"{t['name'].upper()}", "star")
+    cells = [("LEVEL AT THE CUT", t["tied"], AMBER), ("YOU WIN IT", t["tie_win"], GREEN),
+             ("THROUGH THIS WAY", (t["tied"] * (t["tie_win"] or 0.0)), WHITE)]
+    for i, (label, v, col) in enumerate(cells):
+        bx = x1 + 30 + i * 230
+        _text(d, (bx, y1 + 100), label, 12, MUTED)
+        _glow_text(c, (bx, y1 + 124), pct_text(v), 52, col)
+    via = max(0.0, t["chance"] - t["outright"])
+    _stack_bar(d, x1 + 30, x2 - 30, y1 + 232, 16, [(t["outright"], GREEN), (via, AMBER)])
+    _text(d, (x1 + 30, y1 + 262), f"OUTRIGHT {pct_text(t['outright'])}   •   VIA TIE-BREAKER {pct_text(via)}   •   "
+          f"OUT {pct_text(max(0.0, 1 - t['chance']))}", 13, MUTED)
+
+    x1, y1, x2, y2 = 810, 454, 1550, 856
+    _tile_title(c, (x1, y1, x2, y2), BLUE, "LIKELY TIE-BREAKERS", "THE LINE-UPS THAT COME UP MOST OFTEN IN THE SIMULATIONS", "bars")
+    shown = t["scenes"] or data.get("all_scenes") or []
+    if not shown:
+        _text(d, ((x1 + x2) // 2, y1 + 220), "NONE LIKELY", 22, DIM, "mm", "head")
+    for i, s in enumerate(shown[:4]):
+        y = y1 + 104 + i * 72
+        n = len(s["teams"])
+        _text(d, (x1 + 30, y), f"{n} TEAMS  •  {s['room']} PLACE{'S' if s['room'] != 1 else ''}  •  "
+              f"{n * (n - 1) // 2} MATCHES", 15, WHITE, "la", "head")
+        _text(d, (x1 + 30, y + 24), _clip(d, ", ".join(s["teams"]), 480, 12), 12, MUTED)
+        _text(d, (x2 - 30, y), f"HAPPENS {pct_text(s['p'])}", 14, AMBER, "ra", "bold")
+        mine = s["win"].get(t["name"])
+        if mine is not None:
+            _text(d, (x2 - 30, y + 24), f"YOU GO THROUGH {pct_text(mine)}", 13, GREEN, "ra", "bold")
+    _footer(c, f"GOOGLI MANAGER  •  TIE-BREAKER  •  {t['name']}"[:90], data.get("guild"))
     return c.image
 
 
 def _page_group(data):
     table = data["table"]
-    c = _Canvas(DEFAULT_ACCENT, SIDE_B_FALLBACK)
-    box = (50, 126, 1550, 856)
-    c.card((50, 22, 1550, 106), 24, 170)
-    c.card(box, 26, 150)
-    d = c.seal()
-    pages = 2 if data.get("team") else 1
-    _header(c, "QUALIFICATION", data, pages - 1, pages)
-    x1, y1, x2, y2 = box
-    _tile_title(c, box, BLUE, f"{data['group'].upper()} — WHO QUALIFIES",
-                f"TOP {data['spots']} QUALIFY  •  LEVEL AT THE CUT = ROUND-ROBIN TIE-BREAKER  •  4,000 SIMULATIONS", "bars")
-    for label, x in (("#", x1 + 34), ("TEAM", x1 + 90), ("W-L", x1 + 520), ("PTS", x1 + 620), ("LEFT", x1 + 720),
-                     ("CHANCE", x1 + 840), ("TIE-BREAK", x1 + 1190)):
+    bonus = data.get("bonus")
+    c = _canvas(DEFAULT_ACCENT, [(50, 126, 1550, 856)])
+    d = c.d
+    pages = len(PAGES) if data.get("team") else 1
+    _header(c, data, pages - 1)
+    x1, y1, x2, y2 = 50, 126, 1550, 856
+    _tile_title(c, (x1, y1, x2, y2), BLUE, f"{data['group'].upper()} — WHO QUALIFIES",
+                f"TOP {data['spots']} QUALIFY  •  SOLID BAR = THROUGH OUTRIGHT, LIGHT = ONLY IF IT WINS A TIE-BREAKER", "bars")
+    cols = [("#", x1 + 34), ("TEAM", x1 + 84), ("W-L", x1 + 470), ("PTS", x1 + 550), ("LEFT", x1 + 620),
+            ("CHANCE", x1 + 710), ("TIE-BREAK", x1 + 1060)]
+    if bonus:
+        cols.append((f"TOP {bonus['places']}", x1 + 1170))
+    for label, x in cols:
         _text(d, (x, y1 + 104), label, 13, MUTED)
     n = max(1, len(table))
-    step = min(78, (y2 - y1 - 160) // n)
+    step = min(72, (y2 - y1 - 150) // n)
     for i, row in enumerate(table):
-        y = y1 + 150 + i * step
-        state, col = status(row["chance"])
+        y = y1 + 150 + i * step + step // 2 - 10
+        state, col = row["status"]
         if i:
             d.line((x1 + 28, y - step // 2, x2 - 28, y - step // 2), fill=_mix(BLUE, _INK, 0.85), width=1)
         mine = row["name"] == data.get("highlight")
         _text(d, (x1 + 34, y), str(row["rank"]), 22, col if i < data["spots"] else MUTED, "lm", "head")
-        logo = _round_image(_open(row.get("logo")), 34, ring=row["color"], ring_w=2, initial=row["name"][:1])
-        _paste(c.image, logo, (x1 + 90, y - logo.size[1] // 2))
-        _text(d, (x1 + 138, y), _clip(d, row["name"].upper(), 360, 19, "head"), 19, WHITE if not mine else AMBER, "lm", "head")
-        _text(d, (x1 + 520, y), f"{row['w']}-{row['l']}", 20, WHITE, "lm", "bold")
-        _text(d, (x1 + 620, y), str(row["pts"]), 22, WHITE, "lm", "head")
-        _text(d, (x1 + 720, y), str(row["left"]), 20, MUTED, "lm", "bold")
-        bx1, bx2 = x1 + 840, x1 + 1130
-        d.rounded_rectangle((bx1, y - 9, bx2, y + 9), radius=9, fill=_mix(col, _INK, 0.85))
-        w = int((bx2 - bx1) * row["chance"])
-        if w > 0:
-            d.rounded_rectangle((bx1, y - 9, bx1 + max(18, w), y + 9), radius=9, fill=col)
-        _text(d, (bx2 + 20, y), pct_text(row["chance"]), 24, col, "lm", "head")
-        _text(d, (x1 + 1190, y), pct_text(row["tied"]) if row.get("tied", 0) >= 0.005 else "—", 18,
-              AMBER if row.get("tied", 0) >= 0.005 else DIM, "lm", "bold")
-        _pill(d, x2 - 30 - 190, y - 15, state, 12, fill=_mix(col, _INK, 0.7), fg=WHITE, outline=col, pad=10, h=30, kind="head")
+        logo = _round_image(_open(row.get("logo")), 32, ring=row["color"], ring_w=2, initial=row["name"][:1])
+        _paste(c.image, logo, (x1 + 84, y - logo.size[1] // 2))
+        _text(d, (x1 + 130, y), _clip(d, row["name"].upper(), 330, 18, "head"), 18, WHITE if not mine else AMBER, "lm", "head")
+        _text(d, (x1 + 470, y), f"{row['w']}-{row['l']}", 18, WHITE, "lm", "bold")
+        _text(d, (x1 + 550, y), str(row["pts"]), 20, WHITE, "lm", "head")
+        _text(d, (x1 + 620, y), str(row["left"]), 18, MUTED, "lm", "bold")
+        bx1, bx2 = x1 + 710, x1 + 1000
+        _stack_bar(d, bx1, bx2, y - 8, 16, [(row["outright"], col), (max(0.0, row["chance"] - row["outright"]), _mix(col, WHITE, 0.45))])
+        _text(d, (bx1, y + 20), f"THROUGH {pct_text(row['chance'])} · UP TO {pct_text(min(1.0, row['outright'] + row['tied']))}", 11, MUTED, "lm")
+        _text(d, (x1 + 1060, y), pct_text(row["tied"]) if row["tied"] >= 0.005 else "—", 18,
+              AMBER if row["tied"] >= 0.005 else DIM, "lm", "bold")
+        if bonus:
+            _text(d, (x1 + 1170, y), pct_text(row["bonus"]) if row.get("bonus") else "—", 18,
+                  VIOLET if row.get("bonus") else DIM, "lm", "bold")
+        _chip(d, x2 - 30 - 190, y - 15, state, col, 12, 30)
     if not table:
         _text(d, ((x1 + x2) // 2, (y1 + y2) // 2 + 20), "NO GROUP DATA", 26, DIM, "mm", "head")
-    d.line((x1 + 28, y1 + 150 + (min(data["spots"], n)) * step - step // 2, x2 - 28,
-            y1 + 150 + min(data["spots"], n) * step - step // 2), fill=GREEN, width=2)
+    cutline = y1 + 150 + min(data["spots"], n) * step
+    d.line((x1 + 28, cutline, x2 - 28, cutline), fill=GREEN, width=2)
     _footer(c, f"GOOGLI MANAGER  •  QUALIFY  •  {data['group']}"[:90], data.get("guild"))
     return c.image
 
 
 def render_qualify_page(data, index):
-    if data.get("team") and index == 0:
-        return _png(_page_team(data))
-    return _png(_page_group(data))
+    if data.get("team"):
+        page = (_page_overview, _page_matches, _page_tiebreak, _page_group)[max(0, min(3, index))]
+    else:
+        page = _page_group
+    return _png(page(data))
 
 
 # =========================================================================== command
@@ -353,6 +459,7 @@ class Qualify(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         bot.db.execute("CREATE TABLE IF NOT EXISTS qualify_settings (guild_id INTEGER PRIMARY KEY, spots INTEGER NOT NULL)")
+        bot.db.execute("CREATE TABLE IF NOT EXISTS qualify_bonus (guild_id INTEGER PRIMARY KEY, places INTEGER NOT NULL, label TEXT NOT NULL)")
         bot.db.commit()
         self._cache = {}
 
@@ -443,6 +550,10 @@ class Qualify(commands.Cog):
         # would incorrectly hide a genuinely scheduled remaining game.
         return group_name, rows, remaining
 
+    def bonus(self, guild_id):
+        row = self.bot.db.execute("SELECT places, label FROM qualify_bonus WHERE guild_id=?", (guild_id,)).fetchone()
+        return {"places": int(row[0]), "label": str(row[1])} if row and int(row[0]) > 0 else None
+
     async def _data(self, ctx, team, want_team=True):
         compare, guild = self.compare, ctx.guild
         core = compare.core
@@ -455,41 +566,53 @@ class Qualify(commands.Cog):
             return None
         team = {"name": canon}
         spots = max(1, min(self.spots(guild.id), len(rows)))
+        bonus = self.bonus(guild.id)
+        if bonus:
+            bonus["places"] = min(bonus["places"], len(rows))
         record = {r["team_name"]: (int(r["matches_won"]), int(r["matches_lost"])) for r in rows}
         points = {r["team_name"]: int(r["points"]) for r in rows}
-        fixtures = [(a, b, win_chance(record[a], record[b])) for a, b, _ in remaining]
-        seed = hash((guild.id, team["name"], tuple(sorted(points.items())), tuple(f[:2] for f in fixtures))) & 0xFFFFFFFF
-        key = (guild.id, team["name"], seed, spots)
+        prob = lambda a, b: win_chance(record[a], record[b])
+        fixtures = [(a, b, prob(a, b)) for a, b, _ in remaining]
+        seed = hash((guild.id, team["name"], tuple(sorted(points.items())), tuple(f[:2] for f in fixtures),
+                     spots, bonus and bonus["places"])) & 0xFFFFFFFF
+        key = (guild.id, team["name"], seed)
         analysis = self._cache.get(key)
         if analysis is None:
-            analysis = await asyncio.to_thread(analyse, team["name"], points, fixtures, spots, seed,
-                                               lambda a, b: win_chance(record[a], record[b]))
+            analysis = await asyncio.to_thread(engine.analyse, points, fixtures, prob, team["name"], spots,
+                                               bonus["places"] if bonus else 0, seed)
             self._cache = {key: analysis}
         shim = types.SimpleNamespace(guild=guild)
         by_name = {str(t["name"]).casefold(): t for t in core.db.execute(
             "SELECT * FROM registered_teams WHERE guild_id=? AND status='approved'", (guild.id,)).fetchall()}
-        table = []
+        table, names = [], {}
         for position, r in enumerate(rows, start=1):
             reg = by_name.get(str(r["team_name"]).casefold())
-            left = sum(1 for f in fixtures if r["team_name"] in (f[0], f[1]))
+            nm = r["team_name"]
+            stats = analysis["teams"][nm]
+            logo = await compare._logo_for(shim, reg) if reg is not None else None
+            color = (team_role_color(core, guild, reg) if reg is not None else None) or DEFAULT_ACCENT
+            names[nm] = {"logo": logo, "color": color}
             table.append({
-                "name": r["team_name"], "rank": position, "w": int(r["matches_won"]), "l": int(r["matches_lost"]),
-                "pts": int(r["points"]), "left": left, "chance": analysis["base"][r["team_name"]],
-                "tied": analysis["tied"][r["team_name"]], "tie_win": analysis["tie_win"][r["team_name"]],
-                "logo": await compare._logo_for(shim, reg) if reg is not None else None,
-                "color": (team_role_color(core, guild, reg) if reg is not None else None) or DEFAULT_ACCENT,
+                "name": nm, "rank": position, "w": int(r["matches_won"]), "l": int(r["matches_lost"]),
+                "pts": int(r["points"]), "left": sum(1 for f in fixtures if nm in (f[0], f[1])),
+                "chance": stats["through"], "outright": stats["outright"], "tied": stats["tied"],
+                "tie_win": stats["tie_win"], "bonus": stats["bonus"] if bonus else None, "logo": logo, "color": color,
+                "status": status(stats["through"], stats["outright"], stats["tied"]),
             })
-        table.sort(key=lambda x: (-x["chance"], x["rank"]))
         mine = next(x for x in table if x["name"] == team["name"])
         data = {"guild": guild.name, "group": f"Group {group_name}" if group_name else "Group", "spots": spots,
-                "table": sorted(table, key=lambda x: x["rank"]),
-                "highlight": team["name"], "team": None}
+                "table": table, "highlight": team["name"], "team": None, "bonus": bonus, "names": names,
+                "pair": analysis["pair"], "all_scenes": analysis["all_scenes"]}
         if want_team:
+            stats = analysis["teams"][team["name"]]
             data["team"] = {
                 "name": team["name"], "logo": mine["logo"], "color": mine["color"], "rank": mine["rank"], "of": len(rows),
                 "w": mine["w"], "l": mine["l"], "pts": mine["pts"], "left": analysis["left"],
-                "chance": mine["chance"], "status": status(mine["chance"]), "tied": mine["tied"], "tie_win": mine["tie_win"], "scen": analysis["scen"],
-                "swings": analysis["swings"], "need": analysis["need"],
+                "chance": stats["through"], "outright": stats["outright"], "tied": stats["tied"],
+                "tie_win": stats["tie_win"], "bonus": stats["bonus"], "bonus_outright": stats["bonus_outright"],
+                "status": mine["status"], "scen": analysis["scen"], "swings": analysis["swings"],
+                "elsewhere": analysis["elsewhere"], "scenes": analysis["scenes"],
+                "best": analysis["best"], "worst": analysis["worst"],
             }
         return data
 
@@ -519,8 +642,7 @@ class Qualify(commands.Cog):
                                            "(set groups with the group commands first).")
                 return
             png = await render_png(render_qualify_page, data, 0)
-            view = ImagePager(ctx, png, 2, lambda i: render_qualify_page(data, i), ("This team", "Whole group"),
-                              "qualify.png")
+            view = ImagePager(ctx, png, len(PAGES), lambda i: render_qualify_page(data, i), PAGES, "qualify.png")
             view.message = await loading.edit(
                 content=None, attachments=[discord.File(io.BytesIO(png), filename="qualify.png")], view=view)
         except Exception as exc:
@@ -532,7 +654,6 @@ class Qualify(commands.Cog):
             except Exception:
                 pass
             await ctx.send(f"I couldn't work out the qualification chances: `{type(exc).__name__}: {exc}`")
-
 
     @commands.command(name="qualifydebug")
     @commands.guild_only()
@@ -659,6 +780,30 @@ class Qualify(commands.Cog):
                             "ON CONFLICT(guild_id) DO UPDATE SET spots=excluded.spots", (ctx.guild.id, spots))
         self.bot.db.commit()
         await ctx.reply(f"✅ **{spots}** team(s) now qualify from each group.", mention_author=False)
+
+
+
+    @commands.command(name="qualifybonus", aliases=["setqualifybonus"])
+    @commands.guild_only()
+    async def qualifybonus(self, ctx, places: int = None, *, label: str = "Special benefit"):
+        """Optional special benefit for the top N of each group, e.g. +qualifybonus 2 Quarter Finals. 0 removes it."""
+        if places is None:
+            current = self.bonus(ctx.guild.id)
+            return await ctx.reply(
+                f"Top **{current['places']}** of each group get **{current['label']}**." if current else
+                "No special benefit is set. Use `+qualifybonus <top N> <name>`, for example "
+                "`+qualifybonus 2 Quarter Finals`.", mention_author=False)
+        if not await owner_or_whitelisted(ctx, command_name="qualifybonus", app_owner=True):
+            return await ctx.reply("Only the bot owner or a role whitelisted for this command can use it.",
+                                   mention_author=False)
+        if not 0 <= places <= 16:
+            return await ctx.reply("Choose a number from 0 to 16 (0 removes it).", mention_author=False)
+        self.bot.db.execute("INSERT INTO qualify_bonus (guild_id, places, label) VALUES (?, ?, ?) "
+                            "ON CONFLICT(guild_id) DO UPDATE SET places=excluded.places, label=excluded.label",
+                            (ctx.guild.id, places, label.strip()[:40] or "Special benefit"))
+        self.bot.db.commit()
+        await ctx.reply("✅ Special benefit removed." if not places else
+                        f"✅ The top **{places}** of each group now get **{label.strip()[:40]}**.", mention_author=False)
 
 
 async def setup(bot):
