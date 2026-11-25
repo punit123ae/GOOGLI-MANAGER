@@ -587,6 +587,20 @@ class Qualify(commands.Cog):
                 "WHERE guild_id=? ORDER BY match_no",
                 (ctx.guild.id,),
             ).fetchall()
+            target_key = next(
+                (key for key, name in key_map.items() if norm(name) == norm(team)),
+                None,
+            )
+            history = pconn.execute(
+                "SELECT id, result, match_no, created_at FROM team_match_history "
+                "WHERE guild_id=? AND team_name_key=? ORDER BY id",
+                (ctx.guild.id, target_key),
+            ).fetchall() if target_key else []
+            point_row = pconn.execute(
+                "SELECT matches_won, matches_lost FROM team_points "
+                "WHERE guild_id=? AND team_name_key=?",
+                (ctx.guild.id, target_key),
+            ).fetchone() if target_key else None
         finally:
             pconn.close()
 
@@ -598,6 +612,16 @@ class Qualify(commands.Cog):
         ]
         for key, name in key_map.items():
             lines.append(f"• {name}: [{key}]")
+        lines.append(
+            f"POINTS TOTAL: W={point_row['matches_won']} L={point_row['matches_lost']}"
+            if point_row else "POINTS TOTAL: no row found"
+        )
+        lines.append("HIGH VOLTAGES MATCH HISTORY (match_no blank = manual/unlinked entry):")
+        for item in history:
+            lines.append(
+                f"• row {item['id']}: {item['result']} | match_no={item['match_no'] or 'BLANK'} "
+                f"| created={item['created_at']}"
+            )
         lines.append("SAVED FIXTURES:")
         for fixture in fixtures:
             lines.append(f"• {fixture['team_one']} vs {fixture['team_two']} (day {fixture['day_no']})")
