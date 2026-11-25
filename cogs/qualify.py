@@ -425,19 +425,10 @@ class Qualify(commands.Cog):
             seen[pair] = seen.get(pair, 0) + 1
             if seen[pair] > played.get(pair, 0):
                 remaining.append((a, b, day))
-        # Points set by hand (+setpt) have no opponent: never leave a team more matches than it can still play.
-        total = {r["team_name"]: 0 for r in rows}
-        for a, b, _ in fixtures:
-            total[a] += 1
-            total[b] += 1
-        for r in rows:
-            name = r["team_name"]
-            budget = max(0, total[name] - r["matches_won"] - r["matches_lost"])
-            while True:
-                mine = [i for i, f in enumerate(remaining) if name in (f[0], f[1])]
-                if len(mine) <= budget:
-                    break
-                remaining.pop(mine[0])
+        # Remaining games are determined only by saved fixtures minus imported results.
+        # Do not cap this using the points-table W/L totals: those totals can include
+        # manually entered adjustments or results outside this fixture list, which
+        # would incorrectly hide a genuinely scheduled remaining game.
         return group_name, rows, remaining
 
     async def _data(self, ctx, team, want_team=True):
