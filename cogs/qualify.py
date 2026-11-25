@@ -534,6 +534,91 @@ class Qualify(commands.Cog):
             await ctx.send(f"I couldn't work out the qualification chances: `{type(exc).__name__}: {exc}`")
 
 
+    @commands.command(name="qualifydebug")
+    @commands.guild_only()
+    @commands.has_guild_permissions(administrator=True)
+    async def qualifydebug(self, ctx, *, team: str):
+        """Temporary read-only diagnostic for stage-specific qualification records."""
+        from .groups import norm
+        pts = self.bot.get_cog("PointsTable")
+        if pts is None:
+            return await ctx.reply("Points table is not loaded.", mention_author=False)
+        mod = sys.modules[type(pts).__module__]
+        active = mod.get_active_stage(ctx.guild.id)
+        gconn = sqlite3.connect(mod.GROUP_DB)
+        gconn.row_factory = sqlite3.Row
+        try:
+            assignments = gconn.execute(
+                "SELECT team_name, team_name_key, group_key FROM team_groups "
+                "WHERE guild_id=? AND team_name=? COLLATE NOCASE ORDER BY group_key",
+                (ctx.guild.id, team.strip()),
+            ).fetchall()
+            if not assignments:
+                return await ctx.reply(f"Could not find **{team}** in team groups.", mention_author=False)
+            active_assignment = next(
+                (r for r in assignments if active and
+                 str(r["group_key"]).split("::", 1)[0].casefold() == active[0].casefold()),
+                assignments[-1],
+            )
+            group_key = str(active_assignment["group_key"])
+            group_teams = gconn.execute(
+                "SELECT team_name, team_name_key FROM team_groups WHERE guild_id=? AND group_key=?",
+                (ctx.guild.id, group_key),
+            ).fetchall()
+            fixtures = gconn.execute(
+                "SELECT team_one, team_two, day_no FROM generated_fixtures "
+                "WHERE guild_id=? AND group_key=? ORDER BY day_no, id",
+                (ctx.guild.id, group_key),
+            ).fetchall()
+        finally:
+            gconn.close()
+
+        pconn = mod.connect_points_db()
+        try:
+            legacy_ok = bool(active and mod.first_stage_key(ctx.guild.id) == active[0])
+            key_map = {}
+            for row in group_teams:
+                storage = mod.points_storage_key(
+                    pconn, ctx.guild.id, row["team_name_key"], legacy_ok=legacy_ok
+                )
+                key_map[str(storage)] = str(row["team_name"])
+            results = pconn.execute(
+                "SELECT match_no, winner_team_key, loser_team_key FROM imported_match_results "
+                "WHERE guild_id=? ORDER BY match_no",
+                (ctx.guild.id,),
+            ).fetchall()
+        finally:
+            pconn.close()
+
+        lines = [
+            f"QUALIFY DEBUG — {team}",
+            f"Active points stage: {active}",
+            f"Selected group: {group_key}",
+            "CURRENT GROUP STORAGE KEYS:",
+        ]
+        for key, name in key_map.items():
+            lines.append(f"• {name}: [{key}]")
+        lines.append("SAVED FIXTURES:")
+        for fixture in fixtures:
+            lines.append(f"• {fixture['team_one']} vs {fixture['team_two']} (day {fixture['day_no']})")
+        lines.append("IMPORTED RESULTS MATCHING THIS GROUP'S STORAGE KEYS:")
+        found = 0
+        for result in results:
+            winner_key, loser_key = str(result["winner_team_key"]), str(result["loser_team_key"])
+            if winner_key in key_map or loser_key in key_map:
+                found += 1
+                lines.append(
+                    f"• Match #{result['match_no']}: "
+                    f"[{winner_key}] vs [{loser_key}] "
+                    f"=> {key_map.get(winner_key, 'NOT IN CURRENT GROUP')} vs "
+                    f"{key_map.get(loser_key, 'NOT IN CURRENT GROUP')}"
+                )
+        if not found:
+            lines.append("• No imported results use the current group's storage keys.")
+        message = "\n".join(lines)
+        for start in range(0, len(message), 1700):
+            await ctx.send(message[start:start + 1700], allowed_mentions=discord.AllowedMentions.none())
+
     @commands.command(name="qualifyspots", aliases=["setqualifyspots"])
     @commands.guild_only()
     async def qualifyspots(self, ctx, spots: int = None):
