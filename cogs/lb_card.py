@@ -115,6 +115,25 @@ def _modern_template() -> Image.Image:
                          outline=(80, 155, 220, 115), width=2)
     pd.rounded_rectangle((38, 575, 986, 583), radius=4, fill=(65, 175, 235, 150))
     pd.rounded_rectangle((38, 1210, 986, 1217), radius=4, fill=(65, 175, 235, 125))
+    pd.rounded_rectangle((48, 207, 505, 257), radius=18, fill=(5, 15, 31, 155),
+                         outline=(80, 150, 215, 95), width=1)
+    pd.rounded_rectangle((770, 207, 950, 257), radius=18, fill=(5, 15, 31, 155),
+                         outline=(80, 150, 215, 95), width=1)
+
+    # Avatar wells and rings (the original template used to provide these).
+    lx, ly, lr = LOGO
+    pd.ellipse((lx-lr-7, ly-lr-7, lx+lr+7, ly+lr+7), fill=(5, 15, 31, 230),
+               outline=(95, 195, 235, 220), width=4)
+    pd.ellipse((AV_X-GOLD_AV_R-6, GOLD_CY-GOLD_AV_R-6,
+                AV_X+GOLD_AV_R+6, GOLD_CY+GOLD_AV_R+6),
+               fill=(7, 17, 34, 255), outline=(255, 200, 50, 235), width=5)
+    for row_y in ROW_CY:
+        pd.ellipse((AV_X-ROW_AV_R-4, row_y-ROW_AV_R-4,
+                    AV_X+ROW_AV_R+4, row_y+ROW_AV_R+4),
+                   fill=(7, 17, 34, 255), outline=(95, 175, 225, 190), width=3)
+    pd.ellipse((AV_X-YOU_AV_R-6, YOU_CY-YOU_AV_R-6,
+                AV_X+YOU_AV_R+6, YOU_CY+YOU_AV_R+6),
+               fill=(7, 17, 34, 255), outline=(255, 200, 50, 220), width=4)
     image = Image.alpha_composite(image, panels)
 
     vignette = Image.new("RGBA", (w, h), (0, 0, 0, 0))
