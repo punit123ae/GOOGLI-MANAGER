@@ -569,7 +569,7 @@ class Qualify(commands.Cog):
                 lines.append(f"• Match #{r['match_no']}: WINNER=[{w}] LOSER=[{l}]")
         if not found:
             lines.append("• No imported result matched this team name.")
-        message = "\\n".join(lines)
+        message = "\n".join(lines)
         for start in range(0, len(message), 1800):
             await ctx.send(message[start:start+1800], allowed_mentions=discord.AllowedMentions.none())
 
