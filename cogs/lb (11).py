@@ -500,7 +500,7 @@ class PageButton(discord.ui.Button):
 
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, cog: "LeaderboardCog", ctx: commands.Context, modern_background: bool = False):
+    def __init__(self, cog: "LeaderboardCog", ctx: commands.Context, modern_background: bool = True):
         super().__init__(timeout=300)
         self.cog = cog
         self.modern_background = bool(modern_background)
@@ -803,7 +803,7 @@ class LeaderboardView(discord.ui.View):
         loop = asyncio.get_running_loop()
         png = await loop.run_in_executor(
             None, lambda: render_card(f"{self.competition} • {self.category}", self.metric_label, top, rows, you, page_text,
-                                      guild_icon, watch_name, self.modern_background))
+                                      guild_icon, watch_name, self.modern_background, guild.name))
         for child in self.children:
             if isinstance(child, PageButton):
                 child.disabled = (self.page == 0) if child.kind in ("first", "prev") else (self.page >= pages - 1)

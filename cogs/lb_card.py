@@ -143,6 +143,86 @@ def _modern_template() -> Image.Image:
     return Image.alpha_composite(image, vignette).convert("RGB")
 
 
+@lru_cache(maxsize=1)
+def _glow_template() -> Image.Image:
+    """Blue-to-warm split background with glowing glass tiles (same family as awards / strengths / teaminfo)."""
+    def _rounded_mask(size, radius):
+        mask = Image.new("L", size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
+        return mask
+
+    def _blur_ellipse(size, box, color, alpha, blur):
+        sw, sh = size
+        small = Image.new("RGBA", (sw // 2, sh // 2), (0, 0, 0, 0))
+        ImageDraw.Draw(small).ellipse([v / 2 for v in box], fill=color + (alpha,))
+        small = small.filter(ImageFilter.GaussianBlur(blur / 2))
+        return small.resize((sw, sh), Image.Resampling.BILINEAR)
+
+    w, h = 1024, 1535
+    left, right = (22, 52, 125), (128, 56, 40)
+    base = Image.new("RGB", (w, h))
+    bd = ImageDraw.Draw(base)
+    for x in range(w):
+        t = min(1.0, max(0.0, (x - 150) / 720))
+        t = t * t * (3 - 2 * t)
+        col = tuple(int(left[k] * (1 - t) + right[k] * t) for k in range(3))
+        bd.line((x, 0, x, h), fill=col)
+    # darken towards the bottom so the tiles stay readable
+    shade = Image.new("L", (w, h))
+    sd = ImageDraw.Draw(shade)
+    for y in range(h):
+        sd.line((0, y, w, y), fill=int(95 + 90 * y / h))
+    base = Image.composite(Image.new("RGB", (w, h), (5, 9, 20)), base, shade)
+    image = base.convert("RGBA")
+
+    def tile(box, color, radius=30, alpha=200, glow=1.0):
+        nonlocal image
+        x1, y1, x2, y2 = box
+        tw, th = x2 - x1, y2 - y1
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).rounded_rectangle(box, radius=radius, fill=(8, 14, 30, alpha))
+        image = Image.alpha_composite(image, layer)
+        mask = _rounded_mask((tw, th), radius)
+        g = _blur_ellipse((tw, th), (-tw * 0.25, -th * 0.7, tw * 0.65, th * 0.5), color, int(105 * glow), 70)
+        g2 = _blur_ellipse((tw, th), (tw * 0.55, th * 0.6, tw * 1.3, th * 1.5), color, int(50 * glow), 80)
+        g = Image.alpha_composite(g, g2)
+        g.putalpha(Image.composite(g.getchannel("A"), Image.new("L", (tw, th), 0), mask))
+        image.alpha_composite(g, (x1, y1))
+        dd = ImageDraw.Draw(image)
+        mix = lambda a, b, t: tuple(int(a[i] * (1 - t) + b[i] * t) for i in range(3))
+        dd.rounded_rectangle(box, radius=radius, outline=mix(color, (12, 18, 32), 0.3) + (255,), width=2)
+        dd.rounded_rectangle((x1 + 3, y1 + 3, x2 - 3, y2 - 3), radius=radius - 3,
+                             outline=mix(color, (12, 18, 32), 0.8) + (255,), width=1)
+        dd.line((x1 + 36, y1 + 2, x2 - 36, y1 + 2), fill=mix(color, (255, 255, 255), 0.55) + (255,), width=1)
+        dd.rounded_rectangle((x1 + 30, y1 - 1, x1 + 150, y1 + 4), radius=2, fill=color + (255,))
+
+    CY, VI, WARM = (80, 200, 235), (170, 130, 255), (255, 150, 70)
+    tile((35, 35, 989, 365), CY, 34, 175)
+    tile((38, 395, 986, 548), GOLD, 28, 215, 1.25)
+    tile((38, 575, 986, 1185), (95, 160, 255), 28, 205, 0.8)
+    tile((38, 1210, 986, 1375), GOLD, 28, 210, 0.9)
+    tile((38, 1384, 986, 1436), WARM, 24, 215, 0.8)
+    dd = ImageDraw.Draw(image)
+    for y in (694, 753, 812, 871, 930, 989, 1048, 1107):
+        dd.line((66, y, 958, y), fill=(150, 175, 215, 40), width=1)
+    pills = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(pills)
+    for box in ((48, 207, 505, 257), (770, 207, 950, 257)):
+        pd.rounded_rectangle(box, radius=22, fill=(6, 12, 26, 200), outline=(90, 175, 230, 150), width=1)
+    pd.rounded_rectangle((60, 590, 200, 626), radius=16, fill=(6, 12, 26, 0))
+    lx, ly, lr = LOGO
+    pd.ellipse((lx - lr - 7, ly - lr - 7, lx + lr + 7, ly + lr + 7), fill=(6, 12, 26, 235), outline=(95, 200, 235, 235), width=4)
+    pd.ellipse((AV_X - GOLD_AV_R - 6, GOLD_CY - GOLD_AV_R - 6, AV_X + GOLD_AV_R + 6, GOLD_CY + GOLD_AV_R + 6),
+               fill=(7, 14, 30, 255), outline=(255, 200, 50, 240), width=5)
+    for row_y in ROW_CY:
+        pd.ellipse((AV_X - ROW_AV_R - 4, row_y - ROW_AV_R - 4, AV_X + ROW_AV_R + 4, row_y + ROW_AV_R + 4),
+                   fill=(7, 14, 30, 255), outline=(110, 180, 240, 200), width=3)
+    pd.ellipse((AV_X - YOU_AV_R - 6, YOU_CY - YOU_AV_R - 6, AV_X + YOU_AV_R + 6, YOU_CY + YOU_AV_R + 6),
+               fill=(7, 14, 30, 255), outline=(255, 200, 50, 230), width=4)
+    image = Image.alpha_composite(image, pills)
+    return image.convert("RGB")
+
+
 @lru_cache(maxsize=None)
 def _badge() -> Image.Image | None:
     try:
@@ -332,7 +412,7 @@ def _draw_title(d: ImageDraw.ImageDraw, stat_label: str) -> None:
 # ---------------------------------------------------------------- card
 def render_card(category: str, stat_label: str, top: dict | None, rows: list[dict],
                 you: dict | None, page_text: str = "", guild_icon: bytes | None = None,
-                player_to_watch: str = "—", modern_background: bool = False) -> bytes:
+                player_to_watch: str = "—", modern_background: bool = False, server_name: str = "") -> bytes:
     """
     top  : {"rank", "name", "value", "avatar", "delta"} for the gold box (first player of the page)
     rows : up to 9 dicts like top, each with its real rank
@@ -340,7 +420,7 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
     delta: places moved since the last stats update (+ up, - down, 0 unchanged, None no marker)
     avatar / guild_icon are PNG/JPEG bytes or None. Returns JPEG bytes.
     """
-    img = (_modern_template() if modern_background else _template()).copy()
+    img = (_glow_template() if modern_background else _template()).copy()
     d = ImageDraw.Draw(img)
 
     # server icon in the top-left ring (the right corner stays clear)
@@ -350,6 +430,11 @@ def render_card(category: str, stat_label: str, top: dict | None, rows: list[dic
         if badge is not None:
             img.paste(badge, (cx - badge.width // 2, cy - badge.height // 2), badge)
 
+    if modern_background:      # the glow background has no baked-in text, so the labels are drawn here
+        _put(d, (server_name or "LEADERBOARD").upper(), 52, 560, 112, ICE, 640, "m")
+        _put(d, "RANK", 25, 62, HEADER_STAT[1], LABEL, 120)
+        _put(d, "PLAYER", 25, 250, HEADER_STAT[1], LABEL, 200)
+        _put(d, "YOU", 22, 66, YOU_CY - 62, GOLD, 120)
     _put(d, category.upper(), 27, CAT_X, CAT_Y, ICE, CAT_W)
     if page_text:
         _put(d, page_text, 24, PAGE_CX, PAGE_Y, CYAN, 140, "m")
