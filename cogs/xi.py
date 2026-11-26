@@ -7,6 +7,7 @@
 
 The XI is picked from real stats (see xi_engine.py): batting average, runs, matches played,
 wickets, bowling average and strike rate, catches and fantasy points. Strike rate hardly counts.
++dream                   the best XI of the whole server, from every team's players
 Pages: 1 playing XI, 2 batting & bowling order, 3 substitutes, 4 bench (+cxi: 1 the two XIs, 2 key players, 3 rating breakdown).
 """
 import asyncio
@@ -18,6 +19,7 @@ from discord.ext import commands
 
 from . import xi_engine
 from .h2h import ImagePager, fetch_avatar, on_cooldown, render_png, team_role_color
+from .dream_image import render_dream_page
 from .xi_image import render_cxi_page, render_xi_page
 
 USAGE_XI = "Usage: `+xi` (your team) or `+xi <team name>`."
@@ -156,6 +158,109 @@ class PlayingXI(commands.Cog):
         return found
 
     # ------------------------------------------------------------------ commands
+    # ------------------------------------------------------------------ +dream
+    async def build_dream(self, ctx):
+        """Best XI across every approved team of the server (kept 2 minutes)."""
+        import time
+        key = ("dream", ctx.guild.id)
+        hit = self._side_cache.get(key)
+        if hit and time.monotonic() - hit[0] < 120:
+            return hit[1]
+        compare, guild = self.compare, ctx.guild
+        core = compare.core
+        index = compare._guild_rows(guild.id)
+        pool = self._pool(guild.id, index)
+        teams = core.db.execute("SELECT * FROM registered_teams WHERE guild_id=? AND status='approved'",
+                                (guild.id,)).fetchall()
+        owner = {}                                   # uid -> team row
+        for team in teams:
+            ids = [int(team["captain_id"])] + ([int(team["vice_captain_id"])] if team["vice_captain_id"] else [])
+            ids += [int(r["user_id"]) for r in core.db.execute(
+                "SELECT user_id FROM team_players WHERE team_id=?", (team["id"],)).fetchall()]
+            for uid in ids:
+                owner.setdefault(uid, team)
+        from .lb import _totals
+        from .stats import fantasy_raw_points
+        profiles = [
+            xi_engine.profile(uid, index["players"].get(uid, []), *index["fielding_players"].get(uid, (0, 0)),
+                              _totals, lambda r: fantasy_raw_points(r)[2])
+            for uid in owner if index["players"].get(uid)
+        ]
+        if not profiles:
+            return None
+        typical = index.get("typical") or 11
+        size = 11 if typical >= 9 else max(5, typical)
+        result = xi_engine.build(profiles, pool, size=size)
+        xi, subs = result["xi"], result["subs"]
+        by_value = sorted(xi, key=lambda p: -p["value"])
+        captain = by_value[0]["uid"] if by_value else None
+        vice = by_value[1]["uid"] if len(by_value) > 1 else None
+
+        shown = xi + subs
+        logos, colors = {}, {}
+        for team in {int(t["id"]): t for t in owner.values()}.values():
+            logos[int(team["id"])] = await compare._logo_for(ctx, team)
+            colors[int(team["id"])] = team_role_color(core, guild, team)
+        people = {p["uid"]: {"name": compare._display_name(guild, p["uid"]), "avatar": None} for p in shown}
+        sem = asyncio.Semaphore(6)
+
+        async def avatar(uid):
+            async with sem:
+                member = guild.get_member(uid) or self.bot.get_user(uid)
+                if member is None:
+                    try:
+                        member = await self.bot.fetch_user(uid)
+                    except discord.HTTPException:
+                        member = None
+                people[uid]["avatar"] = await fetch_avatar(self.bot, member)
+
+        await asyncio.gather(*(avatar(uid) for uid in people), return_exceptions=True)
+        team_of = {p["uid"]: {"name": str(owner[p["uid"]]["name"]), "color": colors.get(int(owner[p["uid"]]["id"]))}
+                   for p in shown}
+        counts = {}
+        for p in xi:
+            t = owner[p["uid"]]
+            counts[int(t["id"])] = counts.get(int(t["id"]), 0) + 1
+        by_id = {int(t["id"]): t for t in owner.values()}
+        team_counts = sorted(((str(by_id[i]["name"]), logos.get(i), n) for i, n in counts.items()),
+                             key=lambda x: (-x[2], x[0]))
+        data = {"guild": guild.name, "xi": xi, "subs": subs, "strength": result["strength"], "people": people,
+                "teams": team_of, "team_counts": team_counts, "players": len(profiles), "teams_total": len(teams),
+                "captain": captain, "vice": vice}
+        if len(self._side_cache) >= 4:
+            self._side_cache.pop(next(iter(self._side_cache)))
+        self._side_cache[key] = (time.monotonic(), data)
+        return data
+
+    @commands.command(name="dream", aliases=["dreamxi", "serverxi"])
+    @commands.guild_only()
+    async def dream_command(self, ctx):
+        """The best XI of the whole server, picked from every team's players."""
+        if self.compare is None:
+            return await ctx.reply("The team system isn't loaded right now.", mention_author=False)
+        wait = on_cooldown(ctx.author.id)
+        if wait:
+            return await ctx.reply(f"Please wait {wait:.0f}s before drawing another image.", mention_author=False)
+        loading = await ctx.reply("⏳ Picking the dream XI...", mention_author=False)
+        try:
+            data = await self.build_dream(ctx)
+            if data is None:
+                return await loading.edit(content="No player has recorded matches yet, so there is no dream XI.")
+            png = await render_png(render_dream_page, data, 0)
+            view = ImagePager(ctx, png, 2, lambda i: render_dream_page(data, i), ("Dream XI", "The numbers"), "dream.png")
+            view.message = await loading.edit(content=None, attachments=[discord.File(io.BytesIO(png), filename="dream.png")],
+                                              view=view)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"[dream] failed: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+            await ctx.send("I couldn't build the dream XI. Check the bot logs.")
+
+
     @commands.command(name="xi", aliases=["bestxi", "playingxi"])
     @commands.guild_only()
     async def xi_command(self, ctx, *, team: str = ""):
