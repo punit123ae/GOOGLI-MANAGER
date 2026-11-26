@@ -24,6 +24,7 @@ the command adds no database work of its own.
 import asyncio
 import io
 import math
+import re
 from statistics import mean, pstdev
 
 import discord
@@ -35,7 +36,7 @@ from .teaminfo_image import (
     CORAL, DIM, GOLD, MINT, MUTED, VIOLET, WHITE, _clip, _fit, _mix, _open, _paste, _pill, _round_image, _text,
     accent_from_logo, font,
 )
-from .versus_image import _Canvas, _footer, _png, _title, pick_sides
+from .versus_image import EDGE, _Canvas, _footer, _png, _title, pick_sides
 
 STRENGTH_COLOR, WEAKNESS_COLOR = (62, 224, 140), (255, 96, 120)
 DEPEND_COLOR, WARN_COLOR = GOLD, (255, 140, 70)
@@ -315,6 +316,94 @@ def verdict_line(report):
     if w:
         return f"No clear strength; weakest at {w[0]['label'].lower()}."
     return "Close to the league average everywhere."
+
+
+# =========================================================================== one player / two players
+
+PLAYER_NOTES = {
+    "runs_pm": ("Scores heavily every match", "Rarely makes big scores"),
+    "sr": ("Attacks from the first ball", "Scores too slowly"),
+    "bat_avg": ("Makes his starts count", "Gets out too cheaply"),
+    "wk_pm": ("Takes wickets regularly", "Rarely takes wickets"),
+    "econ": ("Keeps the runs tight", "Leaks too many runs"),
+    "bowl_sr": ("Breaks through quickly", "Breakthroughs are slow"),
+    "catch_pm": ("Safe hands in the field", "Takes few catches"),
+    "drops_pm": ("Hardly ever drops a catch", "Drops are costing the team"),
+}
+PLAYER_AREAS = {"BATTING": ("runs_pm", "sr", "bat_avg"), "BOWLING": ("wk_pm", "econ", "bowl_sr"),
+                "FIELDING": ("catch_pm", "drops_pm")}
+PLAYER_META = {k: (label, higher, fmt, ok) for k, label, higher, fmt, ok in PLAYER_METRICS}
+
+
+def player_numbers(p):
+    """A rated xi_engine profile in the shape the player metrics expect."""
+    return {"uid": p["uid"], "matches": p["matches"], "runs": p["runs"], "wickets": p["wickets"],
+            "catches": p["catches"], "drops": p["drops"], "balls_faced": p["balls_faced"],
+            "balls_bowled": p["balls_bowled"], "sr": p.get("strike_rate"), "bat_avg": p.get("bat_avg"),
+            "econ": p.get("economy"), "bowl_sr": p.get("bowl_sr"), "fantasy": p["fantasy"]}
+
+
+def player_scout(everyone, uid):
+    """Strengths, weak spots and grades of one player against every player in the league.
+
+    everyone: {uid: player_numbers(...)}. Returns None when the player has no numbers."""
+    me = everyone.get(uid)
+    if me is None:
+        return None
+    pools = {}
+    for q in everyone.values():
+        for key, _l, _h, _f, ok in PLAYER_METRICS:
+            if ok(q):
+                pools.setdefault(key, []).append(_player_value(q, key))
+    scores = {}
+    for key, label, higher, fmt, ok in PLAYER_METRICS:
+        pool = pools.get(key, [])
+        if len(pool) < 6 or not (ok(me) or (key == "drops_pm" and me["matches"] >= 2 and me["drops"] == 0
+                                            and me["catches"] > 0)):
+            continue
+        value = _player_value(me, key)
+        better = sum(1 for v in pool if (v > value if higher else v < value))
+        same = sum(1 for v in pool if v == value) - (1 if ok(me) else 0)
+        worse = len(pool) - better - same - (1 if ok(me) else 0)
+        n = len(pool) + (0 if ok(me) else 1)
+        pct = 100.0 * (worse + max(0, same) / 2) / max(1, n - 1)
+        scores[key] = {"key": key, "label": label, "value": fmt.format(value), "raw": value, "pct": pct,
+                       "rank": better + 1, "of": n, "higher": higher}
+    if not scores:
+        return None
+    strong = sorted((v for v in scores.values() if v["pct"] >= 60 and v["key"] != "drops_pm"
+                     or v["key"] == "drops_pm" and v["pct"] >= 85), key=lambda v: -v["pct"])[:3]
+    weak = sorted((v for v in scores.values() if v["pct"] <= 40), key=lambda v: v["pct"])[:3]
+    for v in strong:
+        v["note"] = PLAYER_NOTES[v["key"]][0]
+    for v in weak:
+        v["note"] = PLAYER_NOTES[v["key"]][1]
+    grades = []
+    for label, keys in PLAYER_AREAS.items():
+        vals = [scores[k]["pct"] for k in keys if k in scores]
+        score = mean(vals) if vals else None
+        color = {"BATTING": CORAL, "BOWLING": VIOLET, "FIELDING": MINT}[label]
+        grades.append({"label": label, "score": score, "letter": _grade(score) if score is not None else "—",
+                       "color": color})
+    bat, bowl = grades[0]["score"], grades[1]["score"]
+    if bat is not None and bowl is not None and bat >= 55 and bowl >= 55:
+        role = "ALL-ROUNDER"
+    elif bat is not None and (bowl is None or bat >= bowl):
+        role = "BATTER"
+    elif bowl is not None:
+        role = "BOWLER"
+    else:
+        role = "FIELDER"
+    if strong and weak:
+        verdict = f"Best at {strong[0]['label'].lower()}, weakest at {weak[0]['label'].lower()}."
+    elif strong:
+        verdict = f"Best at {strong[0]['label'].lower()}, with no clear weakness."
+    elif weak:
+        verdict = f"No clear strength; weakest at {weak[0]['label'].lower()}."
+    else:
+        verdict = "Close to the league average everywhere."
+    return {"scores": scores, "strong": strong, "weak": weak, "grades": grades, "role": role, "verdict": verdict,
+            "fantasy": me["fantasy"], "matches": me["matches"], "players": len(everyone)}
 
 
 # =========================================================================== drawing
@@ -603,6 +692,162 @@ def render_players(data):
     return _png(_render_players(data))
 
 
+def _person_hero(c, who, report, x_left=80, accent=None):
+    d = c.d
+    accent = accent or c.a
+    ring = _round_image(_open(who.get("avatar")), 150, ring=accent, ring_w=6, initial=who["name"][:1])
+    _halo(c, x_left + 75, 54 + 75, 75, accent)
+    _paste(c.image, ring, (x_left, 54))
+    tx = x_left + 180
+    name = who["name"].upper()
+    size = _fit(d, name, 560, 54, 26, "head")
+    _title(d, (tx, 62), _clip(d, name, 560, size, "head"), size, WHITE, "la", "head")
+    x = tx
+    x += _pill(d, x, 132, report["role"], 15, fill=accent, fg=_INK, pad=16, h=34) + 10
+    if who.get("team"):
+        x += _pill(d, x, 132, _clip(d, who["team"].upper(), 240, 15), 15, fg=WHITE, outline=accent, pad=16, h=34) + 10
+    _pill(d, x, 132, f"{report['matches']} MATCHES", 15, fg=WHITE, outline=accent, pad=16, h=34)
+    _text(d, (tx, 188), _clip(d, report["verdict"], 640, 17), 17, _mix(MUTED, WHITE, 0.35))
+    _text(d, (tx, 216), f"BENCHMARKED AGAINST {report['players']} PLAYERS", 12, DIM)
+
+
+def _numbers_tile(c, box, report):
+    d = c.d
+    x1, y1, x2, y2 = box
+    _tile_glass(c, box, DEPEND_COLOR)
+    d.ellipse((x1 + 28, y1 + 28, x1 + 40, y1 + 40), fill=DEPEND_COLOR)
+    _text(d, (x1 + 54, y1 + 20), "ALL NUMBERS", 26, DEPEND_COLOR, "la", "head")
+    _text(d, (x1 + 28, y1 + 62), "WHERE HE SITS AMONG EVERY PLAYER", 13, MUTED)
+    keys = [k for k, *_r in PLAYER_METRICS]
+    step = (y2 - y1 - 110) // len(keys)
+    for i, key in enumerate(keys):
+        y = y1 + 96 + i * step
+        v = report["scores"].get(key)
+        label = PLAYER_META[key][0]
+        if v is None:
+            _text(d, (x1 + 28, y), label, 14, DIM, "la", "head")
+            _text(d, (x2 - 28, y), "NO DATA", 13, DIM, "ra", "bold")
+            continue
+        col = STRENGTH_COLOR if v["pct"] >= 60 else WEAKNESS_COLOR if v["pct"] <= 40 else (150, 170, 210)
+        _text(d, (x1 + 28, y), label, 14, _mix(col, WHITE, 0.35), "la", "head")
+        _text(d, (x2 - 28, y - 2), v["value"], 20, WHITE, "ra", "head")
+        _bar(d, x1 + 28, x2 - 28, y + 30, 8, v["pct"], col, marker=50)
+        _text(d, (x1 + 28 + int(d.textlength(label, font=font(14, "head"))) + 12, y + 4),
+              f"#{v['rank']} OF {v['of']}", 11, MUTED)
+
+
+def _render_player(data):
+    who, report = data["who"], data["report"]
+    col_a, col_b = pick_sides(who.get("color"), None)
+    c = _Canvas(col_a, col_b)
+    for box in ((50, 22, 1550, 250), (50, 270, 540, 856), (560, 270, 1050, 856), (1070, 270, 1550, 856)):
+        c.card(box, 26, 150 if box[1] > 250 else 165)
+    c.seal()
+    d = c.d
+    _person_hero(c, who, report)
+    for i, g in enumerate(report["grades"]):
+        cx = 1000 + i * 128
+        _ring(c, cx, 118, 40, g["score"], g["color"])
+        _text(d, (cx, 118), g["letter"], 30, WHITE, "mm", "head")
+        _text(d, (cx, 184), g["label"], 13, _mix(g["color"], WHITE, 0.35), "mm", "head")
+        _text(d, (cx, 206), f"{g['score']:.0f}/100" if g["score"] is not None else "NO DATA", 12, MUTED, "mm")
+    _column(c, (50, 270, 540, 856), "STRENGTHS", "BEST AGAINST ALL PLAYERS", STRENGTH_COLOR, report["strong"], "s",
+            "NO CLEAR STRENGTH YET")
+    _column(c, (560, 270, 1050, 856), "WEAKNESSES", "WEAKEST AGAINST ALL PLAYERS", WEAKNESS_COLOR, report["weak"], "w",
+            "NO CLEAR WEAKNESS")
+    _numbers_tile(c, (1070, 270, 1550, 856), report)
+    _footer(c, f"GOOGLI MANAGER  •  PLAYER SCOUTING  •  {who['name']}", data.get("guild"))
+    return c.image
+
+
+def _render_player_compare(data):
+    A, B = data["a"], data["b"]
+    ra, rb = A["report"], B["report"]
+    col_a, col_b = pick_sides(A.get("color"), B.get("color"))
+    c = _Canvas(col_a, col_b)
+    c.card((50, 22, 1550, 262), 26, 165)
+    c.card((50, 282, 1550, 800), 26, 150)
+    c.seal()
+    d = c.d
+    for who, rep, left, accent in ((A, ra, True, c.a), (B, rb, False, c.b)):
+        ax = 80 if left else 1550 - 30 - 150
+        ring = _round_image(_open(who.get("avatar")), 130, ring=accent, ring_w=5, initial=who["name"][:1])
+        _paste(c.image, ring, (ax, 40))
+        tx = ax + 150 if left else ax - 20
+        anchor = "la" if left else "ra"
+        name = who["name"].upper()
+        size = _fit(d, name, 430, 44, 22, "head")
+        _title(d, (tx, 48), _clip(d, name, 430, size, "head"), size, WHITE, anchor, "head")
+        _text(d, (tx, 108), f"{rep['role']}  •  {(who.get('team') or 'FREE AGENT').upper()}", 14, MUTED, anchor)
+        _text(d, (tx, 134), _clip(d, rep["verdict"], 430, 14), 14, _mix(MUTED, WHITE, 0.35), anchor)
+        best = rep["strong"][0]["label"] if rep["strong"] else "—"
+        _text(d, (tx, 168), f"BEST AT  {best}", 13, STRENGTH_COLOR, anchor, "bold")
+        worst = rep["weak"][0]["label"] if rep["weak"] else "—"
+        _text(d, (tx, 192), f"WEAKEST AT  {worst}", 13, WEAKNESS_COLOR, anchor, "bold")
+    _title(d, (800, 100), "VS", 46, MUTED, "mm", "head")
+    # grade comparison between the two heroes
+    for i, label in enumerate(("BATTING", "BOWLING", "FIELDING")):
+        cx = 800 + (i - 1) * 150
+        ga, gb = ra["grades"][i]["score"], rb["grades"][i]["score"]
+        _text(d, (cx, 164), label, 12, MUTED, "mm", "bold")
+        for val, other, dx, col in ((ga, gb, -34, c.a), (gb, ga, 34, c.b)):
+            if val is None:
+                _text(d, (cx + dx, 196), "—", 28, DIM, "mm", "head")
+            else:
+                _text(d, (cx + dx, 196), f"{val:.0f}", 30, col if other is None or val >= other else MUTED, "mm", "head")
+        _text(d, (cx, 196), "|", 22, EDGE, "mm")
+    x1, y1, x2, y2 = 50, 282, 1550, 800
+    _text(d, (x1 + 34, y1 + 20), "WHO IS STRONGER AT WHAT  (LEAGUE PERCENTILE, BIGGER BAR = BETTER)", 14, MUTED, "la", "bold")
+    keys = [k for k, *_r in PLAYER_METRICS]
+    step = (y2 - y1 - 120) // len(keys)
+    wins_a = wins_b = 0
+    mid = (x1 + x2) // 2
+    for i, key in enumerate(keys):
+        y = y1 + 62 + i * step
+        label = PLAYER_META[key][0]
+        va, vb = ra["scores"].get(key), rb["scores"].get(key)
+        _text(d, (mid, y + 12), label, 15, MUTED, "mm", "head")
+        lead = 0
+        if va and vb and abs(va["pct"] - vb["pct"]) >= 1:
+            lead = 1 if va["pct"] > vb["pct"] else -1
+        wins_a += lead > 0
+        wins_b += lead < 0
+        for side, v, col, left in ((0, va, c.a, True), (1, vb, c.b, False)):
+            win = (lead > 0) == left and lead != 0
+            if v is None:
+                _text(d, (x1 + 34 if left else x2 - 34, y + 12), "NO DATA", 14, DIM, "lm" if left else "rm", "bold")
+                continue
+            bx1, bx2 = (x1 + 34, mid - 150) if left else (mid + 150, x2 - 34)
+            d.rounded_rectangle((bx1, y + 6, bx2, y + 20), radius=7, fill=TRACK)
+            w = int((bx2 - bx1) * max(2, min(100, v["pct"])) / 100)
+            fill = col if win or lead == 0 else _mix(col, _INK, 0.55)
+            if left:
+                d.rounded_rectangle((bx2 - w, y + 6, bx2, y + 20), radius=7, fill=fill)
+            else:
+                d.rounded_rectangle((bx1, y + 6, bx1 + w, y + 20), radius=7, fill=fill)
+            _text(d, (bx1 if left else bx2, y + 26), v["value"], 15, WHITE if win else MUTED,
+                  "la" if left else "ra", "head")
+            tag = f"TOP {max(1, round(100 - v['pct']))}%" if v["pct"] >= 50 else f"BOTTOM {max(1, round(v['pct']))}%"
+            _text(d, (bx2 if left else bx1, y + 26), tag, 12,
+                  col if win else MUTED, "ra" if left else "la", "bold")
+    text = (f"EVEN  {wins_a} – {wins_b}" if wins_a == wins_b else
+            f"{(A if wins_a > wins_b else B)['name'].upper()} IS STRONGER  {max(wins_a, wins_b)} – {min(wins_a, wins_b)}")
+    text = _clip(d, text, 700, 20)
+    pw = int(d.textlength(text, font=font(20))) + 44
+    _pill(d, 800 - pw // 2, 810, text, 20, fill=(c.a if wins_a > wins_b else c.b) if wins_a != wins_b else None,
+          fg=_INK if wins_a != wins_b else WHITE, outline=None if wins_a != wins_b else (60, 80, 120), pad=22, h=40)
+    _footer(c, f"GOOGLI MANAGER  •  STRENGTHS  •  {A['name']} vs {B['name']}"[:90], data.get("guild"))
+    return c.image
+
+
+def render_player_strengths(data):
+    return _png(_render_player(data))
+
+
+def render_player_compare(data):
+    return _png(_render_player_compare(data))
+
+
 def render_strengths(data):
     """data -> PNG bytes."""
     return _png(_render(data))
@@ -656,13 +901,68 @@ class Strengths(commands.Cog):
                 member = None
         return uid, await fetch_avatar(self.bot, member)
 
+    async def _player_mode(self, ctx, text):
+        """+strengths @player (one player's strengths) or +strengths @a @b (two players compared).
+        Returns True when it handled the command."""
+        ins = self.bot.get_cog("Insights")
+        words = text.strip().lower()
+        if ins is None or not (re.search(r"<@!?\d+>", text) or words in ("me", "my", "myself")):
+            return False
+        usage = "Use `+strengths @player` or `+strengths @player | @player`."
+        if words in ("me", "my", "myself"):
+            ids = [ctx.author.id]
+        else:
+            ids = await ins.members_from(ctx, text, usage, need=1, max_n=2)
+            if not ids:
+                return True
+        if len(ids) == 2 and ids[0] == ids[1]:
+            await ctx.reply("Pick two different players.", mention_author=False)
+            return True
+        wait = on_cooldown(ctx.author.id)
+        if wait:
+            await ctx.reply(f"Please wait {wait:.0f}s before drawing another image.", mention_author=False)
+            return True
+        loading = await ctx.reply("⏳ Scouting the player...", mention_author=False)
+        try:
+            rated = ins.rated_all(ctx.guild.id)
+            everyone = {uid: player_numbers(p) for uid, p in rated.items() if p["matches"] or p["catches"]}
+            people = []
+            for uid in ids:
+                report = player_scout(everyone, uid)
+                who = await ins.person(ctx.guild, uid, rated)
+                if report is None:
+                    await loading.edit(content=f"**{discord.utils.escape_markdown(who['name'])}** has too few recorded "
+                                               "matches to scout yet.")
+                    return True
+                who["report"] = report
+                people.append(who)
+            if len(people) == 1:
+                data = {"who": people[0], "report": people[0]["report"], "guild": ctx.guild.name}
+                png = await render_png(render_player_strengths, data)
+            else:
+                data = {"a": people[0], "b": people[1], "guild": ctx.guild.name}
+                png = await render_png(render_player_compare, data)
+            await loading.edit(content=None, attachments=[discord.File(io.BytesIO(png), filename="strengths.png")])
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"[strengths] player mode failed: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                await loading.edit(content="I couldn't build that scouting report. Check the bot logs.")
+            except Exception:
+                pass
+        return True
+
+
     @commands.command(name="strengths", aliases=["scout", "scouting"])
     @commands.guild_only()
     async def strengths(self, ctx, *, team: str = ""):
-        """Scouting report: strengths, weaknesses, what the team depends on, key player warning."""
+        """Scouting report: +strengths (your team), +strengths <team>, +strengths @player, +strengths @a @b."""
         compare = self.compare
         if compare is None:
             await ctx.reply("The team system isn't loaded right now.", mention_author=False)
+            return
+        if await self._player_mode(ctx, team):
             return
         core = compare.core
         if team.strip():
