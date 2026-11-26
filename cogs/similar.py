@@ -1,13 +1,18 @@
 """+similar [@player]: who plays most like this player? One file: matching, drawing and command.
 
 How the match works
-  Every player with at least 3 matches gets eight per-match numbers: runs, batting average, strike
-  rate, wickets, economy, bowling average, catches and fantasy points (per match, except the
-  averages and rates). Each number is standardised against the whole league, so a difference of 1.0
-  means the same thing for runs as for wickets, and the distance between two players is a weighted
-  average of those differences. Similarity = 100 * exp(-0.85 * distance).
-  Players who never bowl get the league-median economy / bowling average, so two pure batters are
-  close on the bowling side too (both have 0 wickets).
+  Every player with at least 3 matches is described by nine numbers in three blocks: BATTING (runs per
+  match, batting average, strike rate, balls faced per match), BOWLING (wickets per match, economy,
+  bowling average, balls bowled per match) and FIELDING (catches per match), plus one overall-impact
+  number (fantasy per match, small weight).
+  Each number is turned into the player's percentile among all players, so a few stars cannot stretch
+  the scale and a difference of 0.1 means the same for runs as for wickets. Numbers from few matches are
+  pulled towards the middle (a 3-match average is not trusted like a 12-match one). A player who never
+  bats or never bowls scores 0 in that block - "does not bowl" is part of his style, not a missing value.
+  The distance is the weighted root-mean-square percentile gap, block by block (batting 40%, bowling 40%,
+  fielding 10%, impact 10%), so every block counts by its own weight and cannot be diluted by the others.
+  Similarity is the distance relative to how far apart two typical players of this server are:
+  100 * exp(-1.2 * distance / typical distance). Identical = 100, a typical pair is about 30.
 
 The card shows the best match in the league, the closest TEAMMATE and the closest RIVAL (other team),
 a side-by-side bar chart of the numbers and the playing traits the two share.
@@ -16,7 +21,7 @@ The numbers come from the stats index CompareTeams already keeps (no extra datab
 import asyncio
 import io
 import math
-from statistics import median, pstdev, quantiles
+from statistics import quantiles
 
 import discord
 from discord.ext import commands
@@ -31,21 +36,32 @@ from .versus_image import _Canvas, _footer, _png, _title, pick_sides
 
 MIN_MATCHES = 3          # a player needs this many matches to be compared
 MIN_SUBJECT = 2          # ... except the player you ask about
-DECAY = 0.85
 
-# key, label, weight (how much it counts in the distance), text format
+# key, label, text format (the labels and formats are used by the card)
 FEATURES = [
-    ("runs_pm", "RUNS / MATCH", 1.0, "{:.1f}"),
-    ("bat_avg", "BATTING AVERAGE", 1.0, "{:.1f}"),
-    ("sr", "STRIKE RATE", 1.0, "{:.1f}"),
-    ("wk_pm", "WICKETS / MATCH", 1.2, "{:.2f}"),
-    ("econ", "ECONOMY", 0.8, "{:.2f}"),
-    ("bowl_avg", "BOWLING AVERAGE", 0.6, "{:.1f}"),
-    ("catch_pm", "CATCHES / MATCH", 0.8, "{:.2f}"),
-    ("fant_pm", "FANTASY / MATCH", 1.2, "{:.1f}"),
+    ("runs_pm", "RUNS / MATCH", "{:.1f}"),
+    ("bat_avg", "BATTING AVERAGE", "{:.1f}"),
+    ("sr", "STRIKE RATE", "{:.1f}"),
+    ("wk_pm", "WICKETS / MATCH", "{:.2f}"),
+    ("econ", "ECONOMY", "{:.2f}"),
+    ("bowl_avg", "BOWLING AVERAGE", "{:.1f}"),
+    ("catch_pm", "CATCHES / MATCH", "{:.2f}"),
+    ("fant_pm", "FANTASY / MATCH", "{:.1f}"),
 ]
+# what the distance uses: key, block, True when a LOWER number is better, True when the number is about
+# what a player does (workload) and not how well, so it is not pulled towards the middle
+MODEL = [
+    ("runs_pm", "bat", False, False), ("bat_avg", "bat", False, False), ("sr", "bat", False, False),
+    ("bf_pm", "bat", False, True),
+    ("wk_pm", "bowl", False, False), ("econ", "bowl", True, False), ("bowl_avg", "bowl", True, False),
+    ("bb_pm", "bowl", False, True),
+    ("catch_pm", "field", False, False), ("fant_pm", "impact", False, False),
+]
+BLOCK_WEIGHT = {"bat": 0.40, "bowl": 0.40, "field": 0.10, "impact": 0.10}
+SHRINK = 2.0             # matches' worth of "no information" a player's numbers are blended with
+CURVE = 1.2
 SHOWN = ["runs_pm", "bat_avg", "sr", "wk_pm", "catch_pm", "fant_pm"]     # rows of the bar chart
-NAMES = {k: (label, fmt) for k, label, _w, fmt in FEATURES}
+NAMES = {k: (label, fmt) for k, label, fmt in FEATURES}
 
 # trait name, feature, which end of the league counts ("hi" = top quarter, "lo" = best quarter = lowest)
 TRAITS = [
@@ -61,16 +77,50 @@ TRAITS = [
 # =========================================================================== matching (no Discord, no images)
 
 def _raw(p):
-    """The eight per-match numbers of a profile; economy / bowling average are None if he never bowls."""
+    """The per-match numbers of a profile; economy / bowling average are None if he never bowls."""
     m = max(1, p["matches"])
-    bowls = p["wickets"] > 0 or p["economy"] is not None
+    bowls = p["balls_bowled"] > 0
     return {
         "runs_pm": p["runs"] / m, "bat_avg": p["bat_avg"] or 0.0, "sr": p["strike_rate"] or 0.0,
         "wk_pm": p["wickets"] / m,
         "econ": p["economy"] if (bowls and p["economy"] is not None) else None,
         "bowl_avg": p["bowl_avg"] if (bowls and p["bowl_avg"] is not None) else None,
         "catch_pm": p["catches"] / m, "fant_pm": p["fantasy"] / m,
+        "bf_pm": p["balls_faced"] / m, "bb_pm": p["balls_bowled"] / m,
     }
+
+
+def _rank(sorted_values, v):
+    """Percentile (0..1) of v among the sorted values; ties share the middle."""
+    from bisect import bisect_left, bisect_right
+    n = len(sorted_values)
+    if not n:
+        return 0.5
+    return (bisect_left(sorted_values, v) + bisect_right(sorted_values, v)) / (2.0 * n)
+
+
+def _vector(p, r, tables):
+    """Percentile vector of one player (same order as MODEL)."""
+    m = max(1, p["matches"])
+    bats, bowls = p["balls_faced"] > 0, p["balls_bowled"] > 0
+    out = []
+    for key, block, lower_better, fact in MODEL:
+        v = r[key]
+        if block == "bat" and not bats:
+            u = 0.0
+        elif block == "bowl" and not bowls:
+            u = 0.0
+        elif v is None:
+            u = 0.0                                   # bowls but never took a wicket: no bowling average
+        else:
+            u = _rank(tables[key], v)
+            if lower_better:
+                u = 1.0 - u
+            if not fact:                              # few matches -> less trust: pull towards the middle
+                n = p["bat_inn"] if block == "bat" else m
+                u = 0.5 + (u - 0.5) * n / (n + SHRINK)
+        out.append(u)
+    return out
 
 
 def _quartile(values, upper):
@@ -88,38 +138,55 @@ def build_model(index, totals_fn, fantasy_fn):
         profiles[uid] = xi_engine.profile(uid, rows, caught, dropped, totals_fn, fantasy_fn)
         raw[uid] = _raw(profiles[uid])
     eligible = [u for u, p in profiles.items() if p["matches"] >= MIN_MATCHES]
-    fill = {}
-    for key in ("econ", "bowl_avg"):
-        seen = [raw[u][key] for u in eligible if raw[u][key] is not None]
-        fill[key] = median(seen) if seen else 0.0
-    vec = {u: [(raw[u][k] if raw[u][k] is not None else fill[k]) for k, *_ in FEATURES] for u in raw}
-    spread = []
-    for i in range(len(FEATURES)):
-        col = [vec[u][i] for u in eligible] or [0.0]
-        spread.append((sum(col) / len(col), pstdev(col) or 1.0))
-    z = {u: [(v - spread[i][0]) / spread[i][1] for i, v in enumerate(vec[u])] for u in vec}
+    tables = {}
+    for key, block, _lb, _fact in MODEL:
+        vals = []
+        for u in eligible:
+            p = profiles[u]
+            if (block == "bat" and p["balls_faced"] <= 0) or (block == "bowl" and p["balls_bowled"] <= 0):
+                continue
+            if raw[u][key] is not None:
+                vals.append(raw[u][key])
+        tables[key] = sorted(vals)
+    vec = {u: _vector(profiles[u], raw[u], tables) for u in raw}
     limits = {}
     for name, key, side in TRAITS:
         col = [raw[u][key] for u in eligible if raw[u][key] is not None and (key != "wk_pm" or raw[u][key] > 0)]
         limits[name] = (_quartile(col, side == "hi") if col else None, key, side)
-    return {"profiles": profiles, "raw": raw, "z": z, "eligible": eligible, "limits": limits,
-            "pool": xi_engine.Pool(list(profiles.values()))}
+    model = {"profiles": profiles, "raw": raw, "vec": vec, "eligible": eligible, "limits": limits,
+             "pool": xi_engine.Pool(list(profiles.values())), "typical": 1.0}
+    model["typical"] = _typical_distance(model)
+    return model
+
+
+def _typical_distance(model, sample=60):
+    """Median distance between two eligible players: the yardstick that turns a distance into a percentage."""
+    people = model["eligible"]
+    if len(people) > sample:
+        step = len(people) / sample
+        people = [people[int(i * step)] for i in range(sample)]
+    ds = sorted(distance(model, a, b) for i, a in enumerate(people) for b in people[i + 1:])
+    return max(0.05, ds[len(ds) // 2]) if ds else 1.0
 
 
 def distance(model, a, b):
-    weights = [w for _k, _l, w, _f in FEATURES]
-    za, zb = model["z"][a], model["z"][b]
-    return math.sqrt(sum(w * (x - y) ** 2 for w, x, y in zip(weights, za, zb)) / sum(weights))
+    """Weighted root-mean-square percentile gap, block by block (each block counts by its own weight)."""
+    va, vb = model["vec"][a], model["vec"][b]
+    totals, counts = {}, {}
+    for (key, block, _lb, _fact), x, y in zip(MODEL, va, vb):
+        totals[block] = totals.get(block, 0.0) + (x - y) ** 2
+        counts[block] = counts.get(block, 0) + 1
+    return math.sqrt(sum(BLOCK_WEIGHT[b] * totals[b] / counts[b] for b in totals))
 
 
-def similarity(dist):
-    return round(100 * math.exp(-DECAY * dist))
+def similarity(model, dist):
+    return max(0, min(100, round(100 * math.exp(-CURVE * dist / model["typical"]))))
 
 
 def neighbours(model, uid):
     """[(similarity %, uid)] for every other eligible player, most similar first."""
     ranked = sorted((distance(model, uid, o), o) for o in model["eligible"] if o != uid)
-    return [(similarity(d), o) for d, o in ranked]
+    return [(similarity(model, d), o) for d, o in ranked]
 
 
 def traits(model, uid):
