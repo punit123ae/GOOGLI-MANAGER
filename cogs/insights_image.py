@@ -139,76 +139,132 @@ def render_compare_players(data):
 
 # =========================================================================== +form
 
+def _line_chart(c, box, points, labels, baseline, color):
+    """Fantasy points of the last matches (oldest -> newest) as a glowing line with an average marker."""
+    from PIL import Image, ImageDraw
+    d = c.d
+    x1, y1, x2, y2 = box
+    n = len(points)
+    if not n:
+        return
+    lo = min(points + [baseline, 0])
+    hi = max(points + [baseline, 1])
+    span = (hi - lo) or 1
+    xs = [x1 + (x2 - x1) * (i + 0.5) / n for i in range(n)] if n > 1 else [(x1 + x2) / 2]
+    ys = [y2 - (v - lo) / span * (y2 - y1) for v in points]
+    by = y2 - (baseline - lo) / span * (y2 - y1)
+    for x in range(int(x1), int(x2), 14):                                   # dashed season-average line
+        d.line((x, by, x + 7, by), fill=(150, 165, 195), width=2)
+    _text(d, (x2, by - 18), f"SEASON AVG {baseline:.0f}", 12, MUTED, "ra", "bold")
+    s = 3
+    w, h = int(x2 - x1 + 80), int(y2 - y1 + 80)
+    layer = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
+    g = ImageDraw.Draw(layer)
+    pts = [((x - x1 + 40) * s, (y - y1 + 40) * s) for x, y in zip(xs, ys)]
+    if len(pts) > 1:
+        poly = pts + [(pts[-1][0], (y2 - y1 + 40) * s), (pts[0][0], (y2 - y1 + 40) * s)]
+        g.polygon(poly, fill=color + (46,))
+        g.line(pts, fill=color + (255,), width=5 * s, joint="curve")
+    for x, y in pts:
+        g.ellipse((x - 9 * s, y - 9 * s, x + 9 * s, y + 9 * s), fill=(10, 16, 30, 255), outline=color + (255,), width=3 * s)
+    layer = layer.resize((w, h), Image.Resampling.LANCZOS)
+    c.image.paste(layer, (int(x1 - 40), int(y1 - 40)), layer)
+    for x, y, v, lab in zip(xs, ys, points, labels):
+        _text(d, (x, y - 28), f"{v:.0f}", 20, WHITE, "mm", "head")
+        _text(d, (x, y2 + 22), lab, 12, MUTED, "mm", "bold")
+
+
 def render_form(data):
+    from .awards import _glow_text, _halo, _tile_glass
+    from .strengths import _ring
     who, p = data["who"], data["who"]["p"]
     c = _canvas(who.get("color"), None)
     matches = data["matches"]                      # newest first, each {team, opp, bat, bowl, field, fantasy}
-    boxes = [(50 + i * 304, 310, 50 + i * 304 + 284, 662) for i in range(5)]
-    c.card((50, 24, 1550, 286), 26)
-    for b in boxes:
-        c.card(b, 22)
-    c.card((50, 678, 1550, 848), 24)
-    c.seal()
-    d = c.d
-    _avatar(c, who, 170, (80, 62), c.a)
-    _name(d, who["name"], 300, 58, 620, 54)
-    _team_pill(d, 300, 130, who.get("team"), c.a)
-    _text(d, (300, 180), f"{_role_text(p)}  •  {p['style'].upper()}", 16, MUTED)
-    _text(d, (300, 206), f"{p['matches']} MATCHES  •  LAST {p['r_matches']} COUNTED", 15, DIM)
+    base = p["fantasy"] / max(1, p["matches"])
     delta = p.get("form_delta", 0)
     color = HOT if delta >= 12 else COLD if delta <= -12 else (150, 165, 195)
     word = "HOT" if delta >= 12 else "COLD" if delta <= -12 else "STEADY"
     mark = "▲" if delta >= 12 else "▼" if delta <= -12 else "●"
-    _text(d, (1470, 48), "FORM RATING", 15, MUTED, "ra")
-    _title(d, (1470, 62), f"{p['form']:.0f}", 120, _rating_color(p["form"]), "ra", "head")
-    _pill(d, 1470 - 190, 196, f"{mark} {word}", 22, fill=color, fg=INK, pad=22, h=44)
-    _text(d, (1470, 256), f"{delta:+.0f} vs season fantasy rating", 14, DIM, "ra")
-    _text(d, (80, 256), "NEWEST  →  OLDEST", 13, DIM)
+    boxes = [(50 + i * 304, 462, 50 + i * 304 + 284, 722) for i in range(5)]
+    head, trend, strip = (50, 22, 1550, 232), (50, 248, 1550, 446), (50, 738, 1550, 856)
+    for b in (head, trend, strip, *boxes):
+        c.card(b, 26, 160 if b in (head, trend, strip) else 150)
+    c.seal()
+    d = c.d
 
-    top = max([abs(m["fantasy"]) for m in matches] + [1])
+    # ---- header
+    _tile_glass(c, head, color)
+    _halo(c, 80 + 85, 52 + 85, 85, c.a)
+    _avatar(c, who, 170, (80, 52), c.a)
+    _name(d, who["name"], 280, 52, 620, 54)
+    _team_pill(d, 280, 124, who.get("team"), c.a)
+    _text(d, (280, 174), f"{_role_text(p)}  •  {p['style'].upper()}", 16, MUTED)
+    _text(d, (280, 200), f"{p['matches']} MATCHES  •  LAST {p['r_matches']} COUNTED", 14, DIM)
+    gx, gy = 1340, 116
+    _halo(c, gx, gy, 64, _rating_color(p["form"]))
+    _ring(c, gx, gy, 64, min(100, p["form"]), _rating_color(p["form"]), width=12)
+    _glow_text(c, (gx - d.textlength(f"{p['form']:.0f}", font=font(52, "head")) / 2, gy - 36), f"{p['form']:.0f}", 52,
+               _rating_color(p["form"]))
+    _text(d, (gx, gy + 88), "FORM RATING", 12, MUTED, "mm", "bold")
+    _pill(d, 1010, 70, f"{mark} {word}", 24, fill=color, fg=INK, pad=24, h=48)
+    _text(d, (1010, 132), f"{delta:+.0f} VS SEASON RATING", 14, MUTED)
+    _text(d, (1010, 158), f"SEASON {base:.0f} PTS / MATCH", 14, DIM)
+
+    # ---- trend
+    _tile_glass(c, trend, color)
+    d.ellipse((78, 272, 90, 284), fill=color)
+    _text(d, (104, 262), "LAST 5 TREND", 24, color, "la", "head")
+    _text(d, (104, 296), "FANTASY POINTS, OLDEST  →  NEWEST", 12, MUTED)
+    seq = list(reversed(matches))
+    _line_chart(c, (170, 328, 1430, 404), [m["fantasy"] for m in seq],
+                [_clip(d, (m["opp"] or "?").upper(), 150, 12) for m in seq], base, color)
+
+    # ---- the five matches, newest first
     for i, box in enumerate(boxes):
         x1, y1, x2, y2 = box
         if i >= len(matches):
             _text(d, ((x1 + x2) // 2, (y1 + y2) // 2), "NO MATCH", 18, DIM, "mm")
             continue
         m = matches[i]
+        diff = m["fantasy"] - base
+        tone = HOT if m["fantasy"] >= base * 1.15 + 1 else COLD if m["fantasy"] <= base * 0.85 - 1 else (255, 206, 90)
+        _tile_glass(c, box, tone)
         room = x2 - x1 - 40
-        _text(d, (x1 + 20, y1 + 16), _clip(d, (m["team"] or "").upper(), room, 12), 12, color if i == 0 else MUTED, "la", "bold")
-        vs = _clip(d, "vs " + (m["opp"] or "?").upper(), room, 20, "head")
-        _text(d, (x1 + 20, y1 + 36), vs, 20, WHITE, "la", "head")
-        d.line((x1 + 20, y1 + 70, x2 - 20, y1 + 70), fill=EDGE, width=1)
+        _text(d, (x1 + 22, y1 + 22), "LATEST" if i == 0 else f"{i + 1} MATCHES AGO", 11, tone, "la", "bold")
+        _text(d, (x1 + 22, y1 + 40), _clip(d, "vs " + (m["opp"] or "?").upper(), room, 20, "head"), 20, WHITE, "la", "head")
+        d.line((x1 + 22, y1 + 74, x2 - 22, y1 + 74), fill=EDGE, width=1)
         for j, (label, text, col) in enumerate((("BATTING", m["bat"], BAT_COLOR), ("BOWLING", m["bowl"], BOWL_COLOR),
                                                 ("FIELDING", m["field"], FIELD_COLOR))):
-            y = y1 + 82 + j * 62
-            _text(d, (x1 + 20, y), label, 12, MUTED)
-            _text(d, (x1 + 20, y + 16), text, 26, col if text not in ("DNB", "DNF") else DIM, "la", "head")
-        _text(d, (x2 - 20, y1 + 82), "FANTASY", 12, MUTED, "ra")
-        _text(d, (x2 - 20, y1 + 98), f"{m['fantasy']:.0f}", 26, WHITE, "ra", "head")
-        d.rounded_rectangle((x1 + 20, y2 - 24, x2 - 20, y2 - 14), radius=5, fill=TRACK)
-        w = int((x2 - x1 - 40) * max(0, m["fantasy"]) / top)
-        if w > 0:
-            d.rounded_rectangle((x1 + 20, y2 - 24, x1 + 20 + max(10, w), y2 - 14), radius=5, fill=color)
+            y = y1 + 86 + j * 42
+            _text(d, (x1 + 22, y), label, 11, MUTED)
+            _text(d, (x1 + 22, y + 14), _clip(d, text, room, 20, "head"), 20, col if text not in ("DNB", "DNF") else DIM, "la", "head")
+        _glow_text(c, (x1 + 22, y1 + 206), f"{m['fantasy']:.0f}", 34, tone)
+        _text(d, (x2 - 22, y1 + 214), "FANTASY", 10, MUTED, "ra")
+        _text(d, (x2 - 22, y1 + 228), f"{diff:+.0f} VS AVG", 12, tone, "ra", "bold")
 
+    # ---- season vs last 5
+    _tile_glass(c, strip, c.a)
+    _text(d, (80, 756), "SEASON  →  LAST 5", 14, MUTED, "la", "bold")
     tiles = [
         ("RUNS / MATCH", p["runs"] / max(1, p["matches"]) if p["bat_inn"] else None, p["r_rpm"], 1, True),
         ("BAT AVERAGE", p["bat_avg"], p["r_avg"], 1, True),
         ("WKTS / MATCH", p["wickets"] / max(1, p["matches"]) if p["balls_bowled"] >= 6 else None, p["r_wpm"], 2, True),
         ("ECONOMY", p["economy"], p["r_econ"], 2, False),
     ]
-    _text(d, (80, 694), "SEASON  →  LAST 5", 15, MUTED)
     for i, (label, season, recent, dec, high) in enumerate(tiles):
         cx = 80 + i * 360
-        _text(d, (cx, 724), label, 14, MUTED)
+        _text(d, (cx, 782), label, 13, MUTED)
         sv = "—" if season is None else f"{season:.{dec}f}"
         rv = "—" if recent is None else f"{recent:.{dec}f}"
-        _text(d, (cx, 748), sv, 32, MUTED, "la", "head")
-        sw = int(d.textlength(sv, font=font(32, "head")))
-        _text(d, (cx + sw + 14, 756), "→", 26, DIM, "la", "head")
+        _text(d, (cx, 802), sv, 28, MUTED, "la", "head")
+        sw = int(d.textlength(sv, font=font(28, "head")))
+        _text(d, (cx + sw + 12, 808), "→", 22, DIM, "la", "head")
         better = None if season is None or recent is None else (recent > season if high else recent < season)
         col = WHITE if better is None else (HOT if better else COLD)
-        _text(d, (cx + sw + 52, 744), rv, 38, col, "la", "head")
+        _text(d, (cx + sw + 44, 798), rv, 34, col, "la", "head")
         if better is not None and recent != season:
-            _text(d, (cx, 802), ("▲ IMPROVING" if better else "▼ DROPPING"), 13, col, "la", "bold")
+            _text(d, (cx + sw + 44 + int(d.textlength(rv, font=font(34, "head"))) + 12, 818),
+                  "▲" if better else "▼", 14, col, "la", "bold")
     _footer(c, f"GOOGLI MANAGER  •  PLAYER FORM  •  {who['name']}"[:90], data.get("guild"))
     return _png(c.image)
 
