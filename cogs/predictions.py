@@ -207,6 +207,8 @@ class Predictions(commands.Cog):
         db.execute("CREATE TABLE IF NOT EXISTS predict_settings (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS predict_global_state (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1)")
         db.execute("INSERT OR IGNORE INTO predict_global_state (id, enabled) VALUES (1, 1)")
+        db.execute("CREATE TABLE IF NOT EXISTS predict_results (guild_id INTEGER NOT NULL, number INTEGER NOT NULL, result TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, number))")
+        db.execute("CREATE TABLE IF NOT EXISTS predict_scores (guild_id INTEGER NOT NULL, number INTEGER NOT NULL, user_id INTEGER NOT NULL, points INTEGER NOT NULL, details TEXT NOT NULL, PRIMARY KEY (guild_id, number, user_id))")
         db.commit()
 
     @property
@@ -435,6 +437,101 @@ class Predictions(commands.Cog):
                         "Everyone can now predict it with `+predict`.", mention_author=False, allowed_mentions=none)
 
 
+
+    @commands.command(name="predictresult", aliases=["setpredictresult", "predresult"])
+    @commands.guild_only()
+    async def predictresult(self, ctx, *, text: str = ""):
+        """Record the official prediction result and calculate points."""
+        if not await owner_or_whitelisted(ctx, command_name="predictresult", app_owner=True):
+            return await ctx.reply("Only the bot owner or a whitelisted role can enter prediction results.", mention_author=False)
+        match = re.match(r"^#?(\\d+)\\s+(.*)$", text.strip())
+        if not match:
+            return await ctx.reply("Usage: +predictresult <match> winner=A|B runs_a=<ID> runs_b=<ID> runs_m=<ID> wickets_a=<ID> wickets_b=<ID> wickets_m=<ID> catches_a=<ID> catches_b=<ID> catches_m=<ID> fantasy_a=<ID> fantasy_b=<ID> fantasy_m=<ID>. Player fields are optional; use Discord mentions or IDs.", mention_author=False)
+        number, raw = int(match.group(1)), match.group(2)
+        row, error = self._match(ctx.guild.id, str(number))
+        if error:
+            return await ctx.reply(error, mention_author=False)
+        team_a, team_b = self._team_by_id(row["team_a_id"]), self._team_by_id(row["team_b_id"])
+        if not team_a or not team_b:
+            return await ctx.reply("The teams for this match could not be found.", mention_author=False)
+        values = dict(re.findall(r"([a-zA-Z_]+)=([^\\s]+)", raw))
+        allowed = {"winner"} | {f"{cat}_{side}" for cat, _, _ in CATS for side in ("a", "b", "m")}
+        unknown = set(values) - allowed
+        if unknown:
+            return await ctx.reply("Unknown result field(s): " + ", ".join(sorted(unknown)), mention_author=False)
+        if "winner" not in values:
+            return await ctx.reply("You must include winner=A or winner=B.", mention_author=False)
+        winner_text = values["winner"].lower()
+        if winner_text in ("a", "0", team_a["name"].lower()):
+            winner = 0
+        elif winner_text in ("b", "1", team_b["name"].lower()):
+            winner = 1
+        else:
+            return await ctx.reply("winner must be A, B, or one of the exact team names.", mention_author=False)
+        roster_a, roster_b = set(self._roster(team_a)), set(self._roster(team_b))
+        roster_all = roster_a | roster_b
+        result = {"winner": winner}
+        for key, value in values.items():
+            if key == "winner":
+                continue
+            uid_text = re.sub(r"\\D", "", value)
+            if not uid_text:
+                return await ctx.reply(f"{key} must be a Discord user ID or mention.", mention_author=False)
+            uid = int(uid_text)
+            side = key.rsplit("_", 1)[1]
+            valid = (uid in roster_a if side == "a" else uid in roster_b if side == "b" else uid in roster_all)
+            if not valid:
+                return await ctx.reply(f"The player supplied for {key} is not in the correct match roster.", mention_author=False)
+            result[key] = uid
+        self.bot.db.execute("INSERT INTO predict_results (guild_id, number, result) VALUES (?, ?, ?) ON CONFLICT(guild_id, number) DO UPDATE SET result=excluded.result, updated_at=CURRENT_TIMESTAMP", (ctx.guild.id, number, json.dumps(result)))
+        self.bot.db.execute("UPDATE predict_matches SET closed=1 WHERE guild_id=? AND number=?", (ctx.guild.id, number))
+        picks_rows = self.bot.db.execute("SELECT user_id,picks FROM predict_picks WHERE guild_id=? AND number=?", (ctx.guild.id, number)).fetchall()
+        scored = []
+        side_of = {uid: "a" for uid in roster_a} | {uid: "b" for uid in roster_b}
+        for saved in picks_rows:
+            try:
+                picks = json.loads(saved["picks"] or "{}")
+            except (TypeError, ValueError):
+                picks = {}
+            points, details = 0, {}
+            if picks.get("winner") is not None and int(picks["winner"]) == winner:
+                points += 5
+                details["winner"] = 5
+            for cat, _, _ in CATS:
+                for side in ("a", "b", "m"):
+                    actual = result.get(f"{cat}_{side}")
+                    picked = picks.get(f"{cat}:{side}")
+                    if actual is None or picked is None:
+                        continue
+                    if int(picked) == int(actual):
+                        award = 5
+                    elif side_of.get(int(picked)) == side_of.get(int(actual)):
+                        award = 2
+                    else:
+                        award = 0
+                    points += award
+                    details[f"{cat}:{side}"] = award
+            self.bot.db.execute("INSERT INTO predict_scores (guild_id,number,user_id,points,details) VALUES (?,?,?,?,?) ON CONFLICT(guild_id,number,user_id) DO UPDATE SET points=excluded.points,details=excluded.details", (ctx.guild.id, number, int(saved["user_id"]), points, json.dumps(details)))
+            scored.append((int(saved["user_id"]), points))
+        self.bot.db.commit()
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        preview = "\\n".join(f"{i}. <@{uid}> — **{pts} pts**" for i, (uid, pts) in enumerate(scored[:10], 1)) or "No predictions were submitted for this match."
+        await ctx.reply(f"Official result saved for match #{number}; predictions are now closed.\\n\\n**Prediction points**\\n{preview}", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name="predictlb", aliases=["predictleaderboard", "predictpoints"])
+    @commands.guild_only()
+    async def predictlb(self, ctx, number: int = None):
+        """Show prediction points for a match, or cumulative points across all matches."""
+        if number is None:
+            rows = self.bot.db.execute("SELECT user_id,SUM(points) AS points,COUNT(*) AS matches FROM predict_scores WHERE guild_id=? GROUP BY user_id ORDER BY points DESC,user_id LIMIT 20", (ctx.guild.id,)).fetchall()
+            title = "Overall prediction leaderboard"
+        else:
+            rows = self.bot.db.execute("SELECT user_id,points,1 AS matches FROM predict_scores WHERE guild_id=? AND number=? ORDER BY points DESC,user_id LIMIT 20", (ctx.guild.id, number)).fetchall()
+            title = f"Prediction leaderboard • Match #{number}"
+        if not rows:
+            return await ctx.reply("No prediction points have been awarded yet.", mention_author=False)
+        lines = [f"**{i}.** <@{int(r['user_id'])}> — **{int(r['points'])} pts**" + (f" • {int(r['matches'])} matches scored" if number is None else "") for i, r in enumerate(rows, 1)]
+        await ctx.reply("**" + title + "**\\n" + "\\n".join(lines), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
     # ---------------------------------------------------------- prediction setup
     @commands.command(name="setpredictchannel", aliases=["predictsetchannel", "setpredchannel"])
     @commands.guild_only()
