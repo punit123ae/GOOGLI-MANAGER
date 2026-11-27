@@ -99,7 +99,7 @@ class _Canvas:
 
     def png(self):
         out = io.BytesIO()
-        self.image.save(out, "PNG", compress_level=3)
+        self.image.save(out, "PNG", compress_level=1)
         return out.getvalue()
 
 
