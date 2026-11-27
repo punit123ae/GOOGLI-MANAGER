@@ -495,10 +495,8 @@ class Predictions(commands.Cog):
         scored = []
         rank_positions = {}
         for cat, _, _ in CATS:
-            ranked_a, _ = self._ranked_roster(ctx.guild.id, team_a, cat)
-            ranked_b, _ = self._ranked_roster(ctx.guild.id, team_b, cat)
-            scores_a = self._ranked_roster(ctx.guild.id, team_a, cat)[1]
-            scores_b = self._ranked_roster(ctx.guild.id, team_b, cat)[1]
+            ranked_a, scores_a = self._ranked_roster(ctx.guild.id, team_a, cat)
+            ranked_b, scores_b = self._ranked_roster(ctx.guild.id, team_b, cat)
             ranked_match = sorted(
                 [(uid, score) for uid, score in scores_a.items()] +
                 [(uid, score) for uid, score in scores_b.items()],
