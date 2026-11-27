@@ -280,7 +280,7 @@ def render_potd_fallback(data):
     d.text((cx, 1372), "GOOGLI MANAGER", font=_font(16, "head"), fill=(190, 214, 238, 200), anchor="mm")
 
     out = io.BytesIO()
-    img.convert("RGB").save(out, "PNG", optimize=False)
+    img.convert("RGB").save(out, "PNG", optimize=False, compress_level=1)
     return out.getvalue()
 
 
@@ -387,5 +387,5 @@ def render_potd(data):
         d.text((mx, by1 + 78), str(value), font=_fit_pf(d, str(value), bx2 - bx1 - 60, 50, 24), fill=WHITE, anchor="mm")
 
     out = io.BytesIO()
-    img.convert("RGB").save(out, "PNG")
+    img.convert("RGB").save(out, "PNG", optimize=False, compress_level=1)
     return out.getvalue()
