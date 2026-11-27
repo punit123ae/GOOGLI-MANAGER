@@ -33,6 +33,14 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.reactions = True
+# Events nothing in this bot listens to; each one is a stream of packets to decode on a 25% CPU host.
+intents.typing = False
+intents.voice_states = False
+intents.invites = False
+intents.webhooks = False
+intents.integrations = False
+intents.scheduled_events = False
+intents.presences = False
 
 
 SYNC_HASH_FILE = BASE_DIR / ".command_sync_hash"
@@ -145,6 +153,9 @@ bot = GoogIManagerBot(
 bot.db = sqlite3.connect(DB_FILE)
 bot.db.row_factory = sqlite3.Row
 bot.db.execute("PRAGMA foreign_keys = ON")
+bot.db.execute("PRAGMA cache_size = -4000")      # 4 MB page cache instead of letting it grow
+bot.db.execute("PRAGMA mmap_size = 0")           # mapped DB pages would count against the RAM limit
+bot.db.execute("PRAGMA temp_store = FILE")       # big sorts go to disk, not memory
 
 
 def initialize_database():
@@ -264,6 +275,14 @@ async def on_interaction(interaction):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    if not getattr(bot, "_gc_tuned", False):
+        # Everything loaded so far lives for the whole run: park it so garbage collections skip it
+        # (less CPU), and collect the young generation less often.
+        import gc
+        gc.collect()
+        gc.freeze()
+        gc.set_threshold(2000, 20, 20)
+        bot._gc_tuned = True
 
 
 

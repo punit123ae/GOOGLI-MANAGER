@@ -1,6 +1,6 @@
 """Keeps the bot's memory low on small hosts.
 
-Every 2 minutes: garbage-collect and give freed memory back to the system (the same trim that
+Every 5 minutes: garbage-collect and give freed memory back to the system (the same trim that
 runs after each drawn image). When more than 10 MB comes back, one line is printed so you can
 see it in the console. Nothing here has commands.
 """
@@ -28,9 +28,11 @@ class MemoryTrim(commands.Cog):
     def cog_unload(self):
         self.loop.cancel()
 
-    @tasks.loop(minutes=2)
+    @tasks.loop(minutes=5)
     async def loop(self):
         before = _rss_mb()
+        if before is not None and before < 120:      # small already: a full collection would only cost CPU
+            return
         trim_memory()
         after = _rss_mb()
         if before is not None and after is not None and before - after >= 10:
