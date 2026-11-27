@@ -32,7 +32,7 @@ def _team_block(c, cx, side, picked, undecided):
         _pill(d, cx - 70, 52, "WINNER PICK", 13, fill=GOLD, fg=_INK, pad=16, h=28)
 
 
-def _pick_row(c, y, x1, x2, label, color, uid, people, big=False):
+def _pick_row(c, y, x1, x2, label, color, uid, people, big=False, ai_pick=False):
     d = c.d
     _pill(d, x1 + 24, y + 14, label, 11, fill=_mix(color, _INK, 0.72), fg=WHITE, outline=color, pad=11, h=24)
     if uid is None:
@@ -46,6 +46,8 @@ def _pick_row(c, y, x1, x2, label, color, uid, people, big=False):
     name = (who.get("name") or "UNKNOWN").upper()
     size = _fit(d, name, 360, 24 if not big else 26, 14, "head")
     _text(d, (nx, y + 26), _clip(d, name, 360, size, "head"), size, WHITE if not big else GOLD, "lm", "head")
+    if ai_pick:
+        _pill(d, x2 - 112, y + 14, "AI PICK", 10, fill=GOLD, fg=_INK, pad=10, h=24)
 
 
 def render_prediction(data):
@@ -79,14 +81,17 @@ def render_prediction(data):
         d.ellipse((x1 + 28, y1 + 26, x1 + 40, y1 + 38), fill=color)
         _text(d, (x1 + 54, y1 + 18), title, 24, color, "la", "head")
         picks = data["cats"][key]
-        rows = [(a["name"].upper(), a["color"], picks.get("a"), False), (b["name"].upper(), b["color"], picks.get("b"), False),
-                ("MATCH", GOLD, picks.get("m"), True)]
-        for i, (label, col, uid, big) in enumerate(rows):
+        rows = [(a["name"].upper(), a["color"], picks.get("a"), False, "a"),
+                (b["name"].upper(), b["color"], picks.get("b"), False, "b"),
+                ("MATCH", GOLD, picks.get("m"), True, "m")]
+        for i, (label, col, uid, big, side) in enumerate(rows):
             y = y1 + 70 + i * 70
             if big:
                 d.rounded_rectangle((x1 + 14, y - 2, x2 - 14, y + 62), radius=16, fill=_mix(GOLD, _INK, 0.84),
                                     outline=_mix(GOLD, _INK, 0.5), width=1)
-            _pick_row(c, y, x1, x2, _clip(d, label, 124, 11), col, uid, data["people"], big)
+            ai_uid = data.get("ai_picks", {}).get(key, {}).get(side)
+            _pick_row(c, y, x1, x2, _clip(d, label, 124, 11), col, uid, data["people"], big,
+                      ai_pick=(uid is not None and uid == ai_uid))
     _footer(c, f"GOOGLI MANAGER  •  {a['name']} vs {b['name']}"[:90], data.get("guild"))
     return c.image
 
