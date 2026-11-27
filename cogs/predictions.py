@@ -194,7 +194,8 @@ class PredictView(discord.ui.View):
             if channel is None:
                 await interaction.followup.send("The configured prediction channel is missing or I no longer have Send Messages and Attach Files there. Ask an admin to run +setpredictchannel again.", ephemeral=True)
                 return
-            self.cog.save_picks(self.ctx.guild.id, self.match["number"], self.ctx.author.id, self.picks)
+            snapshot = self.cog.rank_snapshot(self.ctx.guild.id, *self.teams)
+            self.cog.save_picks(self.ctx.guild.id, self.match["number"], self.ctx.author.id, self.picks, snapshot)
             png = await self.cog.card(self.ctx.guild, self.ctx.author, self.match, *self.teams, self.picks)
             await channel.send(
                 content=f"{self.ctx.author.mention} locked in their predictions for match #{self.match['number']}!",
@@ -235,6 +236,10 @@ class Predictions(commands.Cog):
             "CREATE TABLE IF NOT EXISTS predict_picks (guild_id INTEGER NOT NULL, number INTEGER NOT NULL, "
             "user_id INTEGER NOT NULL, picks TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
             "PRIMARY KEY (guild_id, number, user_id))")
+        try:
+            db.execute("ALTER TABLE predict_picks ADD COLUMN rank_snapshot TEXT NOT NULL DEFAULT '{}'")
+        except Exception:
+            pass
         db.execute("CREATE TABLE IF NOT EXISTS predict_settings (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS predict_global_state (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1)")
         db.execute("INSERT OR IGNORE INTO predict_global_state (id, enabled) VALUES (1, 1)")
@@ -340,11 +345,40 @@ class Predictions(commands.Cog):
         except (TypeError, ValueError):
             return {}
 
-    def save_picks(self, guild_id, number, user_id, picks):
+    def rank_snapshot(self, guild_id, team_a, team_b):
+        snapshot = {}
+        for cat, _, _ in CATS:
+            ranked_a, scores_a = self._ranked_roster(guild_id, team_a, cat)
+            ranked_b, scores_b = self._ranked_roster(guild_id, team_b, cat)
+            ranked_match = sorted(
+                [(uid, score) for uid, score in scores_a.items()] +
+                [(uid, score) for uid, score in scores_b.items()],
+                key=lambda item: (-item[1], item[0])
+            )
+            def tied_ranks(ordered, score_map):
+                positions, previous, rank = {}, object(), 0
+                for index, uid in enumerate(ordered):
+                    score = score_map.get(uid, 0)
+                    if index == 0 or score != previous:
+                        rank = index
+                    positions[str(uid)] = rank
+                    previous = score
+                return positions
+            match_order = [uid for uid, _score in ranked_match]
+            match_scores = {uid: score for uid, score in ranked_match}
+            snapshot[cat] = {
+                "a": tied_ranks(ranked_a, scores_a),
+                "b": tied_ranks(ranked_b, scores_b),
+                "m": tied_ranks(match_order, match_scores),
+            }
+        return snapshot
+
+    def save_picks(self, guild_id, number, user_id, picks, rank_snapshot=None):
         self.bot.db.execute(
-            "INSERT INTO predict_picks (guild_id, number, user_id, picks) VALUES (?,?,?,?) "
-            "ON CONFLICT(guild_id, number, user_id) DO UPDATE SET picks=excluded.picks, updated_at=CURRENT_TIMESTAMP",
-            (guild_id, number, user_id, json.dumps(picks)))
+            "INSERT INTO predict_picks (guild_id, number, user_id, picks, rank_snapshot) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(guild_id, number, user_id) DO UPDATE SET picks=excluded.picks, "
+            "rank_snapshot=excluded.rank_snapshot, updated_at=CURRENT_TIMESTAMP",
+            (guild_id, number, user_id, json.dumps(picks), json.dumps(rank_snapshot or {})))
         self.bot.db.commit()
 
     def _match(self, guild_id, text):
@@ -526,36 +560,13 @@ class Predictions(commands.Cog):
         self.bot.db.execute("UPDATE predict_matches SET closed=1 WHERE guild_id=? AND number=?", (ctx.guild.id, number))
         picks_rows = self.bot.db.execute("SELECT user_id,picks FROM predict_picks WHERE guild_id=? AND number=?", (ctx.guild.id, number)).fetchall()
         scored = []
-        rank_positions = {}
-        for cat, _, _ in CATS:
-            ranked_a, scores_a = self._ranked_roster(ctx.guild.id, team_a, cat)
-            ranked_b, scores_b = self._ranked_roster(ctx.guild.id, team_b, cat)
-            ranked_match = sorted(
-                [(uid, score) for uid, score in scores_a.items()] +
-                [(uid, score) for uid, score in scores_b.items()],
-                key=lambda item: (-item[1], item[0])
-            )
-            def tied_ranks(ordered, score_map):
-                positions, previous, rank = {}, object(), 0
-                for index, uid in enumerate(ordered):
-                    score = score_map.get(uid, 0)
-                    if index == 0 or score != previous:
-                        rank = index
-                    positions[uid] = rank
-                    previous = score
-                return positions
-            match_order = [uid for uid, _score in ranked_match]
-            match_scores = {uid: score for uid, score in ranked_match}
-            rank_positions[cat] = {
-                "a": tied_ranks(ranked_a, scores_a),
-                "b": tied_ranks(ranked_b, scores_b),
-                "m": tied_ranks(match_order, match_scores),
-            }
+        current_rank_positions = self.rank_snapshot(ctx.guild.id, team_a, team_b)
         for saved in picks_rows:
             try:
                 picks = json.loads(saved["picks"] or "{}")
+                user_rank_positions = json.loads(saved["rank_snapshot"] or "{}")
             except (TypeError, ValueError):
-                picks = {}
+                picks, user_rank_positions = {}, {}
             points, details = 0, {}
             if picks.get("winner") is not None and int(picks["winner"]) == winner:
                 points += 5
@@ -566,7 +577,8 @@ class Predictions(commands.Cog):
                     picked = picks.get(f"{cat}:{side}")
                     if actual is None or picked is None:
                         continue
-                    positions = rank_positions[cat][side]
+                    positions = user_rank_positions.get(cat, {}).get(side) or current_rank_positions.get(cat, {}).get(side, {})
+                    positions = {int(uid): int(rank) for uid, rank in positions.items()}
                     if int(picked) not in positions or int(actual) not in positions:
                         award = 0
                     else:
