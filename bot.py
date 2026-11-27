@@ -153,6 +153,7 @@ bot = GoogIManagerBot(
 bot.db = sqlite3.connect(DB_FILE)
 bot.db.row_factory = sqlite3.Row
 bot.db.execute("PRAGMA foreign_keys = ON")
+bot.db.execute("PRAGMA synchronous = NORMAL")    # fewer disk syncs per commit (every command writes a log row)
 bot.db.execute("PRAGMA cache_size = -4000")      # 4 MB page cache instead of letting it grow
 bot.db.execute("PRAGMA mmap_size = 0")           # mapped DB pages would count against the RAM limit
 bot.db.execute("PRAGMA temp_store = FILE")       # big sorts go to disk, not memory
@@ -242,8 +243,23 @@ def _log_command(kind, command_name, user, guild, status):
     )
 
 
+@bot.before_invoke
+async def _cpu_start(ctx):
+    ctx._cpu_start = time.process_time()
+
+
+def _cpu_note(ctx):
+    """Console line for any command that burned noticeable CPU, so the heavy ones are easy to find."""
+    start = getattr(ctx, "_cpu_start", None)
+    if start is not None and ctx.command is not None:
+        used = time.process_time() - start
+        if used >= 0.3:
+            print(f"[cpu] +{ctx.command.qualified_name} used {used:.2f}s CPU", flush=True)
+
+
 @bot.event
 async def on_command_completion(ctx):
+    _cpu_note(ctx)
     _log_command(
         "PREFIX", ctx.command.qualified_name, ctx.author, ctx.guild, "SUCCESS"
     )
