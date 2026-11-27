@@ -19,7 +19,7 @@ from discord.ext import commands
 
 from .h2h import fetch_avatar, on_cooldown, render_png
 from .predict_image import render_prediction_png
-from .utility import owner_or_whitelisted
+from .utility import is_bot_owner_id, owner_or_whitelisted
 
 SIDE_A, SIDE_B = (70, 140, 255), (255, 120, 60)
 CATS = [("runs", "Top run scorer", "RUNS"), ("wickets", "Top wicket taker", "WICKETS"),
@@ -610,7 +610,7 @@ class Predictions(commands.Cog):
         await ctx.reply(f"Prediction cards will now be posted in {channel.mention}.", mention_author=False)
 
     @commands.command(name="predicttoggle", aliases=["togglepredict", "predictlock"])
-    @commands.is_owner()
+    @commands.check(lambda ctx: is_bot_owner_id(ctx.bot, ctx.author.id))
     @commands.guild_only()
     async def predicttoggle(self, ctx, state: str = ""):
         """Bot owner only: pause or resume predictions globally."""
