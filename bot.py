@@ -34,13 +34,9 @@ intents.members = True
 intents.message_content = True
 intents.reactions = True
 # Events nothing in this bot listens to; each one is a stream of packets to decode on a 25% CPU host.
-intents.typing = False
-intents.voice_states = False
-intents.invites = False
-intents.webhooks = False
-intents.integrations = False
-intents.scheduled_events = False
-intents.presences = False
+for _name in ("typing", "voice_states", "invites", "webhooks", "integrations", "scheduled_events", "presences"):
+    if hasattr(intents, _name):          # older discord.py versions lack some of these
+        setattr(intents, _name, False)
 
 
 SYNC_HASH_FILE = BASE_DIR / ".command_sync_hash"
