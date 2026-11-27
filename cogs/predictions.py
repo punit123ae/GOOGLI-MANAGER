@@ -75,12 +75,29 @@ class PredictView(discord.ui.View):
             self._select("winner", f"Winner of the match", [(a, "0"), (b, "1")], 1)
         else:
             title = next(t for k, t, _l in CATS if k == self.tab)
-            everyone = [(f"{n}", str(u), tn) for squad, tn in zip((self.squads[0][:12], self.squads[1][:12]), (a, b))
-                        for u, n in squad]
-            self._select(f"{self.tab}:a", f"{a}: {title.lower()}", [(n, str(u)) for u, n in self.squads[0][:25]], 1)
-            self._select(f"{self.tab}:b", f"{b}: {title.lower()}", [(n, str(u)) for u, n in self.squads[1][:25]], 2)
-            self._select(f"{self.tab}:m", f"Best of the match: {title.lower()}",
-                         [(n, str(u), tn) for n, u, tn in everyone], 3)
+            ranked = []
+            option_lists = []
+            for team in self.teams:
+                ids, scores = self.cog._ranked_roster(self.ctx.guild.id, team, self.tab)
+                entries = [(uid, self.cog.compare._display_name(self.ctx.guild, uid), scores.get(uid, 0)) for uid in ids]
+                ranked.append(entries)
+                option_lists.append([
+                    (name, str(uid), (f"AI PICK • {score:g}" if i == 0 and score else f"Score: {score:g}"))
+                    for i, (uid, name, score) in enumerate(entries[:25])
+                ])
+            match_entries = sorted(
+                [(uid, name, score, team["name"]) for team, entries in zip(self.teams, ranked)
+                 for uid, name, score in entries],
+                key=lambda item: (-item[2], item[0])
+            )[:25]
+            match_options = [
+                (f"{name} ({team_name})", str(uid),
+                 (f"AI PICK • {score:g}" if i == 0 and score else f"{team_name} • {score:g}"))
+                for i, (uid, name, score, team_name) in enumerate(match_entries)
+            ]
+            self._select(f"{self.tab}:a", f"{a}: {title.lower()} • ranked", option_lists[0], 1)
+            self._select(f"{self.tab}:b", f"{b}: {title.lower()} • ranked", option_lists[1], 2)
+            self._select(f"{self.tab}:m", f"Best of the match: {title.lower()} • ranked", match_options, 3)
         save = discord.ui.Button(label="Save & post", emoji="📨", style=discord.ButtonStyle.success, row=4)
         save.callback = self._save
         cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, row=4)
@@ -268,7 +285,10 @@ class Predictions(commands.Cog):
         if row and row[0]:
             channel = guild.get_channel(int(row[0]))
             if channel is not None and hasattr(channel, "send"):
-                return channel
+                me = guild.me
+                perms = channel.permissions_for(me) if me else None
+                if perms and perms.send_messages and perms.attach_files:
+                    return channel
         return fallback
 
     def match_closed(self, guild_id, number):
