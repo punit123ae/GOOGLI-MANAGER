@@ -245,7 +245,7 @@ class Predictions(commands.Cog):
             for row in self.bot.db.execute(
                 f"SELECT user_id,catches_caught,catches_dropped FROM fielding_stats WHERE guild_id=? AND user_id IN ({placeholders})",
                 (int(guild_id), *roster)):
-                field[int(row["user_id"])] = int(row["catches_caught"]) * 5 - int(row["catches_dropped"]) * 10
+                field[int(row["user_id"])] = (int(row["catches_caught"]), int(row["catches_dropped"]))
         except Exception:
             pass
         scores = {}
@@ -256,9 +256,10 @@ class Predictions(commands.Cog):
             elif category == "wickets":
                 score = sum(int(r["wickets"]) for r in player_rows)
             elif category == "catches":
-                score = field.get(uid, 0)
+                score = field.get(uid, (0, 0))[0]
             else:
-                score = fantasy_raw_points(player_rows)[2] + field.get(uid, 0)
+                caught, dropped = field.get(uid, (0, 0))
+                score = fantasy_raw_points(player_rows)[2] + caught * 5 - dropped * 10
             scores[uid] = score
         return sorted(roster, key=lambda uid: (-scores.get(uid, 0), uid)), scores
 
