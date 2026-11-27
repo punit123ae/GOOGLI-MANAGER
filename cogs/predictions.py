@@ -226,36 +226,36 @@ class Predictions(commands.Cog):
                                   + [int(r["user_id"]) for r in rows]))
 
     def _ranked_roster(self, guild_id, team, category):
-        \"\"\"Order roster by imported performance; stable fallback is user ID.\"\"\"
+        """Order roster by imported performance; stable fallback is user ID."""
         from .stats import fantasy_raw_points
         roster = self._roster(team)
         if not roster:
             return [], {}
-        placeholders = \",\".join(\"?\" for _ in roster)
+        placeholders = ",".join("?" for _ in roster)
         rows = self.bot.db.execute(
-            f\"SELECT p.user_id,p.runs,p.balls_faced,p.runs_conceded,p.balls_bowled,p.wickets,p.not_out \"
-            f\"FROM player_match_stats p JOIN stats_imports i ON i.source_message_id=p.source_message_id \"
-            f\"WHERE i.guild_id=? AND p.user_id IN ({placeholders})\",
+            f"SELECT p.user_id,p.runs,p.balls_faced,p.runs_conceded,p.balls_bowled,p.wickets,p.not_out "
+            f"FROM player_match_stats p JOIN stats_imports i ON i.source_message_id=p.source_message_id "
+            f"WHERE i.guild_id=? AND p.user_id IN ({placeholders})",
             (int(guild_id), *roster)).fetchall()
         by_user = {uid: [] for uid in roster}
         for row in rows:
-            by_user.setdefault(int(row[\"user_id\"]), []).append(dict(row))
+            by_user.setdefault(int(row["user_id"]), []).append(dict(row))
         field = {}
         try:
             for row in self.bot.db.execute(
-                f\"SELECT user_id,catches_caught,catches_dropped FROM fielding_stats WHERE guild_id=? AND user_id IN ({placeholders})\",
+                f"SELECT user_id,catches_caught,catches_dropped FROM fielding_stats WHERE guild_id=? AND user_id IN ({placeholders})",
                 (int(guild_id), *roster)):
-                field[int(row[\"user_id\"])] = int(row[\"catches_caught\"]) * 5 - int(row[\"catches_dropped\"]) * 10
+                field[int(row["user_id"])] = int(row["catches_caught"]) * 5 - int(row["catches_dropped"]) * 10
         except Exception:
             pass
         scores = {}
         for uid in roster:
             player_rows = by_user.get(uid, [])
-            if category == \"runs\":
-                score = sum(int(r[\"runs\"]) for r in player_rows)
-            elif category == \"wickets\":
-                score = sum(int(r[\"wickets\"]) for r in player_rows)
-            elif category == \"catches\":
+            if category == "runs":
+                score = sum(int(r["runs"]) for r in player_rows)
+            elif category == "wickets":
+                score = sum(int(r["wickets"]) for r in player_rows)
+            elif category == "catches":
                 score = field.get(uid, 0)
             else:
                 score = fantasy_raw_points(player_rows)[2] + field.get(uid, 0)
