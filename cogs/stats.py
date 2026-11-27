@@ -488,7 +488,7 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
         fill=muted,
     )
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=False, compress_level=2)
+    image.save(output, format="PNG", optimize=False, compress_level=1)
     output.seek(0)
     return output
 
@@ -915,7 +915,7 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
               font=load_font(12, True), fill=muted, anchor="mt")
 
     output = io.BytesIO()
-    image.convert("RGB").save(output, format="PNG", optimize=False, compress_level=2)
+    image.convert("RGB").save(output, format="PNG", optimize=False, compress_level=1)
     output.seek(0)
     return output
 
@@ -1056,7 +1056,7 @@ def make_stats_image_new_design(member, rows, design, avatar=None):
             for i,(name,val) in enumerate(data):
                 xx=x+25+(i%2)*340; yy=565+(i//2)*48; text(xx,yy,name,12,muted); text(xx+295,yy-4,val,22,white,'ra')
             text(x+500,800,'FANTASY PTS '+str(round(pts,1)),15,gold)
-    out=io.BytesIO(); image.convert('RGB').save(out,format="PNG",optimize=False,compress_level=3); out.seek(0); return out
+    out=io.BytesIO(); image.convert('RGB').save(out,format="PNG",optimize=False,compress_level=1); out.seek(0); return out
 
 
 
@@ -1512,7 +1512,7 @@ def make_stats_image_experience(
             txt(lx_, 848, f"{(100*part/total) if total else 0:.0f}%", 15, dim)
 
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=False, compress_level=2)
+    image.save(output, format="PNG", optimize=False, compress_level=1)
     output.seek(0)
     return output
 
@@ -1576,7 +1576,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     if n == 0:
         txt(800, 440, "NOT ENOUGH MATCH DATA YET", 30, muted, "mm")
         out = io.BytesIO()
-        image.save(out, format="PNG", optimize=False, compress_level=3)
+        image.save(out, format="PNG", optimize=False, compress_level=1)
         out.seek(0)
         return out
 
@@ -1723,7 +1723,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
             txt(tri_x+18, tri_y+16, "RECENT TREND", 12, muted)
 
     out = io.BytesIO()
-    image.save(out, format="PNG", optimize=False, compress_level=3)
+    image.save(out, format="PNG", optimize=False, compress_level=1)
     out.seek(0)
     return out
 
@@ -1932,7 +1932,7 @@ def make_stats_image_design3(
         draw.text((x, 834), str(value), font=F(15, True), fill=cyan if i == 1 else white)
 
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=False, compress_level=2)
+    image.save(output, format="PNG", optimize=False, compress_level=1)
     output.seek(0)
     return output
 
@@ -2040,7 +2040,7 @@ def make_recent_matches_image(player_name, rows):
                       f"{row['wickets']} WKTS  •  {row['runs_conceded']} RUNS  •  {row['balls_bowled']} BALLS",
                       font=load_font(19, True), fill=white, anchor="lm")
     output = io.BytesIO()
-    image.convert("RGB").save(output, format="PNG", optimize=False, compress_level=2)
+    image.convert("RGB").save(output, format="PNG", optimize=False, compress_level=1)
     output.seek(0)
     return output
 
