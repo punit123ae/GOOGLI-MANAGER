@@ -341,9 +341,20 @@ class Predictions(commands.Cog):
         for team_index, team in enumerate((team_a, team_b)):
             for uid in self._roster(team):
                 side_of.setdefault(uid, team_index)
+        ai_picks = {}
         for key, _t, _l in CATS:
             cats[key] = {s: picks.get(f"{key}:{s}") for s in "abm"}
             wanted |= {v for v in cats[key].values() if v is not None}
+            ra, sa = self._ranked_roster(guild.id, team_a, key)
+            rb, sb = self._ranked_roster(guild.id, team_b, key)
+            all_ranked = sorted([(uid, score) for uid, score in sa.items()] +
+                                [(uid, score) for uid, score in sb.items()],
+                                key=lambda item: (-item[1], item[0]))
+            ai_picks[key] = {
+                "a": ra[0] if ra and sa.get(ra[0], 0) > 0 else None,
+                "b": rb[0] if rb and sb.get(rb[0], 0) > 0 else None,
+                "m": all_ranked[0][0] if all_ranked and all_ranked[0][1] > 0 else None,
+            }
         sem = asyncio.Semaphore(6)
         people = {}
 
@@ -365,7 +376,7 @@ class Predictions(commands.Cog):
         data = {"guild": guild.name, "number": int(match["number"]),
                 "user": {"name": compare._display_name(guild, user.id), "avatar": await mine()},
                 "a": sides[0], "b": sides[1], "winner": None if winner is None else int(winner),
-                "cats": cats, "people": people}
+                "cats": cats, "people": people, "ai_picks": ai_picks}
         async with self._lock:
             return await render_png(render_prediction_png, data)
 
