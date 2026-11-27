@@ -446,6 +446,10 @@ class Predictions(commands.Cog):
             return await ctx.reply(f"Prediction card channel: {current.mention if current else 'Not set (cards use the command channel).'}", mention_author=False)
         if not await owner_or_whitelisted(ctx, command_name="setpredictchannel", app_owner=True):
             return await ctx.reply("Only the bot owner or a whitelisted role can change the prediction channel.", mention_author=False)
+        me = ctx.guild.me
+        perms = channel.permissions_for(me) if me else None
+        if not perms or not perms.send_messages or not perms.attach_files:
+            return await ctx.reply("I need Send Messages and Attach Files permissions in that channel before I can set it.", mention_author=False)
         self.bot.db.execute("INSERT INTO predict_settings (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id", (ctx.guild.id, channel.id))
         self.bot.db.commit()
         await ctx.reply(f"Prediction cards will now be posted in {channel.mention}.", mention_author=False)
