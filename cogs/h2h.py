@@ -22,6 +22,7 @@ import time
 import discord
 from discord.ext import commands
 
+from . import fastblur  # noqa: F401  (makes large blurs cheaper for every card)
 from .lb import _totals
 from .versus_image import BAT_COLOR, BOWL_COLOR, FIELD_COLOR, render_h2h_page, render_h2h_pages, stat_row
 
