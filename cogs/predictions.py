@@ -493,7 +493,22 @@ class Predictions(commands.Cog):
         self.bot.db.execute("UPDATE predict_matches SET closed=1 WHERE guild_id=? AND number=?", (ctx.guild.id, number))
         picks_rows = self.bot.db.execute("SELECT user_id,picks FROM predict_picks WHERE guild_id=? AND number=?", (ctx.guild.id, number)).fetchall()
         scored = []
-        side_of = {uid: "a" for uid in roster_a} | {uid: "b" for uid in roster_b}
+        rank_positions = {}
+        for cat, _, _ in CATS:
+            ranked_a, _ = self._ranked_roster(ctx.guild.id, team_a, cat)
+            ranked_b, _ = self._ranked_roster(ctx.guild.id, team_b, cat)
+            scores_a = self._ranked_roster(ctx.guild.id, team_a, cat)[1]
+            scores_b = self._ranked_roster(ctx.guild.id, team_b, cat)[1]
+            ranked_match = sorted(
+                [(uid, score) for uid, score in scores_a.items()] +
+                [(uid, score) for uid, score in scores_b.items()],
+                key=lambda item: (-item[1], item[0])
+            )
+            rank_positions[cat] = {
+                "a": {uid: i for i, uid in enumerate(ranked_a)},
+                "b": {uid: i for i, uid in enumerate(ranked_b)},
+                "m": {uid: i for i, (uid, _score) in enumerate(ranked_match)},
+            }
         for saved in picks_rows:
             try:
                 picks = json.loads(saved["picks"] or "{}")
@@ -509,12 +524,12 @@ class Predictions(commands.Cog):
                     picked = picks.get(f"{cat}:{side}")
                     if actual is None or picked is None:
                         continue
-                    if int(picked) == int(actual):
-                        award = 5
-                    elif side_of.get(int(picked)) == side_of.get(int(actual)):
-                        award = 2
-                    else:
+                    positions = rank_positions[cat][side]
+                    if int(picked) not in positions or int(actual) not in positions:
                         award = 0
+                    else:
+                        distance = abs(positions[int(picked)] - positions[int(actual)])
+                        award = 5 if distance == 0 else 3 if distance == 1 else 1 if distance == 2 else 0
                     points += award
                     details[f"{cat}:{side}"] = award
             self.bot.db.execute("INSERT INTO predict_scores (guild_id,number,user_id,points,details) VALUES (?,?,?,?,?) ON CONFLICT(guild_id,number,user_id) DO UPDATE SET points=excluded.points,details=excluded.details", (ctx.guild.id, number, int(saved["user_id"]), points, json.dumps(details)))
