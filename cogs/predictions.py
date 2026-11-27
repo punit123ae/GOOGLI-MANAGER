@@ -502,10 +502,21 @@ class Predictions(commands.Cog):
                 [(uid, score) for uid, score in scores_b.items()],
                 key=lambda item: (-item[1], item[0])
             )
+            def tied_ranks(ordered, score_map):
+                positions, previous, rank = {}, object(), 0
+                for index, uid in enumerate(ordered):
+                    score = score_map.get(uid, 0)
+                    if index == 0 or score != previous:
+                        rank = index
+                    positions[uid] = rank
+                    previous = score
+                return positions
+            match_order = [uid for uid, _score in ranked_match]
+            match_scores = {uid: score for uid, score in ranked_match}
             rank_positions[cat] = {
-                "a": {uid: i for i, uid in enumerate(ranked_a)},
-                "b": {uid: i for i, uid in enumerate(ranked_b)},
-                "m": {uid: i for i, (uid, _score) in enumerate(ranked_match)},
+                "a": tied_ranks(ranked_a, scores_a),
+                "b": tied_ranks(ranked_b, scores_b),
+                "m": tied_ranks(match_order, match_scores),
             }
         for saved in picks_rows:
             try:
