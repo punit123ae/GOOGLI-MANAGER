@@ -462,7 +462,7 @@ class Predictions(commands.Cog):
         self.bot.db.commit()
         await ctx.reply("Predictions are now OPEN globally." if wanted else "Predictions are now PAUSED globally. Existing predictions can still be viewed.", mention_author=False)
     # ------------------------------------------------------------------ +predict
-    @commands.command(name="predict", aliases=["prediction", "predictmatch", "pred", "mypredict"])
+    @commands.command(name="predict", aliases=["prediction", "predictmatch", "pred", "mypredict", "mypred"])
     @commands.guild_only()
     async def predict(self, ctx, *, text: str = ""):
         """Predict a match: +predict, +predict <number>. Show one: +predict view [number] [@user]."""
@@ -500,7 +500,15 @@ class Predictions(commands.Cog):
                 except Exception as exc:
                     print(f"[predict] view failed: {type(exc).__name__}: {exc}", flush=True)
                     return await ctx.reply("I couldn't draw that prediction. Check the bot logs.", mention_author=False)
-            return await ctx.send(file=discord.File(io.BytesIO(png), filename="prediction.png"))
+            channel = self.output_channel(ctx.guild, ctx.channel)
+            await channel.send(
+                content=f"Prediction by **{target.display_name}** • Match #{number}",
+                file=discord.File(io.BytesIO(png), filename="prediction.png"),
+                allowed_mentions=none,
+            )
+            if channel.id != ctx.channel.id:
+                return await ctx.reply(f"Posted {target.display_name}'s prediction in {channel.mention}.", mention_author=False)
+            return
         if row["closed"]:
             return await ctx.reply(f"Predictions for match #{number} are closed.", mention_author=False)
         if not self.predictions_enabled():
