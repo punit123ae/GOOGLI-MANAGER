@@ -41,6 +41,8 @@ class PredictView(discord.ui.View):
         self.squads = squads                     # [[(uid, name), ...], [...]]
         self.picks = picks
         self.tab = "winner"
+        self.page = 0
+        self.page_count = 1
         self.message = None
         self._build()
 
@@ -95,9 +97,23 @@ class PredictView(discord.ui.View):
                  (f"AI PICK • {score:g}" if i == 0 and score else f"{team_name} • {score:g}"))
                 for i, (uid, name, score, team_name) in enumerate(match_entries)
             ]
+            self.page_count = max(1, (len(option_lists[0]) + 24) // 25,
+                                  (len(option_lists[1]) + 24) // 25,
+                                  (len(match_options) + 24) // 25)
+            self.page = min(self.page, self.page_count - 1)
             self._select(f"{self.tab}:a", f"{a}: {title.lower()} • ranked", option_lists[0], 1)
             self._select(f"{self.tab}:b", f"{b}: {title.lower()} • ranked", option_lists[1], 2)
             self._select(f"{self.tab}:m", f"Best of the match: {title.lower()} • ranked", match_options, 3)
+        if self.tab != "winner" and self.page_count > 1:
+            previous = discord.ui.Button(label="Prev players", style=discord.ButtonStyle.secondary,
+                                          row=4, disabled=self.page <= 0)
+            previous.callback = self._change_page(-1)
+            following = discord.ui.Button(label=f"More players ({self.page + 1}/{self.page_count})",
+                                          style=discord.ButtonStyle.secondary, row=4,
+                                          disabled=self.page >= self.page_count - 1)
+            following.callback = self._change_page(1)
+            self.add_item(previous)
+            self.add_item(following)
         save = discord.ui.Button(label="Save & post", emoji="📨", style=discord.ButtonStyle.success, row=4)
         save.callback = self._save
         cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, row=4)
@@ -108,8 +124,13 @@ class PredictView(discord.ui.View):
     def _select(self, key, placeholder, options, row):
         current = self.picks.get(key)
         current = None if current is None else str(current)
+        if key == "winner":
+            visible_options = options
+        else:
+            start = self.page * 25
+            visible_options = options[start:start + 25]
         items = []
-        for opt in options:
+        for opt in visible_options:
             label, value = opt[0], opt[1]
             items.append(discord.SelectOption(label=str(label)[:100], value=value,
                                               description=(opt[2][:100] if len(opt) > 2 else None),
@@ -119,6 +140,13 @@ class PredictView(discord.ui.View):
         select = discord.ui.Select(placeholder=placeholder[:150], options=items[:25], min_values=1, max_values=1, row=row)
         select.callback = self._chosen(key, select)
         self.add_item(select)
+
+    def _change_page(self, delta):
+        async def callback(interaction):
+            self.page = max(0, min(self.page_count - 1, self.page + delta))
+            self._build()
+            await interaction.response.edit_message(content=self._status(), view=self)
+        return callback
 
     # ------------------------------------------------------------------ callbacks
     async def interaction_check(self, interaction):
