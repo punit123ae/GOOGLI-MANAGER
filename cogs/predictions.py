@@ -414,6 +414,10 @@ class Predictions(commands.Cog):
         if m:
             action, number = m.group(1).lower(), int(m.group(2))
             if action in ("close", "open"):
+                if action == "open" and db.execute(
+                    "SELECT 1 FROM predict_results WHERE guild_id=? AND number=?", (ctx.guild.id, number)
+                ).fetchone():
+                    return await ctx.reply("This match already has an official result and points. Re-enter the result with +predictresult to correct scoring; it cannot be reopened.", mention_author=False)
                 cur = db.execute("UPDATE predict_matches SET closed=? WHERE guild_id=? AND number=?",
                                  (1 if action == "close" else 0, ctx.guild.id, number))
                 db.commit()
@@ -422,6 +426,8 @@ class Predictions(commands.Cog):
                                        f"There is no match #{number}.", mention_author=False)
             cur = db.execute("DELETE FROM predict_matches WHERE guild_id=? AND number=?", (ctx.guild.id, number))
             db.execute("DELETE FROM predict_picks WHERE guild_id=? AND number=?", (ctx.guild.id, number))
+            db.execute("DELETE FROM predict_results WHERE guild_id=? AND number=?", (ctx.guild.id, number))
+            db.execute("DELETE FROM predict_scores WHERE guild_id=? AND number=?", (ctx.guild.id, number))
             db.commit()
             return await ctx.reply(f"✅ Match #{number} and its predictions were removed." if cur.rowcount else
                                    f"There is no match #{number}.", mention_author=False)
@@ -467,7 +473,7 @@ class Predictions(commands.Cog):
         elif winner_text in ("b", "1", team_b["name"].lower()):
             winner = 1
         else:
-            return await ctx.reply("winner must be A, B, or one of the exact team names.", mention_author=False)
+            return await ctx.reply("winner must be A or B.", mention_author=False)
         roster_a, roster_b = set(self._roster(team_a)), set(self._roster(team_b))
         roster_all = roster_a | roster_b
         result = {"winner": winner}
@@ -580,7 +586,14 @@ class Predictions(commands.Cog):
             if ctx.message.mentions:
                 target = ctx.message.mentions[0]
             text = re.sub(r"<@!?\d+>", "", m.group(2)).strip().lstrip("#")
-        row, error = self._match(ctx.guild.id, text)
+        if view_mode and not text:
+            row = self.bot.db.execute(
+                "SELECT * FROM predict_matches WHERE guild_id=? ORDER BY number DESC LIMIT 1",
+                (ctx.guild.id,),
+            ).fetchone()
+            error = None if row else "There are no prediction matches yet."
+        else:
+            row, error = self._match(ctx.guild.id, text)
         if error:
             return await ctx.reply(error, mention_author=False)
         team_a, team_b = self._team_by_id(row["team_a_id"]), self._team_by_id(row["team_b_id"])
