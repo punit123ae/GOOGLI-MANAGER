@@ -688,7 +688,7 @@ def render_team_pages(data):
     pages = []
     for image in images:
         out = io.BytesIO()
-        image.save(out, format="PNG", compress_level=3)
+        image.save(out, format="PNG", compress_level=1)
         pages.append(out.getvalue())
     return pages
 
@@ -751,6 +751,6 @@ class TeamPageRenderer:
                 image = _page_squad(self.data, self.theme, avatars, 4 + index, self.total_pages,
                                     self.chunks[index], rank)
             out = io.BytesIO()
-            image.save(out, format="PNG", compress_level=3)
+            image.save(out, format="PNG", compress_level=1)
             self._cache[number] = out.getvalue()
             return self._cache[number]
