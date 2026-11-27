@@ -444,7 +444,7 @@ class Predictions(commands.Cog):
         """Record the official prediction result and calculate points."""
         if not await owner_or_whitelisted(ctx, command_name="predictresult", app_owner=True):
             return await ctx.reply("Only the bot owner or a whitelisted role can enter prediction results.", mention_author=False)
-        match = re.match(r"^#?(\\d+)\\s+(.*)$", text.strip())
+        match = re.match(r"^#?(\d+)\s+(.*)$", text.strip())
         if not match:
             return await ctx.reply("Usage: +predictresult <match> winner=A|B runs_a=<ID> runs_b=<ID> runs_m=<ID> wickets_a=<ID> wickets_b=<ID> wickets_m=<ID> catches_a=<ID> catches_b=<ID> catches_m=<ID> fantasy_a=<ID> fantasy_b=<ID> fantasy_m=<ID>. Player fields are optional; use Discord mentions or IDs.", mention_author=False)
         number, raw = int(match.group(1)), match.group(2)
@@ -454,7 +454,7 @@ class Predictions(commands.Cog):
         team_a, team_b = self._team_by_id(row["team_a_id"]), self._team_by_id(row["team_b_id"])
         if not team_a or not team_b:
             return await ctx.reply("The teams for this match could not be found.", mention_author=False)
-        values = dict(re.findall(r"([a-zA-Z_]+)=([^\\s]+)", raw))
+        values = dict(re.findall(r"([a-zA-Z_]+)=([^\s]+)", raw))
         allowed = {"winner"} | {f"{cat}_{side}" for cat, _, _ in CATS for side in ("a", "b", "m")}
         unknown = set(values) - allowed
         if unknown:
@@ -474,7 +474,7 @@ class Predictions(commands.Cog):
         for key, value in values.items():
             if key == "winner":
                 continue
-            uid_text = re.sub(r"\\D", "", value)
+            uid_text = re.sub(r"\D", "", value)
             if not uid_text:
                 return await ctx.reply(f"{key} must be a Discord user ID or mention.", mention_author=False)
             uid = int(uid_text)
@@ -515,8 +515,8 @@ class Predictions(commands.Cog):
             scored.append((int(saved["user_id"]), points))
         self.bot.db.commit()
         scored.sort(key=lambda item: (-item[1], item[0]))
-        preview = "\\n".join(f"{i}. <@{uid}> — **{pts} pts**" for i, (uid, pts) in enumerate(scored[:10], 1)) or "No predictions were submitted for this match."
-        await ctx.reply(f"Official result saved for match #{number}; predictions are now closed.\\n\\n**Prediction points**\\n{preview}", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        preview = "\n".join(f"{i}. <@{uid}> — **{pts} pts**" for i, (uid, pts) in enumerate(scored[:10], 1)) or "No predictions were submitted for this match."
+        await ctx.reply(f"Official result saved for match #{number}; predictions are now closed.\n\n**Prediction points**\n{preview}", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="predictlb", aliases=["predictleaderboard", "predictpoints"])
     @commands.guild_only()
@@ -531,7 +531,7 @@ class Predictions(commands.Cog):
         if not rows:
             return await ctx.reply("No prediction points have been awarded yet.", mention_author=False)
         lines = [f"**{i}.** <@{int(r['user_id'])}> — **{int(r['points'])} pts**" + (f" • {int(r['matches'])} matches scored" if number is None else "") for i, r in enumerate(rows, 1)]
-        await ctx.reply("**" + title + "**\\n" + "\\n".join(lines), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        await ctx.reply("**" + title + "**\n" + "\n".join(lines), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
     # ---------------------------------------------------------- prediction setup
     @commands.command(name="setpredictchannel", aliases=["predictsetchannel", "setpredchannel"])
     @commands.guild_only()
