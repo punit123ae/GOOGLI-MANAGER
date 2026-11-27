@@ -120,7 +120,7 @@ def render_fielding_image(data):
     _text(d, (800, 884), "Fielding tracker", 14, DIM, "mm")
 
     out = io.BytesIO()
-    page.image.save(out, "PNG", compress_level=3)
+    page.image.save(out, "PNG", compress_level=1)
     return out.getvalue()
 
 
@@ -262,7 +262,7 @@ def render_fielding_image_v2(data):
         d.rounded_rectangle((x+22, 820, x+22+max(6, int((cell-58)*row["eff"]/100)), 828), radius=4,
                             fill=WIN if row["eff"] >= 50 else LOSS)
     out = io.BytesIO()
-    page.image.save(out, "PNG", compress_level=3)
+    page.image.save(out, "PNG", compress_level=1)
     return out.getvalue()
 
 
@@ -402,5 +402,5 @@ def render_fielding_image_v3(data):
     _text(d, (60, 880), f"GOOGLI MANAGER  •  FIELDING PROFILE  •  {data['name'].upper()}"[:80], 13, DIM, "lm")
 
     out = io.BytesIO()
-    page.image.save(out, "PNG", compress_level=3)
+    page.image.save(out, "PNG", compress_level=1)
     return out.getvalue()
