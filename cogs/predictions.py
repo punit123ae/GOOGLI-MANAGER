@@ -190,9 +190,12 @@ class PredictView(discord.ui.View):
             return
         await interaction.response.defer()
         try:
+            channel = self.cog.output_channel(self.ctx.guild, interaction.channel)
+            if channel is None:
+                await interaction.followup.send("The configured prediction channel is missing or I no longer have Send Messages and Attach Files there. Ask an admin to run +setpredictchannel again.", ephemeral=True)
+                return
             self.cog.save_picks(self.ctx.guild.id, self.match["number"], self.ctx.author.id, self.picks)
             png = await self.cog.card(self.ctx.guild, self.ctx.author, self.match, *self.teams, self.picks)
-            channel = self.cog.output_channel(self.ctx.guild, interaction.channel)
             await channel.send(
                 content=f"{self.ctx.author.mention} locked in their predictions for match #{self.match['number']}!",
                 file=discord.File(io.BytesIO(png), filename="prediction.png"),
@@ -315,11 +318,13 @@ class Predictions(commands.Cog):
         row = self.bot.db.execute("SELECT channel_id FROM predict_settings WHERE guild_id=?", (guild.id,)).fetchone()
         if row and row[0]:
             channel = guild.get_channel(int(row[0]))
-            if channel is not None and hasattr(channel, "send"):
-                me = guild.me
-                perms = channel.permissions_for(me) if me else None
-                if perms and perms.send_messages and perms.attach_files:
-                    return channel
+            if channel is None or not hasattr(channel, "send"):
+                return None
+            me = guild.me
+            perms = channel.permissions_for(me) if me else None
+            if not perms or not perms.send_messages or not perms.attach_files:
+                return None
+            return channel
         return fallback
 
     def match_closed(self, guild_id, number):
@@ -668,6 +673,8 @@ class Predictions(commands.Cog):
                     print(f"[predict] view failed: {type(exc).__name__}: {exc}", flush=True)
                     return await ctx.reply("I couldn't draw that prediction. Check the bot logs.", mention_author=False)
             channel = self.output_channel(ctx.guild, ctx.channel)
+            if channel is None:
+                return await ctx.reply("The configured prediction channel is missing or I no longer have Send Messages and Attach Files there. Ask an admin to run +setpredictchannel again.", mention_author=False)
             await channel.send(
                 content=f"Prediction by **{target.display_name}** • Match #{number}",
                 file=discord.File(io.BytesIO(png), filename="prediction.png"),
