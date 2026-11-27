@@ -1056,7 +1056,7 @@ def make_stats_image_new_design(member, rows, design, avatar=None):
             for i,(name,val) in enumerate(data):
                 xx=x+25+(i%2)*340; yy=565+(i//2)*48; text(xx,yy,name,12,muted); text(xx+295,yy-4,val,22,white,'ra')
             text(x+500,800,'FANTASY PTS '+str(round(pts,1)),15,gold)
-    out=io.BytesIO(); image.convert('RGB').save(out,format='PNG',optimize=True); out.seek(0); return out
+    out=io.BytesIO(); image.convert('RGB').save(out,format="PNG",optimize=False,compress_level=3); out.seek(0); return out
 
 
 
@@ -1576,7 +1576,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     if n == 0:
         txt(800, 440, "NOT ENOUGH MATCH DATA YET", 30, muted, "mm")
         out = io.BytesIO()
-        image.save(out, format="PNG", optimize=True)
+        image.save(out, format="PNG", optimize=False, compress_level=3)
         out.seek(0)
         return out
 
@@ -1723,7 +1723,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
             txt(tri_x+18, tri_y+16, "RECENT TREND", 12, muted)
 
     out = io.BytesIO()
-    image.save(out, format="PNG", optimize=True)
+    image.save(out, format="PNG", optimize=False, compress_level=3)
     out.seek(0)
     return out
 

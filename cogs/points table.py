@@ -382,7 +382,7 @@ def make_table_image(group_name, rows):
         draw_form(draw, y, row.get("history", []))
 
     output = io.BytesIO()
-    image.save(output, format="PNG", optimize=True)
+    image.save(output, format="PNG", optimize=False, compress_level=3)
     output.seek(0)
     return output
 

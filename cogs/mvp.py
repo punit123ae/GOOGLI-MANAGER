@@ -199,7 +199,7 @@ class MVP(commands.Cog):
             )
 
         output = io.BytesIO()
-        image.save(output, format="PNG", optimize=True)
+        image.save(output, format="PNG", optimize=False, compress_level=3)
         output.seek(0)
         return output
 

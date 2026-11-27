@@ -138,7 +138,7 @@ def prepare_emoji_image(data: bytes, content_type: Optional[str] = None) -> tupl
     canvas = Image.new("RGBA", (EMOJI_SIZE, EMOJI_SIZE), (0, 0, 0, 0))
     canvas.paste(frame, ((EMOJI_SIZE - frame.width) // 2, (EMOJI_SIZE - frame.height) // 2), frame)
     out = io.BytesIO()
-    canvas.save(out, format="PNG", optimize=True)
+    canvas.save(out, format="PNG", optimize=False, compress_level=3)
     result = out.getvalue()
     if len(result) > EMOJI_MAX_BYTES:
         raise InvalidLogo("Image is still over 256 KB after resizing")
