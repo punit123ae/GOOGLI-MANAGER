@@ -1122,10 +1122,10 @@ class CatchTracker(commands.Cog):
         top = []
         for uid, c, d in ranked[:5]:
             m = guild.get_member(uid)
-            top.append({"name": m.display_name if m else f"Unknown ({str(uid)[-4:]})",
+            top.append({"name": m.name if m else f"Unknown ({str(uid)[-4:]})",
                         "caught": c, "eff": _efficiency(c, d), "me": uid == member.id})
         return {
-            "name": member.display_name, "avatar_bytes": avatar,
+            "name": member.name, "avatar_bytes": avatar,
             "team_name": team["name"] if team else None, "team_color": color,
             "caught": caught, "dropped": dropped, "chances": caught + dropped,
             "eff": _efficiency(caught, dropped), "fantasy": caught*5 - dropped*10,

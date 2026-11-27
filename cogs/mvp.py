@@ -252,7 +252,7 @@ class MVP(commands.Cog):
                 return
 
         member = self._find_member(ctx.guild, name)
-        display_name = member.display_name if member is not None else name
+        display_name = member.name if member is not None else name
         try:
             banner = await self._make_banner(display_name, values, member, custom_avatar)
         except FileNotFoundError as exc:

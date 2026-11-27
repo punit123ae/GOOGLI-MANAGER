@@ -160,7 +160,7 @@ class PlayerOfTheDay(commands.Cog):
                 "team_logo": logo, "team_color": color,
                 "opponent": (opp["name"] if opp is not None else opp_name),
                 "opponent_logo": opp_logo, "photo": photo,
-                "player": member.display_name, "stage": opts.get("stage", ""),
+                "player": member.name, "stage": opts.get("stage", ""),
                 "batting": batting, "bowling": bowling, "fielding": fielding,
             }
             png = await render_png(render_potd, data)

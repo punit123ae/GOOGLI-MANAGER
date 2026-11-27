@@ -270,7 +270,7 @@ class TestVersus(commands.Cog):
             def side(member, blob, rows):
                 color = member.color.to_rgb() if member.color.value else None
                 chips = [team_names.get(member.id, "FREE AGENT").upper(), f"{len(rows)} MATCHES"]
-                return {"name": member.display_name, "image": blob, "color": color, "chips": chips}
+                return {"name": member.name, "image": blob, "color": color, "chips": chips}
             left, right = side(first, avatar_a, rows_a), side(second, avatar_b, rows_b)
 
             def eff(rec):
@@ -304,11 +304,11 @@ class TestVersus(commands.Cog):
             for group in ("BATTING", "BOWLING", "FIELDING"):
                 lw, rw = vi.tally([r for r in rows if r["group"] == group])
                 winner = 1 if lw > rw else 2 if rw > lw else 0
-                who = first.display_name if winner == 1 else second.display_name if winner == 2 else "LEVEL"
+                who = first.name if winner == 1 else second.name if winner == 2 else "LEVEL"
                 edges.append((f"{group} EDGE", winner, f"{who.upper()}||{max(lw, rw)}–{min(lw, rw)}"))
             total_l, total_r = vi.tally(rows)
             winner = 1 if total_l > total_r else 2 if total_r > total_l else 0
-            who = first.display_name if winner == 1 else second.display_name if winner == 2 else "LEVEL"
+            who = first.name if winner == 1 else second.name if winner == 2 else "LEVEL"
             edges.append(("OVERALL", winner, f"{who.upper()}||{max(total_l, total_r)}–{min(total_l, total_r)}"))
 
             opposed = self._opposed(guild.id, first.id, second.id, team_names)
@@ -325,8 +325,8 @@ class TestVersus(commands.Cog):
                     "b_text": (self._bat(int(br), int(bf), int(bno)), self._bowl(int(bw), int(bc), int(bb))),
                     "winner": 1 if ar > br else 2 if br > ar else 0,
                 })
-            summary = (f"{len(opposed)} match(es) on opposing teams  •  {first.display_name} scored more in {a_more}, "
-                       f"{second.display_name} in {b_more}") if opposed else "No matches against each other yet"
+            summary = (f"{len(opposed)} match(es) on opposing teams  •  {first.name} scored more in {a_more}, "
+                       f"{second.name} in {b_more}") if opposed else "No matches against each other yet"
             renderer = vi.Renderer({
                 1: lambda: vi.render_overview("PLAYER HEAD TO HEAD", left, right, rows, edges, "GOOGLI MANAGER  •  HEAD TO HEAD"),
                 2: lambda: vi.render_matches("PLAYER HEAD TO HEAD", left, right, matches, summary, "GOOGLI MANAGER  •  HEAD TO HEAD"),

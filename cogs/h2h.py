@@ -771,9 +771,9 @@ class PlayerH2H(commands.Cog):
             })
 
         data = {
-            "a": {"name": a.display_name, "avatar": a_avatar, "team": a_team, "color": a_color,
+            "a": {"name": a.name, "avatar": a_avatar, "team": a_team, "color": a_color,
                   "mini": [("MATCHES", str(len(ra))), ("FANTASY", f"{fantasy[0]:.0f}")]},
-            "b": {"name": b.display_name, "avatar": b_avatar, "team": b_team, "color": b_color,
+            "b": {"name": b.name, "avatar": b_avatar, "team": b_team, "color": b_color,
                   "mini": [("MATCHES", str(len(rb))), ("FANTASY", f"{fantasy[1]:.0f}")]},
             "groups": groups, "matches": matches, "match_total": len(matches),
             "a_more": a_more, "b_more": b_more, "guild": guild.name,
@@ -843,7 +843,7 @@ class PlayerH2H(commands.Cog):
         avatar = await fetch_avatar(self.bot, member)
         overall = contrasting_overall_color(await overall_color_for(self.bot, ctx), color)
         data = {
-            "a": {"name": member.display_name, "avatar": avatar, "team": team, "color": color,
+            "a": {"name": member.name, "avatar": avatar, "team": team, "color": color,
                   "mini": [("MATCHES", str(len(ra))), ("FANTASY", f"{totals[0]:.0f}")]},
             "b": {"name": "All players", "avatar": None, "team": "LEAGUE AVERAGE", "color": overall,
                   "mini": [("PLAYERS", str(len(others))), ("FANTASY", f"{totals[1]:.0f}")]},

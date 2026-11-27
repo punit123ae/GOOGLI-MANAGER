@@ -309,7 +309,7 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
         except Exception:
             pass
     else:
-        initials = (member.display_name[:1] or "?").upper()
+        initials = (member.name[:1] or "?").upper()
         draw.text(
             (275, 405), initials,
             font=load_font(90, True), fill=white,
@@ -324,7 +324,7 @@ def make_stats_image(member, rows, guild_icon=None, avatar=None):
             pass
 
     draw.text(
-        (85, 642), member.display_name[:25],
+        (85, 642), member.name[:25],
         font=load_font(35, True), fill=white,
     )
     draw.text(
@@ -826,11 +826,11 @@ def make_stats_image_design2(member, rows, avatar=None, guild_icon=None, fieldin
             pass
     draw = ImageDraw.Draw(image)
     if not pasted_avatar:
-        initials = (getattr(member, "display_name", "?")[:1] or "?").upper()
+        initials = (getattr(member, "name", "?")[:1] or "?").upper()
         draw.text((800, avatar_y + 60), initials, font=load_font(74, True), fill=white, anchor="mt")
     draw.ellipse((avatar_x - 9, avatar_y - 9, avatar_x + avatar_size + 9, avatar_y + avatar_size + 9), outline=blue, width=5)
 
-    username = getattr(member, "display_name", "Player")
+    username = getattr(member, "name", "Player")
     username_size = 29
     username_font = load_font(username_size, True)
     while draw.textbbox((0, 0), username, font=username_font)[2] > 455 and username_size > 16:
@@ -947,7 +947,7 @@ def make_stats_image_new_design(member, rows, design, avatar=None):
     bat_impact, bowl_impact = design2_impact_scores(rows, t)
     bat_pts, bowl_pts, fantasy = fantasy_raw_points(rows, t)
     rating = overall_rating(bat_impact, bowl_impact)
-    username = getattr(member, 'display_name', 'PLAYER')
+    username = getattr(member, "name", 'PLAYER')
     team = get_player_team_name(member).upper() or 'NO TEAM'
     guild = getattr(getattr(member, 'guild', None), 'name', 'PLAYER STATS').upper()
     # Give each new design its own full canvas and visual language. These must
@@ -1109,7 +1109,7 @@ def make_stats_image_experience(
     bat_pts, bowl_pts, _ = fantasy_raw_points(rows, t)
     fantasy = bat_pts + bowl_pts + float(fielding_points or 0)
     rating = overall_rating(bat_impact, bowl_impact)
-    name = str(getattr(member, "display_name", "PLAYER"))[:32]
+    name = str(getattr(member, "name", "PLAYER"))[:32]
     team = str(get_player_team_name(member) or "NO TEAM CONNECTED").upper()[:38]
     guild = str(getattr(getattr(member, "guild", None), "name", "KASHMIR TITANS")).upper()[:38]
     role = classify_player(t, rows)
@@ -1540,7 +1540,7 @@ def make_form_graph_image(member, graph_rows, avatar=None):
     def txt(x, y, value, size=18, color=white, anchor=None):
         d.text((x, y), str(value), font=F(size, True), fill=color, anchor=anchor)
 
-    name = str(getattr(member, "display_name", "PLAYER"))[:32]
+    name = str(getattr(member, "name", "PLAYER"))[:32]
     team = str(get_player_team_name(member) or "NO TEAM CONNECTED").upper()[:38]
     # --- header ---
     size, ax, ay = 72, 76, 36
@@ -1755,7 +1755,7 @@ def make_stats_image_design3(
         image = image.resize((width, height), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
     guild = getattr(getattr(member, "guild", None), "name", "GOOGLI MANAGER").upper()
-    username = getattr(member, "display_name", "PLAYER")
+    username = getattr(member, "name", "PLAYER")
     team_name = get_player_team_name(member).upper() or "NO TEAM CONNECTED"
 
     # Reuse Design 2's exact background artwork; only the layout and panels differ.

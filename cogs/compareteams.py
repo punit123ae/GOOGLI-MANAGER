@@ -438,7 +438,7 @@ class CompareTeams(commands.Cog):
     def _display_name(self, guild, uid):
         member = guild.get_member(int(uid))
         if member is not None:
-            return member.display_name
+            return member.name
         name = self.core._username(guild, int(uid))
         return f"Player {str(uid)[-4:]}" if name == str(uid) else name
 
