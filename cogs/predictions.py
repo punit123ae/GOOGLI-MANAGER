@@ -85,13 +85,13 @@ class PredictView(discord.ui.View):
                 ranked.append(entries)
                 option_lists.append([
                     (name, str(uid), (f"AI PICK • {score:g}" if i == 0 and score else f"Score: {score:g}"))
-                    for i, (uid, name, score) in enumerate(entries[:25])
+                    for i, (uid, name, score) in enumerate(entries)
                 ])
             match_entries = sorted(
                 [(uid, name, score, team["name"]) for team, entries in zip(self.teams, ranked)
                  for uid, name, score in entries],
                 key=lambda item: (-item[2], item[0])
-            )[:25]
+            )
             match_options = [
                 (f"{name} ({team_name})", str(uid),
                  (f"AI PICK • {score:g}" if i == 0 and score else f"{team_name} • {score:g}"))
