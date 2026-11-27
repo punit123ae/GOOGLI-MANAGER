@@ -135,6 +135,10 @@ class PredictView(discord.ui.View):
         if picks_done(self.picks) == 0:
             await interaction.response.send_message("Make at least one pick first.", ephemeral=True)
             return
+        if not self.cog.predictions_enabled():
+            self.stop()
+            await interaction.response.edit_message(content="Predictions are temporarily disabled by the bot owner.", view=None)
+            return
         if self.cog.match_closed(self.ctx.guild.id, self.match["number"]):
             self.stop()
             await interaction.response.edit_message(content="Predictions for this match are closed.", view=None)
@@ -143,7 +147,8 @@ class PredictView(discord.ui.View):
         try:
             self.cog.save_picks(self.ctx.guild.id, self.match["number"], self.ctx.author.id, self.picks)
             png = await self.cog.card(self.ctx.guild, self.ctx.author, self.match, *self.teams, self.picks)
-            await interaction.channel.send(
+            channel = self.cog.output_channel(self.ctx.guild, interaction.channel)
+            await channel.send(
                 content=f"{self.ctx.author.mention} locked in their predictions for match #{self.match['number']}!",
                 file=discord.File(io.BytesIO(png), filename="prediction.png"),
                 allowed_mentions=discord.AllowedMentions(users=[self.ctx.author]))
@@ -182,6 +187,9 @@ class Predictions(commands.Cog):
             "CREATE TABLE IF NOT EXISTS predict_picks (guild_id INTEGER NOT NULL, number INTEGER NOT NULL, "
             "user_id INTEGER NOT NULL, picks TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
             "PRIMARY KEY (guild_id, number, user_id))")
+        db.execute("CREATE TABLE IF NOT EXISTS predict_settings (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)")
+        db.execute("CREATE TABLE IF NOT EXISTS predict_global_state (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1)")
+        db.execute("INSERT OR IGNORE INTO predict_global_state (id, enabled) VALUES (1, 1)")
         db.commit()
 
     @property
@@ -200,6 +208,43 @@ class Predictions(commands.Cog):
                                   + ([int(team["vice_captain_id"])] if team["vice_captain_id"] else [])
                                   + [int(r["user_id"]) for r in rows]))
 
+    def _ranked_roster(self, guild_id, team, category):
+        \"\"\"Order roster by imported performance; stable fallback is user ID.\"\"\"
+        from .stats import fantasy_raw_points
+        roster = self._roster(team)
+        if not roster:
+            return [], {}
+        placeholders = \",\".join(\"?\" for _ in roster)
+        rows = self.bot.db.execute(
+            f\"SELECT p.user_id,p.runs,p.balls_faced,p.runs_conceded,p.balls_bowled,p.wickets,p.not_out \"
+            f\"FROM player_match_stats p JOIN stats_imports i ON i.source_message_id=p.source_message_id \"
+            f\"WHERE i.guild_id=? AND p.user_id IN ({placeholders})\",
+            (int(guild_id), *roster)).fetchall()
+        by_user = {uid: [] for uid in roster}
+        for row in rows:
+            by_user.setdefault(int(row[\"user_id\"]), []).append(dict(row))
+        field = {}
+        try:
+            for row in self.bot.db.execute(
+                f\"SELECT user_id,catches_caught,catches_dropped FROM fielding_stats WHERE guild_id=? AND user_id IN ({placeholders})\",
+                (int(guild_id), *roster)):
+                field[int(row[\"user_id\"])] = int(row[\"catches_caught\"]) * 5 - int(row[\"catches_dropped\"]) * 10
+        except Exception:
+            pass
+        scores = {}
+        for uid in roster:
+            player_rows = by_user.get(uid, [])
+            if category == \"runs\":
+                score = sum(int(r[\"runs\"]) for r in player_rows)
+            elif category == \"wickets\":
+                score = sum(int(r[\"wickets\"]) for r in player_rows)
+            elif category == \"catches\":
+                score = field.get(uid, 0)
+            else:
+                score = fantasy_raw_points(player_rows)[2] + field.get(uid, 0)
+            scores[uid] = score
+        return sorted(roster, key=lambda uid: (-scores.get(uid, 0), uid)), scores
+
     def _teams_from(self, guild_id, text):
         parts = [p.strip() for p in re.split(r"\s*\|\s*|\s+vs\.?\s+", text, flags=re.I) if p.strip()]
         if len(parts) != 2:
@@ -213,6 +258,18 @@ class Predictions(commands.Cog):
         if int(found[0]["id"]) == int(found[1]["id"]):
             return None, None, "Pick two different teams."
         return found[0], found[1], None
+
+    def predictions_enabled(self):
+        row = self.bot.db.execute("SELECT enabled FROM predict_global_state WHERE id=1").fetchone()
+        return bool(row[0]) if row else True
+
+    def output_channel(self, guild, fallback):
+        row = self.bot.db.execute("SELECT channel_id FROM predict_settings WHERE guild_id=?", (guild.id,)).fetchone()
+        if row and row[0]:
+            channel = guild.get_channel(int(row[0]))
+            if channel is not None and hasattr(channel, "send"):
+                return channel
+        return fallback
 
     def match_closed(self, guild_id, number):
         row = self.bot.db.execute("SELECT closed FROM predict_matches WHERE guild_id=? AND number=?",
@@ -345,8 +402,36 @@ class Predictions(commands.Cog):
         await ctx.reply(f"✅ Match **#{number}** added: **{team_a['name']}** vs **{team_b['name']}**. "
                         "Everyone can now predict it with `+predict`.", mention_author=False, allowed_mentions=none)
 
+
+    # ---------------------------------------------------------- prediction setup
+    @commands.command(name="setpredictchannel", aliases=["predictsetchannel", "setpredchannel"])
+    @commands.guild_only()
+    async def setpredictchannel(self, ctx, channel: discord.TextChannel = None):
+        """Set the channel where prediction cards are posted, or show the current setting."""
+        row = self.bot.db.execute("SELECT channel_id FROM predict_settings WHERE guild_id=?", (ctx.guild.id,)).fetchone()
+        if channel is None:
+            current = ctx.guild.get_channel(int(row[0])) if row and row[0] else None
+            return await ctx.reply(f"Prediction card channel: {current.mention if current else 'Not set (cards use the command channel).'}", mention_author=False)
+        if not await owner_or_whitelisted(ctx, command_name="setpredictchannel", app_owner=True):
+            return await ctx.reply("Only the bot owner or a whitelisted role can change the prediction channel.", mention_author=False)
+        self.bot.db.execute("INSERT INTO predict_settings (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id", (ctx.guild.id, channel.id))
+        self.bot.db.commit()
+        await ctx.reply(f"Prediction cards will now be posted in {channel.mention}.", mention_author=False)
+
+    @commands.command(name="predicttoggle", aliases=["togglepredict", "predictlock"])
+    @commands.is_owner()
+    @commands.guild_only()
+    async def predicttoggle(self, ctx, state: str = ""):
+        """Bot owner only: pause or resume predictions globally."""
+        current = self.predictions_enabled()
+        wanted = (not current) if not state else state.lower() in ("on", "enable", "enabled", "open")
+        if state and state.lower() not in ("on", "enable", "enabled", "open", "off", "disable", "disabled", "close"):
+            return await ctx.reply("Use +predicttoggle on or +predicttoggle off.", mention_author=False)
+        self.bot.db.execute("UPDATE predict_global_state SET enabled=? WHERE id=1", (int(wanted),))
+        self.bot.db.commit()
+        await ctx.reply("Predictions are now OPEN globally." if wanted else "Predictions are now PAUSED globally. Existing predictions can still be viewed.", mention_author=False)
     # ------------------------------------------------------------------ +predict
-    @commands.command(name="predict", aliases=["prediction", "predictmatch"])
+    @commands.command(name="predict", aliases=["prediction", "predictmatch", "pred", "mypredict"])
     @commands.guild_only()
     async def predict(self, ctx, *, text: str = ""):
         """Predict a match: +predict, +predict <number>. Show one: +predict view [number] [@user]."""
@@ -387,8 +472,12 @@ class Predictions(commands.Cog):
             return await ctx.send(file=discord.File(io.BytesIO(png), filename="prediction.png"))
         if row["closed"]:
             return await ctx.reply(f"Predictions for match #{number} are closed.", mention_author=False)
-        names = lambda team: [(uid, self.compare._display_name(ctx.guild, uid)) for uid in self._roster(team)]
-        squads = [names(team_a), names(team_b)]
+        if not self.predictions_enabled():
+            return await ctx.reply("Predictions are temporarily disabled by the bot owner.", mention_author=False)
+        squads = []
+        for team in (team_a, team_b):
+            ranked, _scores = self._ranked_roster(ctx.guild.id, team, "runs")
+            squads.append([(uid, self.compare._display_name(ctx.guild, uid)) for uid in ranked])
         picks = self.load_picks(ctx.guild.id, number, ctx.author.id)
         view = PredictView(self, ctx, row, team_a, team_b, squads, picks)
         view.message = await ctx.reply(view._status(), view=view, mention_author=False)
