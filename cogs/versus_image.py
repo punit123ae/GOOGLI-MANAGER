@@ -263,7 +263,7 @@ def _title(d, xy, value, size, fill=WHITE, anchor="la", kind="head"):
 
 def _png(image):
     out = io.BytesIO()
-    image.save(out, format="PNG", compress_level=3)
+    image.save(out, format="PNG", compress_level=1)
     return out.getvalue()
 
 
