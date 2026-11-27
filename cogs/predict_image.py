@@ -232,7 +232,7 @@ def render_board(data):
     c.card((50, 186, 1550, 852), 26, 150)
     d = c.seal()
     _tile_glass(c, (50, 22, 1550, 170), GOLD)
-    _title(d, (76, 78), "PREDICTION LEADERBOARD", 44, WHITE, "lm", "head")
+    _title(d, (76, 78), str(data.get("title", "PREDICTION LEADERBOARD")).upper(), 44, WHITE, "lm", "head")
     _text(d, (76, 128), str(data.get("subtitle", "")).upper(), 18, GOLD, "lm", "head")
     _text(d, (1524, 60), str(data.get("guild", "")).upper(), 13, DIM, "rm")
     rows = data.get("rows", [])
@@ -253,16 +253,16 @@ def render_board(data):
         name = (row.get("name") or "?").upper()
         size = _fit(d, name, 380, 26, 14, "head")
         _text(d, (222, y + 26), _clip(d, name, 380, size, "head"), size, WHITE if i else GOLD, "lm", "head")
-        _text(d, (626, y + 26), f"{row.get('matches', 0)} MATCH{'ES' if row.get('matches', 0) != 1 else ''}", 14, MUTED,
-              "lm", "bold")
-        bar_x1, bar_x2 = 770, 1330
+        _text(d, (626, y + 26), row.get("note") or f"{row.get('matches', 0)} MATCH{'ES' if row.get('matches', 0) != 1 else ''}",
+              14, MUTED, "lm", "bold")
+        bar_x1, bar_x2 = 770, 1280
         d.rounded_rectangle((bar_x1, y + 18, bar_x2, y + 34), radius=8, fill=_mix(MUTED, _INK, 0.8))
         fill = max(14, int((bar_x2 - bar_x1) * row["points"] / top))
         d.rounded_rectangle((bar_x1, y + 18, bar_x1 + fill, y + 34), radius=8, fill=tone if i < 3 else (100, 185, 255))
         _text(d, (1440, y + 26), str(row["points"]), 34, tone if i < 3 else WHITE, "rm", "head")
-        _text(d, (1500, y + 32), "PTS", 13, MUTED,
+        _text(d, (1500, y + 32), str(data.get("unit", "PTS")), 13, MUTED,
               "rm", "bold")
-    _footer(c, "GOOGLI MANAGER  •  PREDICTIONS", data.get("guild"))
+    _footer(c, data.get("footer", "GOOGLI MANAGER  •  PREDICTIONS"), data.get("guild"))
     return c.image
 
 

@@ -122,6 +122,7 @@ class GoogIManagerBot(commands.Bot):
             "cogs.compareteams",
             "cogs.matchpreview",
             "cogs.xi",
+            "cogs.stocks",
             "cogs.potd",
             "cogs.insights",
             "cogs.memory_trim",
