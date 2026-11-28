@@ -335,7 +335,7 @@ class Stocks(commands.Cog):
                     avatars = await self._avatars(guild, chunk)
                     rows = [{"name": self._name(guild, u), "ticker": tickers[u], "avatar": avatars.get(u),
                              "price": market[u]["price"], "change": market[u]["change"],
-                             "left": max(0, S["supply"] - held.get(u, 0)), "rank": index * PAGE_MARKET + n + 1}
+                             "spark": market[u]["history"][-8:], "left": max(0, S["supply"] - held.get(u, 0)), "rank": index * PAGE_MARKET + n + 1}
                             for n, u in enumerate(chunk)]
                     return await self._draw(render_market_png, {
                         "guild": guild.name, "count": len(market), "trend": trend, "page": index + 1, "pages": pages,
@@ -360,8 +360,7 @@ class Stocks(commands.Cog):
         eco = stock["conceded"] / stock["bowled"] * BALLS_PER_OVER if stock["bowled"] else 0.0
         overs = stock["bowled"] / BALLS_PER_OVER
         n = len(stock["history"])
-        last = [(n - len(stock["history"][-5:]) + i + 1, price, stock["deltas"][-5:][i])
-                for i, price in enumerate(stock["history"][-5:])]
+        shown = stock["history"][-20:]
         return {"guild": guild.name, "name": self._name(guild, uid), "ticker": tickers[uid], "avatar": avatars.get(uid),
                 "price": stock["price"], "change": stock["change"], "base": S["base_price"],
                 "factors": [("Runs scored", int(round(f["runs"]))), ("Wickets taken", int(round(f["wickets"]))),
@@ -370,7 +369,7 @@ class Stocks(commands.Cog):
                 "sr": sr, "sr_par": stock["par_bat"] * 100, "wickets": stock["wickets"],
                 "wpo": stock["wickets"] / overs if overs else 0.0, "eco": eco,
                 "eco_par": stock["par_bowl"] * BALLS_PER_OVER, "ducks": stock["ducks"], "duck_pen": S["duck_penalty"],
-                "games": stock["games"], "last": last, "rank": rank, "listed": len(market),
+                "games": stock["games"], "history": shown, "first": n - len(shown) + 1, "rank": rank, "listed": len(market),
                 "left": max(0, S["supply"] - self._held_totals(guild.id).get(uid, 0)), "supply": S["supply"],
                 "max": S["max_per_user"], "holding": holding}
 
@@ -431,6 +430,13 @@ class Stocks(commands.Cog):
         richer = sum(1 for a in everyone
                      if self._worth(guild.id, int(a["user_id"]), market, int(a["cash"]))[0] > networth)
         pages = max(1, (len(holdings) + PAGE_PORTFOLIO - 1) // PAGE_PORTFOLIO)
+        values = [(self._name(guild, int(h["player_id"])), int(h["shares"]) * market.get(int(h["player_id"]), {}).get("price", 0))
+                  for h in holdings]
+        alloc = values[:5]
+        if len(values) > 5:
+            alloc.append(("Other players", sum(v for _n, v in values[5:])))
+        if cash > 0:
+            alloc.append(("Cash", cash))
         shares = sum(int(h["shares"]) for h in holdings)
         async with ctx.typing():
             try:
@@ -445,12 +451,13 @@ class Stocks(commands.Cog):
                         price = market.get(uid, {}).get("price", 0)
                         rows.append({"name": self._name(guild, uid), "ticker": tickers.get(uid, "????"),
                                      "avatar": avatars.get(uid), "shares": n, "price": price, "value": n * price,
-                                     "pl": n * price - int(h["cost"])})
+                                     "pl": n * price - int(h["cost"]),
+                                     "spark": market.get(uid, {}).get("history", [])[-8:]})
                     return await self._draw(render_portfolio_png, {
                         "guild": guild.name, "user": {"name": member.name, "avatar": my_avatar}, "rank": richer + 1,
                         "players": len(everyone), "cash": cash, "worth": invested, "paid": paid, "pl": invested - paid,
                         "shares": shares, "count": len(holdings), "page": index + 1, "pages": pages,
-                        "max": S["max_per_user"], "rows": rows})
+                        "max": S["max_per_user"], "alloc": alloc, "rows": rows})
 
                 await self._send_pages(ctx, pages, build, "portfolio.png")
             except Exception as exc:
