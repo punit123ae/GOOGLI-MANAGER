@@ -134,6 +134,12 @@ class StockPager(ImagePager):
         self.add_item(self.last_button)
         self._sync()
 
+    def _sync(self):
+        super()._sync()
+        if hasattr(self, "first_button"):
+            self.first_button.disabled = self.index <= 0
+            self.last_button.disabled = self.index >= len(self.pages) - 1
+
     async def _first(self, interaction):
         await self._show(interaction, 0)
 
