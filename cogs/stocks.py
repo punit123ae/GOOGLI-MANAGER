@@ -168,6 +168,13 @@ class Stocks(commands.Cog):
         for row in self.bot.db.execute("SELECT key, value FROM stock_settings WHERE guild_id=?", (int(guild_id),)):
             if row["key"] in S:
                 S[row["key"]] = float(row["value"]) if row["key"] in FLOAT_KEYS else int(row["value"])
+
+        # Keep price movement and the minimum price proportional to the base.
+        # Movement weights are calibrated against the original 100-coin base.
+        scale = max(0.01, float(S["base_price"]) / 100.0)
+        for key in ("per_run", "per_wicket", "sr_weight", "eco_weight",
+                    "duck_penalty", "catch_bonus", "drop_penalty", "min_price"):
+            S[key] = S[key] * scale
         return S
 
     # ------------------------------------------------------------------ market data
@@ -587,6 +594,50 @@ class Stocks(commands.Cog):
                         "`+stockset default` restores everything. Price settings recalculate all prices at once; "
                         "use `+stockreset confirm` to give everyone a fresh start.", mention_author=False)
 
+    @commands.command(name="addbal", aliases=["addstockbal", "addstockcash"])
+    @commands.guild_only()
+    async def addbal(self, ctx, member: discord.Member = None, amount: str = ""):
+        """Add coins to a member stock wallet: +addbal @user 50000."""
+        if not await owner_or_whitelisted(ctx, command_name="addbal", app_owner=True):
+            return await ctx.reply("Only the bot owner or someone trusted in this server can add stock balance.", mention_author=False)
+        if member is None or not amount:
+            return await ctx.reply("Usage: `+addbal @user <positive amount>`.", mention_author=False)
+        try:
+            value = int(amount.replace(",", "").replace("_", ""))
+        except ValueError:
+            value = 0
+        if value <= 0:
+            return await ctx.reply("Amount must be a positive whole number.", mention_author=False)
+        db, gid = self.bot.db, ctx.guild.id
+        self._account(gid, member.id, self._settings(gid))
+        db.execute("UPDATE stock_accounts SET cash=cash+? WHERE guild_id=? AND user_id=?", (value, gid, member.id))
+        db.commit()
+        cash = db.execute("SELECT cash FROM stock_accounts WHERE guild_id=? AND user_id=?", (gid, member.id)).fetchone()["cash"]
+        await ctx.reply(f"✅ Added **{value:,}** coins to {member.mention} stock wallet. New balance: **{int(cash):,}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name="removebal", aliases=["removestockbal", "removestockcash"])
+    @commands.guild_only()
+    async def removebal(self, ctx, member: discord.Member = None, amount: str = ""):
+        """Remove coins from a member stock wallet: +removebal @user 50000."""
+        if not await owner_or_whitelisted(ctx, command_name="removebal", app_owner=True):
+            return await ctx.reply("Only the bot owner or someone trusted in this server can remove stock balance.", mention_author=False)
+        if member is None or not amount:
+            return await ctx.reply("Usage: `+removebal @user <positive amount>`.", mention_author=False)
+        try:
+            value = int(amount.replace(",", "").replace("_", ""))
+        except ValueError:
+            value = 0
+        if value <= 0:
+            return await ctx.reply("Amount must be a positive whole number.", mention_author=False)
+        db, gid = self.bot.db, ctx.guild.id
+        self._account(gid, member.id, self._settings(gid))
+        row = db.execute("SELECT cash FROM stock_accounts WHERE guild_id=? AND user_id=?", (gid, member.id)).fetchone()
+        current = int(row["cash"])
+        if value > current:
+            return await ctx.reply(f"{member.mention} only has **{current:,}** coins. Cannot remove **{value:,}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        db.execute("UPDATE stock_accounts SET cash=cash-? WHERE guild_id=? AND user_id=?", (value, gid, member.id))
+        db.commit()
+        await ctx.reply(f"✅ Removed **{value:,}** coins from {member.mention} stock wallet. New balance: **{current-value:,}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
     @commands.command(name="stockreset", aliases=["resetstocks", "resetstockmarket"])
     @commands.guild_only()
     async def stockreset(self, ctx, confirm: str = ""):
