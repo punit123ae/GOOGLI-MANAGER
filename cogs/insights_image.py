@@ -510,3 +510,129 @@ def render_streaks(data):
         _text(d, (1285, 400), "NO ACTIVE RUNS", 20, DIM, "mm")
     _footer(c, "GOOGLI MANAGER  •  STREAKS", data.get("guild"))
     return _png(c.image)
+
+
+# =========================================================================== +scout
+
+def _scout_role(p):
+    role = p.get("role") or "Batsman"
+    return role.upper(), {"Batsman": BAT_COLOR, "Bowler": BOWL_COLOR, "All-Rounder": FIELD_COLOR}.get(role, GOLD)
+
+
+def _scout_rating(d, cx, cy, value, radius=24):
+    _badge(d, cx, cy, radius, value, max(16, int(radius * 0.9)))
+
+
+def render_scout_list(data, page_index=0):
+    """All-player scouting board, 12 players per page, sorted by overall rating."""
+    players = data["players"]
+    page_size = int(data.get("page_size", 12))
+    total = max(1, (len(players) + page_size - 1) // page_size)
+    page_index = max(0, min(int(page_index), total - 1))
+    shown = players[page_index * page_size:(page_index + 1) * page_size]
+    color = shown[0].get("color") if shown else (46, 134, 222)
+    c = _canvas(color, None)
+    c.card((50, 24, 1550, 112), 24)
+    c.card((50, 128, 1550, 852), 26)
+    c.seal()
+    d = c.d
+    _title(d, (80, 38), "PLAYER SCOUTING", 42, WHITE, "la", "head")
+    _text(d, (1520, 58), f"{data.get('guild', 'SERVER').upper()}  •  {len(players)} PLAYERS  •  PAGE {page_index + 1}/{total}", 14, MUTED, "ra")
+    _text(d, (84, 154), "RANK", 12, MUTED)
+    _text(d, (150, 154), "PLAYER", 12, MUTED)
+    for label, x in (("TEAM", 700), ("ROLE", 1030), ("BAT", 1190), ("BOWL", 1280), ("FIELD", 1370), ("RATING", 1495)):
+        _text(d, (x, 154), label, 12, MUTED, "mm" if label != "RATING" else "ra")
+    row_h = 54
+    for i, who in enumerate(shown):
+        p = who["p"]
+        y = 176 + i * row_h
+        role, role_color = _scout_role(p)
+        if i % 2 == 0:
+            d.rounded_rectangle((68, y, 1532, y + 48), radius=12, fill=BOX)
+        d.rounded_rectangle((68, y + 8, 73, y + 40), radius=2, fill=role_color)
+        _text(d, (98, y + 24), str(page_index * page_size + i + 1).zfill(2), 16, c.a, "mm", "head")
+        _avatar(c, who, 38, (126, y + 5), c.a)
+        _text(d, (178, y + 24), _clip(d, who["name"], 470, 19, "head"), 19, WHITE, "lm", "head")
+        _text(d, (700, y + 24), _clip(d, who.get("team") or "FREE AGENT", 280, 15), 15, MUTED, "mm")
+        _pill(d, 1030 - int(d.textlength(role, font=font(12))) // 2 - 12, y + 11, role, 12,
+              fill=None, fg=role_color, outline=role_color, pad=10, h=26)
+        for label, x, key in (("BAT", 1190, "bat"), ("BOWL", 1280, "bowl"), ("FIELD", 1370, "field")):
+            value = p.get(key)
+            _text(d, (x, y + 24), "—" if value is None else f"{value:.0f}", 17,
+                  DIM if value is None else _rating_color(value), "mm", "head")
+        _scout_rating(d, 1495, y + 24, p["value"], 20)
+    _text(d, (80, 874), "GOOGLI MANAGER  •  ALL PLAYERS  •  RANKED BY OVERALL RATING", 12, DIM)
+    _text(d, (1520, 874), f"{page_index + 1}/{total}", 12, DIM, "ra")
+    return _png(c.image)
+
+
+def render_scout_player(data):
+    """Individual player scouting report using the same glass-card / team-colour system."""
+    who, p = data["who"], data["who"]["p"]
+    c = _canvas(who.get("color"), None)
+    boxes = [(50, 24, 1550, 240), (50, 258, 790, 560), (810, 258, 1550, 560), (50, 578, 1550, 852)]
+    c.card(boxes[0], 26)
+    for box in boxes[1:]:
+        c.card(box, 24)
+    c.seal()
+    d = c.d
+    accent = c.a
+    _avatar(c, who, 150, (82, 56), accent)
+    _name(d, who["name"], 260, 58, 720, 48)
+    _team_pill(d, 260, 122, who.get("team"), accent, size=15)
+    role, role_color = _scout_role(p)
+    _pill(d, 260, 170, role, 13, fill=None, fg=role_color, outline=role_color, pad=12, h=28)
+    _text(d, (710, 184), f"{p['matches']} MATCHES  •  {p['style'].upper()}", 14, MUTED)
+    _text(d, (1480, 70), "OVERALL RATING", 14, MUTED, "ra")
+    _scout_rating(d, 1450, 150, p["value"], 62)
+    _text(d, (1480, 224), f"{p['value']:.1f} / 100", 15, WHITE, "ra", "bold")
+
+    # Three skill cards.
+    skills = (("BATTING", "bat", BAT_COLOR), ("BOWLING", "bowl", BOWL_COLOR), ("FIELDING", "field", FIELD_COLOR))
+    for box, (label, key, col) in zip(boxes[1:3] + [boxes[3]], skills):
+        x1, y1, x2, y2 = box
+        _text(d, (x1 + 28, y1 + 22), label, 19, col, "la", "head")
+        value = p.get(key)
+        _text(d, (x1 + 28, y1 + 62), "—" if value is None else f"{value:.0f}", 48, DIM if value is None else _rating_color(value), "la", "head")
+        _text(d, (x1 + 28, y1 + 118), "SERVER PERCENTILE RATING", 11, MUTED)
+        d.rounded_rectangle((x1 + 28, y1 + 150, x2 - 28, y1 + 164), radius=7, fill=TRACK)
+        if value is not None:
+            d.rounded_rectangle((x1 + 28, y1 + 150, x1 + 28 + int((x2 - x1 - 56) * min(100, value) / 100),
+                                 y1 + 164), radius=7, fill=col)
+        if key == "bat":
+            rows = [("RUNS", f"{p['runs']:,}"), ("AVG", "—" if p["bat_avg"] is None else f"{p['bat_avg']:.1f}"),
+                    ("STRIKE RATE", "—" if p["strike_rate"] is None else f"{p['strike_rate']:.1f}"),
+                    ("INNINGS", str(p["bat_inn"]))]
+        elif key == "bowl":
+            rows = [("WICKETS", str(p["wickets"])), ("ECONOMY", "—" if p["economy"] is None else f"{p['economy']:.2f}"),
+                    ("BOWL AVG", "—" if p["bowl_avg"] is None else f"{p['bowl_avg']:.1f}"),
+                    ("BOWL SR", "—" if p["bowl_sr"] is None else f"{p['bowl_sr']:.1f}")]
+        else:
+            rows = [("CATCHES", str(p["catches"])), ("DROPS", str(p["drops"])),
+                    ("CATCH RATE", "—" if p["catch_eff"] is None else f"{p['catch_eff']:.0f}%"),
+                    ("FANTASY", f"{p['fantasy']:.0f}")]
+        for i, (name, val) in enumerate(rows):
+            yy = y1 + 190 + i * 34
+            xx = x1 + 28 + (i % 2) * ((x2 - x1 - 56) / 2)
+            _text(d, (xx, yy), name, 10, MUTED)
+            _text(d, (xx, yy + 14), val, 19, WHITE, "la", "head")
+
+    # Recent form strip and profile details.
+    _text(d, (82, 606), "RECENT FORM  •  LAST 5 MATCHES", 17, accent, "la", "head")
+    trend = p.get("trend") or []
+    if trend:
+        peak = max(max(trend), 1)
+        for i, value in enumerate(trend[-5:]):
+            x = 100 + i * 125
+            h = max(6, int(74 * value / peak))
+            d.rounded_rectangle((x, 752 - h, x + 54, 752), radius=8, fill=accent)
+            _text(d, (x + 27, 734 - h), f"{value:.0f}", 12, WHITE, "mm", "bold")
+            _text(d, (x + 27, 772), f"M{i + 1}", 11, MUTED, "mm")
+    _text(d, (790, 632), "PROFILE", 13, MUTED)
+    _text(d, (790, 666), f"ROLE  •  {role}", 17, WHITE, "la", "bold")
+    _text(d, (790, 704), f"STYLE  •  {p['style'].upper()}  /  {p['bstyle'].upper()}", 16, WHITE)
+    _text(d, (790, 742), f"FORM RATING  •  {p['form']:.0f}", 16, WHITE)
+    _text(d, (790, 780), f"FANTASY POINTS  •  {p['fantasy']:.0f}", 16, WHITE)
+    _text(d, (790, 818), f"PLAYER ID  •  {who['uid']}", 12, DIM)
+    _footer(c, f"GOOGLI MANAGER  •  PLAYER SCOUTING  •  {who['name']}"[:90], data.get("guild"))
+    return _png(c.image)
