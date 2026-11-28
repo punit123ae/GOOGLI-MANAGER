@@ -444,7 +444,8 @@ class Stocks(commands.Cog):
                 else:
                     start_index = 0
                 await self._send_pages(ctx, pages, build, "market.png", start_index=start_index)
-            except Exception as exc:                import traceback
+            except Exception as exc:
+                import traceback
                 traceback.print_exc()
                 print(f"[stocks] failed: {type(exc).__name__}: {exc}", flush=True)
                 await ctx.reply("I couldn't draw the market. Check the bot logs.", mention_author=False)
@@ -643,7 +644,8 @@ class Stocks(commands.Cog):
     @commands.command(name="addbal", aliases=["addstockbal", "addstockcash"])
     @commands.guild_only()
     async def addbal(self, ctx, member: discord.Member = None, amount: str = ""):
-        """Add coins to a member stock wallet: +addbal @user 50000."""        if not await owner_or_whitelisted(ctx, command_name="addbal", app_owner=True):
+        """Add coins to a member stock wallet: +addbal @user 50000."""
+        if not await owner_or_whitelisted(ctx, command_name="addbal", app_owner=True):
             return await ctx.reply("Only the bot owner or someone trusted in this server can add stock balance.", mention_author=False)
         if member is None or not amount:
             return await ctx.reply("Usage: `+addbal @user <positive amount>`.", mention_author=False)
