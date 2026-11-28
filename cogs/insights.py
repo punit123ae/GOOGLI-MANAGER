@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from . import xi_engine
 from .h2h import fetch_avatar, on_cooldown, render_png, team_role_color
-from .insights_image import render_compare_players, render_form
+from .insights_image import render_compare_players, render_form, render_scout_list, render_scout_player
 
 MENTION = re.compile(r"<@!?(\d+)>")
 USAGE_FORM = "Use `+form` (yourself) or `+form @player`."
@@ -198,6 +198,76 @@ class Insights(commands.Cog):
             except Exception:
                 pass
             await ctx.send("I couldn't build the form card. Check the bot logs.")
+
+
+    # ------------------------------------------------------------------ +scout
+    @commands.command(name="scout", aliases=["scouting", "playersearch"])
+    @commands.guild_only()
+    async def scout(self, ctx, *, player: str = ""):
+        """All-player scouting board: +scout, or an individual report: +scout @player."""
+        if self.compare is None or self.core is None or self.bot.get_cog("PlayingXI") is None:
+            return await ctx.reply("The team system isn't loaded right now.", mention_author=False)
+        if await self._busy(ctx):
+            return
+        loading = await ctx.reply("⏳ Building the scouting report...", mention_author=False)
+        try:
+            rated = self.rated_all(ctx.guild.id)
+            if player.strip():
+                ids = await self.members_from(ctx, player, "Use `+scout` to browse all players or `+scout @player` for one report.", need=1, max_n=1)
+                if not ids:
+                    await loading.delete()
+                    return
+                who = await self.person(ctx.guild, ids[0], rated)
+                if not who["p"]["matches"] and not who["p"]["catches"] and not who["p"]["drops"]:
+                    await loading.edit(content=f"**{who['name']}** has no recorded tournament stats yet.")
+                    return
+                png = await render_png(render_scout_player, {"who": who, "guild": ctx.guild.name})
+                await self._send(ctx, loading, png, "scout_player.png")
+                return
+
+            # Include every player with imported match or fielding records in this server.
+            core = self.core
+            compare = self.compare
+            players = []
+            for uid, profile in rated.items():
+                member = ctx.guild.get_member(int(uid))
+                team = core._membership(ctx.guild.id, int(uid))
+                players.append({
+                    "uid": int(uid),
+                    "name": compare._display_name(ctx.guild, int(uid)),
+                    "avatar": await fetch_avatar(self.bot, member) if member else None,
+                    "team": str(team["name"]) if team else None,
+                    "color": team_role_color(core, ctx.guild, team) if team else None,
+                    "p": profile,
+                })
+            players.sort(key=lambda w: (-w["p"]["value"], -w["p"]["matches"], w["name"].casefold()))
+            if not players:
+                await loading.edit(content="No players with recorded tournament stats were found.")
+                return
+            page_size = 12
+            page_count = (len(players) + page_size - 1) // page_size
+            data = {"players": players, "guild": ctx.guild.name, "page_size": page_size}
+            first = await render_png(render_scout_list, data, 0)
+            if page_count == 1:
+                await self._send(ctx, loading, first, "scout_players.png")
+                return
+            pager = ImagePager(
+                ctx, first, page_count,
+                lambda index: render_scout_list(data, index),
+                [f"Page {i + 1}" for i in range(page_count)],
+                "scout_players.png",
+            )
+            await loading.edit(content=f"**PLAYER SCOUTING BOARD** • {len(players)} players", attachments=[
+                discord.File(io.BytesIO(first), filename="scout_players.png")
+            ], view=pager)
+            pager.message = loading
+        except Exception as exc:
+            print(f"[scout] failed: {type(exc).__name__}: {exc}", flush=True)
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+            await ctx.send("I couldn't build the scouting board. Check the bot logs.")
 
 
 async def setup(bot):
