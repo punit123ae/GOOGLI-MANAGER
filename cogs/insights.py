@@ -10,7 +10,7 @@ import discord
 from discord.ext import commands
 
 from . import xi_engine
-from .h2h import fetch_avatar, on_cooldown, render_png, team_role_color
+from .h2h import ImagePager, fetch_avatar, on_cooldown, render_png, team_role_color
 from .insights_image import render_compare_players, render_form, render_scout_list, render_scout_player
 
 MENTION = re.compile(r"<@!?(\d+)>")
