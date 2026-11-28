@@ -93,9 +93,18 @@ def build_prices(matches_by_player, pars, S, fielding):
             for k, v in parts.items():
                 total[k] += v
             before = max(S["min_price"], int(round(value)))
-            value += sum(parts.values())
+
+            # Convert the performance score into a percentage of the base price.
+            # This keeps movement consistent at 100, 50k, or any other base price.
+            # Negative scores lower the stock; positive scores raise it.
+            raw_delta = sum(parts.values())
+            base_price = max(1.0, float(S["base_price"]))
+            move_pct = (raw_delta / base_price) * 10.0
+            move_pct = max(-8.0, min(8.0, move_pct))
+
+            value = max(float(S["min_price"]), value * (1.0 + move_pct / 100.0))
             now = max(S["min_price"], int(round(value)))
-            deltas.append(now - (before if history else S["base_price"]))
+            deltas.append(now - before)
             history.append(now)
             runs += m["runs"]; balls += m["balls_faced"]; conceded += m["runs_conceded"]
             bowled += m["balls_bowled"]; wickets += m["wickets"]
@@ -169,8 +178,8 @@ class Stocks(commands.Cog):
             if row["key"] in S:
                 S[row["key"]] = float(row["value"]) if row["key"] in FLOAT_KEYS else int(row["value"])
 
-        # Keep price movement and the minimum price proportional to the base.
-        # Movement weights are calibrated against the original 100-coin base.
+        # Keep movement weights and the minimum price proportional to the base.
+        # build_prices converts the resulting score to a capped percentage change.
         scale = max(0.01, float(S["base_price"]) / 100.0)
         for key in ("per_run", "per_wicket", "sr_weight", "eco_weight",
                     "duck_penalty", "catch_bonus", "drop_penalty", "min_price"):
@@ -197,8 +206,7 @@ class Stocks(commands.Cog):
         rows = db.execute(
             "SELECT p.user_id,p.runs,p.balls_faced,p.runs_conceded,p.balls_bowled,p.wickets,p.not_out "
             "FROM player_match_stats p JOIN stats_imports i ON i.source_message_id=p.source_message_id "
-            "WHERE i.guild_id=? AND COALESCE(i.competition,'MAIN TOURNAMENT')='MAIN TOURNAMENT' "
-            "ORDER BY i.imported_at, p.source_message_id", (int(guild_id),)).fetchall()
+            "WHERE i.guild_id=? AND COALESCE(i.competition,'MAIN TOURNAMENT')='MAIN TOURNAMENT' "            "ORDER BY i.imported_at, p.source_message_id", (int(guild_id),)).fetchall()
         per = {}
         runs = balls = conceded = bowled = wkts = innings = spells = ducks = 0
         for r in rows:
@@ -397,8 +405,7 @@ class Stocks(commands.Cog):
                         "sort": label, "supply": S["supply"], "rows": rows})
 
                 await self._send_pages(ctx, pages, build, "market.png")
-            except Exception as exc:
-                import traceback
+            except Exception as exc:                import traceback
                 traceback.print_exc()
                 print(f"[stocks] failed: {type(exc).__name__}: {exc}", flush=True)
                 await ctx.reply("I couldn't draw the market. Check the bot logs.", mention_author=False)
@@ -597,8 +604,7 @@ class Stocks(commands.Cog):
     @commands.command(name="addbal", aliases=["addstockbal", "addstockcash"])
     @commands.guild_only()
     async def addbal(self, ctx, member: discord.Member = None, amount: str = ""):
-        """Add coins to a member stock wallet: +addbal @user 50000."""
-        if not await owner_or_whitelisted(ctx, command_name="addbal", app_owner=True):
+        """Add coins to a member stock wallet: +addbal @user 50000."""        if not await owner_or_whitelisted(ctx, command_name="addbal", app_owner=True):
             return await ctx.reply("Only the bot owner or someone trusted in this server can add stock balance.", mention_author=False)
         if member is None or not amount:
             return await ctx.reply("Usage: `+addbal @user <positive amount>`.", mention_author=False)
