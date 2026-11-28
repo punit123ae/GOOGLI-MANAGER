@@ -297,6 +297,39 @@ class PredictView(discord.ui.View):
                 pass
 
 
+class MatchPickerView(discord.ui.View):
+    """Lets a user choose which open match to predict."""
+    def __init__(self, cog, ctx, matches):
+        super().__init__(timeout=180)
+        self.cog, self.ctx = cog, ctx
+        options = []
+        for match, team_a, team_b in matches[:25]:
+            a = team_a["name"] if team_a else "Unknown team"
+            b = team_b["name"] if team_b else "Unknown team"
+            options.append(discord.SelectOption(
+                label=f"Match #{match['number']}"[:100],
+                description=f"{a} vs {b}"[:100],
+                value=str(match["number"]),
+            ))
+        select = discord.ui.Select(
+            placeholder="Choose the match you want to predict",
+            min_values=1, max_values=1, options=options,
+        )
+
+        async def choose(interaction):
+            if interaction.user.id != self.ctx.author.id:
+                return await interaction.response.send_message(
+                    "This match selector belongs to someone else. Run +predict to open your own.",
+                    ephemeral=True,
+                )
+            await interaction.response.defer(ephemeral=True)
+            await self.cog._open_predict_form(self.ctx, int(select.values[0]))
+            await interaction.followup.send("Your prediction form has been opened in the channel.", ephemeral=True)
+
+        select.callback = choose
+        self.add_item(select)
+
+
 class Predictions(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -861,6 +894,25 @@ class Predictions(commands.Cog):
                         mention_author=False)
 
     # ------------------------------------------------------------------ +predict
+    async def _open_predict_form(self, ctx, number):
+        row, error = self._match(ctx.guild.id, str(number))
+        if error:
+            return await ctx.reply(error, mention_author=False)
+        if row["closed"]:
+            return await ctx.reply(f"Predictions for match #{number} are closed.", mention_author=False)
+        if not self.predictions_enabled(ctx.guild.id):
+            return await ctx.reply("Predictions are paused in this server right now.", mention_author=False)
+        team_a, team_b = self._team_by_id(row["team_a_id"]), self._team_by_id(row["team_b_id"])
+        if team_a is None or team_b is None:
+            return await ctx.reply("One of the teams in that match no longer exists.", mention_author=False)
+        squads = []
+        for team in (team_a, team_b):
+            ranked, _scores = self._ranked_roster(ctx.guild.id, team, "runs")
+            squads.append([(uid, self.compare._display_name(ctx.guild, uid)) for uid in ranked])
+        picks = self.load_picks(ctx.guild.id, number, ctx.author.id)
+        view = PredictView(self, ctx, row, team_a, team_b, squads, picks)
+        view.message = await ctx.reply(view._status(), view=view, mention_author=False)
+
     @commands.command(name="predict", aliases=["prediction", "predictmatch", "pred", "mypredict", "mypred"])
     @commands.guild_only()
     async def predict(self, ctx, *, text: str = ""):
@@ -887,10 +939,21 @@ class Predictions(commands.Cog):
             row, error = self._match(ctx.guild.id, text)
         if error:
             return await ctx.reply(error, mention_author=False)
+        number = int(row["number"])
+        if not view_mode and not text:
+            open_rows = self.bot.db.execute(
+                "SELECT * FROM predict_matches WHERE guild_id=? AND closed=0 ORDER BY number DESC LIMIT 25",
+                (ctx.guild.id,),
+            ).fetchall()
+            if open_rows:
+                matches = [(item, self._team_by_id(item["team_a_id"]), self._team_by_id(item["team_b_id"]))
+                           for item in open_rows]
+                picker = MatchPickerView(self, ctx, matches)
+                return await ctx.reply("**Choose which match you want to predict:**", view=picker,
+                                       mention_author=False)
         team_a, team_b = self._team_by_id(row["team_a_id"]), self._team_by_id(row["team_b_id"])
         if team_a is None or team_b is None:
             return await ctx.reply("One of the teams in that match no longer exists.", mention_author=False)
-        number = int(row["number"])
         if view_mode:
             picks = self.load_picks(ctx.guild.id, number, target.id)
             if not picks:
@@ -917,17 +980,7 @@ class Predictions(commands.Cog):
             if channel.id != ctx.channel.id:
                 return await ctx.reply(f"Posted {target.display_name}'s prediction in {channel.mention}.", mention_author=False)
             return
-        if row["closed"]:
-            return await ctx.reply(f"Predictions for match #{number} are closed.", mention_author=False)
-        if not self.predictions_enabled(ctx.guild.id):
-            return await ctx.reply("Predictions are paused in this server right now.", mention_author=False)
-        squads = []
-        for team in (team_a, team_b):
-            ranked, _scores = self._ranked_roster(ctx.guild.id, team, "runs")
-            squads.append([(uid, self.compare._display_name(ctx.guild, uid)) for uid in ranked])
-        picks = self.load_picks(ctx.guild.id, number, ctx.author.id)
-        view = PredictView(self, ctx, row, team_a, team_b, squads, picks)
-        view.message = await ctx.reply(view._status(), view=view, mention_author=False)
+        return await self._open_predict_form(ctx, number)
 
 
 async def setup(bot):
