@@ -15,6 +15,26 @@ RECOVERY_COMMANDS = {
 }
 
 
+# Per-server trusted users ("+whitelist @user all"). Their grant only exists in the server it was made in.
+ALL_COMMANDS = "*"
+
+# Bot-owner only, now and always: nobody else can be given these, not even one by one.
+NEVER_GRANTABLE = {
+    "whitelist", "unwhitelist", "whitelistlist", "toggleall", "untoggleall", "disableall", "enableall", "enablechannel",
+    "addbotowner", "removebotowner", "botban", "botunban", "botbanlist",
+    "backupdata", "backuplist", "restoredata", "adminlog", "auditteams", "resolveauditteams",
+    "predicttoggle", "syncemojis",
+}
+# Powerful or destructive: "all" does NOT include these. The owner can still give one of them to a user
+# on purpose with "+whitelist @user <command>".
+NOT_IN_ALL = {
+    "resetstats", "resetpt", "resetfieldingstats", "resetbatcatches", "resetbatterimpact", "resetmatchups",
+    "deleteallteams", "deleteallreserves", "deletegroupteams", "deleteallgroupsetups", "deletelivedraw",
+    "removerep", "dm", "echo", "testfdstats", "changefieldingstats", "starttracking", "stoptracking",
+    "syncfielding", "auditfielding", "lbreset", "rebuildresults",
+}
+
+
 def is_bot_owner_id(bot, user_id):
     """Return whether a user is the configured owner or a persisted extra owner."""
     try:
@@ -35,9 +55,35 @@ def role_ids(member):
     return {int(role.id) for role in getattr(member, "roles", [])}
 
 
+def user_grants(bot, guild_id, user_id):
+    """The command names a user was personally given in this server (ALL_COMMANDS means 'all')."""
+    try:
+        rows = bot.db.execute(
+            "SELECT command_name FROM command_whitelist_users WHERE guild_id=? AND user_id=?",
+            (int(guild_id), int(user_id)),
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[0]) for row in rows}
+
+
+def is_server_manager(bot, guild_id, user_id):
+    """True for a user given "all commands" in THIS server (the grant never reaches other servers)."""
+    return ALL_COMMANDS in user_grants(bot, guild_id, user_id)
+
+
+def user_may_use(bot, guild_id, user_id, name):
+    grants = user_grants(bot, guild_id, user_id)
+    if not grants or name in NEVER_GRANTABLE:
+        return False
+    return name in grants or (ALL_COMMANDS in grants and name not in NOT_IN_ALL)
+
+
 def has_any_whitelisted_role(bot, guild_id, member):
     if not guild_id or member is None:
         return False
+    if user_grants(bot, guild_id, getattr(member, "id", 0)):
+        return True
     rows = bot.db.execute(
         "SELECT DISTINCT role_id FROM command_whitelist WHERE guild_id=?",
         (int(guild_id),),
@@ -50,6 +96,8 @@ def has_command_whitelist(bot, guild_id, member, command_name):
     if not guild_id or member is None or not command_name:
         return False
     name = _normalise_command_name(command_name)
+    if user_may_use(bot, guild_id, getattr(member, "id", 0), name):
+        return True
     rows = bot.db.execute(
         "SELECT role_id FROM command_whitelist WHERE guild_id=? AND command_name=?",
         (int(guild_id), name),
@@ -142,6 +190,14 @@ class Utility(commands.Cog):
             role_id INTEGER NOT NULL,
             command_name TEXT NOT NULL,
             PRIMARY KEY (guild_id, role_id, command_name)
+        );
+        CREATE TABLE IF NOT EXISTS command_whitelist_users (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            command_name TEXT NOT NULL,
+            added_by INTEGER,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (guild_id, user_id, command_name)
         );
         CREATE TABLE IF NOT EXISTS utility_guild_state (
             guild_id INTEGER PRIMARY KEY,
@@ -797,70 +853,119 @@ class Utility(commands.Cog):
             mention_author=False,
         )
 
-    @commands.command(name="whitelist")
-    @commands.guild_only()
-    async def whitelist(self, ctx, role: str, *, command_name: str):
-        if not await self._require_manager(ctx):
-            return
-        match = re.fullmatch(r"<@&?(\d+)>|@?(\d+)", role.strip())
-        if not match:
-            await ctx.reply(
-                "Usage: `+whitelist @Role commandname` or `+whitelist ROLE_ID commandname`.",
-                mention_author=False,
-            )
-            return
-        role_id = int(next(group for group in match.groups() if group))
-        discord_role = ctx.guild.get_role(role_id)
-        if discord_role is None:
-            await ctx.reply("That role ID doesn't exist in this server.", mention_author=False)
-            return
+    def _who(self, ctx, token):
+        """('role', id) or ('user', id) from a mention or an id, or (None, None)."""
+        token = token.strip()
+        m = re.fullmatch(r"<@&(\d+)>", token)
+        if m:
+            return "role", int(m.group(1))
+        m = re.fullmatch(r"<@!?(\d+)>", token)
+        if m:
+            return "user", int(m.group(1))
+        m = re.fullmatch(r"@?(\d{15,25})", token)
+        if m:
+            value = int(m.group(1))
+            return ("role", value) if ctx.guild.get_role(value) is not None else ("user", value)
+        return None, None
+
+    def _command_name(self, command_name):
         name = _normalise_command_name(command_name)
-        # Store the registered command's canonical name so aliases grant the
-        # same command permission without creating a separate permission scope.
         resolved = self.bot.get_command(name)
         if resolved is not None:
             name = _normalise_command_name(resolved.name)
-        if not re.fullmatch(r"[a-z0-9_-]+", name):
-            await ctx.reply("Give one command name, without a prefix or arguments.", mention_author=False)
+        return name
+
+    @commands.command(name="whitelist")
+    @commands.guild_only()
+    async def whitelist(self, ctx, role: str, *, command_name: str):
+        """+whitelist @Role command  |  +whitelist @user all  |  +whitelist @user command (this server only)."""
+        if not await self._require_manager(ctx):
             return
-        if name in {"whitelist", "unwhitelist", "toggleall", "untoggleall"}:
+        kind, target_id = self._who(ctx, role)
+        if kind is None:
             await ctx.reply(
-                "That utility control command cannot be individually whitelisted. Use the server lock carefully.",
+                "Usage: `+whitelist @Role commandname` for a role, or `+whitelist @user all` / "
+                "`+whitelist @user commandname` for one person.",
                 mention_author=False,
             )
             return
+        name = self._command_name(command_name)
+        if name in {"all", "everything", "*"}:
+            name = ALL_COMMANDS
+        elif not re.fullmatch(r"[a-z0-9_-]+", name):
+            await ctx.reply("Give one command name, without a prefix or arguments.", mention_author=False)
+            return
+        none = discord.AllowedMentions.none()
+        if (kind == "user" and name in NEVER_GRANTABLE) or name in {"whitelist", "unwhitelist", "toggleall", "untoggleall"}:
+            await ctx.reply(
+                "That command is bot-owner only and cannot be given to anyone else.",
+                mention_author=False,
+            )
+            return
+        if kind == "user":
+            if self.is_bot_owner(target_id):
+                await ctx.reply("That user is a bot owner already and can use everything.", mention_author=False)
+                return
+            self.db.execute(
+                "INSERT OR IGNORE INTO command_whitelist_users(guild_id,user_id,command_name,added_by) VALUES(?,?,?,?)",
+                (ctx.guild.id, target_id, name, ctx.author.id),
+            )
+            self.db.commit()
+            if name == ALL_COMMANDS:
+                await ctx.reply(
+                    f"✅ <@{target_id}> can now use **all bot commands in this server** (only this server). "
+                    "Bot-owner commands and a short list of destructive ones stay locked; "
+                    f"see them with `+whitelistlist`. Remove with `+unwhitelist @user all`.",
+                    mention_author=False, allowed_mentions=none,
+                )
+            else:
+                await ctx.reply(f"✅ <@{target_id}> can now use `+{name}` in this server.",
+                                mention_author=False, allowed_mentions=none)
+            return
+        if name == ALL_COMMANDS:
+            await ctx.reply("\"all\" is for people only. Give a role one command at a time.", mention_author=False)
+            return
+        discord_role = ctx.guild.get_role(target_id)
+        if discord_role is None:
+            await ctx.reply("That role ID doesn't exist in this server.", mention_author=False)
+            return
         self.db.execute(
             "INSERT OR IGNORE INTO command_whitelist(guild_id,role_id,command_name) VALUES(?,?,?)",
-            (ctx.guild.id, role_id, name),
+            (ctx.guild.id, target_id, name),
         )
         self.db.commit()
         await ctx.reply(
-            f"Whitelisted **{discord.utils.escape_markdown(discord_role.name)}** (`{role_id}`) for `+{name}`.",
+            f"Whitelisted **{discord.utils.escape_markdown(discord_role.name)}** (`{target_id}`) for `+{name}`.",
             mention_author=False,
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=none,
         )
 
     @commands.command(name="unwhitelist")
     @commands.guild_only()
     async def unwhitelist(self, ctx, role: str, *, command_name: str):
+        """+unwhitelist @Role command  |  +unwhitelist @user all  |  +unwhitelist @user command."""
         if not await self._require_manager(ctx):
             return
-        match = re.fullmatch(r"<@&?(\d+)>|@?(\d+)", role.strip())
-        if not match:
+        kind, target_id = self._who(ctx, role)
+        if kind is None:
             await ctx.reply(
-                "Usage: `+unwhitelist @Role commandname` or `+unwhitelist ROLE_ID commandname`.",
+                "Usage: `+unwhitelist @Role commandname` or `+unwhitelist @user all` / `+unwhitelist @user commandname`.",
                 mention_author=False,
             )
             return
-        role_id = int(next(group for group in match.groups() if group))
-        name = _normalise_command_name(command_name)
-        resolved = self.bot.get_command(name)
-        if resolved is not None:
-            name = _normalise_command_name(resolved.name)
-        cur = self.db.execute(
-            "DELETE FROM command_whitelist WHERE guild_id=? AND role_id=? AND command_name=?",
-            (ctx.guild.id, role_id, name),
-        )
+        name = self._command_name(command_name)
+        if name in {"all", "everything", "*"}:
+            name = ALL_COMMANDS
+        if kind == "user":
+            cur = self.db.execute(
+                "DELETE FROM command_whitelist_users WHERE guild_id=? AND user_id=? AND command_name=?",
+                (ctx.guild.id, target_id, name),
+            )
+        else:
+            cur = self.db.execute(
+                "DELETE FROM command_whitelist WHERE guild_id=? AND role_id=? AND command_name=?",
+                (ctx.guild.id, target_id, name),
+            )
         self.db.commit()
         await ctx.reply(
             "Whitelist rule removed." if cur.rowcount else "No matching whitelist rule was found.",
@@ -870,23 +975,44 @@ class Utility(commands.Cog):
     @commands.command(name="whitelistlist")
     @commands.guild_only()
     async def whitelistlist(self, ctx):
+        """Roles and people with extra command access in this server."""
         if not await self._require_manager(ctx):
             return
         rows = self.db.execute(
             "SELECT role_id, command_name FROM command_whitelist WHERE guild_id=? ORDER BY role_id, command_name",
             (ctx.guild.id,),
         ).fetchall()
-        if not rows:
+        people = self.db.execute(
+            "SELECT user_id, command_name FROM command_whitelist_users WHERE guild_id=? ORDER BY user_id, command_name",
+            (ctx.guild.id,),
+        ).fetchall()
+        if not rows and not people:
             await ctx.reply("No whitelist rules are configured.", mention_author=False)
             return
         lines = []
-        for row in rows:
-            role_obj = ctx.guild.get_role(row["role_id"])
-            role_label = (
-                f"{discord.utils.escape_markdown(role_obj.name)} (`{row['role_id']}`)"
-                if role_obj else f"Missing role (`{row['role_id']}`)"
-            )
-            lines.append(f"{role_label} → `+{row['command_name']}`")
+        by_user = {}
+        for row in people:
+            by_user.setdefault(int(row["user_id"]), []).append(row["command_name"])
+        if by_user:
+            lines.append("**People (this server only)**")
+            for uid, names in by_user.items():
+                shown = "**all commands**" if ALL_COMMANDS in names else ", ".join(f"`+{n}`" for n in names)
+                extra = [n for n in names if n != ALL_COMMANDS] if ALL_COMMANDS in names else []
+                if extra:
+                    shown += " + " + ", ".join(f"`+{n}`" for n in extra)
+                lines.append(f"<@{uid}> (`{uid}`) → {shown}")
+        if rows:
+            lines.append("**Roles**")
+            for row in rows:
+                role_obj = ctx.guild.get_role(row["role_id"])
+                role_label = (
+                    f"{discord.utils.escape_markdown(role_obj.name)} (`{row['role_id']}`)"
+                    if role_obj else f"Missing role (`{row['role_id']}`)"
+                )
+                lines.append(f"{role_label} → `+{row['command_name']}`")
+        if by_user:
+            lines.append("")
+            lines.append("\"all\" leaves out: " + ", ".join(f"`+{n}`" for n in sorted(NOT_IN_ALL)))
         await ctx.reply(
             "\n".join(lines)[:1900],
             mention_author=False,
