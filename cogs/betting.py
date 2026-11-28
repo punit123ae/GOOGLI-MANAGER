@@ -27,6 +27,20 @@ class Betting(commands.Cog):
                 emoji TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS odds_sim_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                team_a TEXT NOT NULL,
+                team_b TEXT NOT NULL,
+                pool_a INTEGER NOT NULL DEFAULT 0,
+                pool_b INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'open',
+                winner TEXT,
+                created_by INTEGER NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -321,6 +335,155 @@ class Betting(commands.Cog):
             output,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+
+    # Test-only odds model. Pool figures are hypothetical staff-entered inputs;
+    # members cannot submit stakes and the simulator has no currency or payouts.
+    @staticmethod
+    def _sim_odds(pool, total):
+        if pool <= 0 or total <= 0:
+            return 1.50
+        # 0.25x total-market margin, split 0.125x per outcome.
+        # Equal pools: 1.875x + 1.875x = 3.75x combined.
+        return max(1.50, (total / pool) - 0.125)
+
+    def _sim_get(self, guild_id, match_id):
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM odds_sim_matches WHERE guild_id=? AND id=?",
+            (int(guild_id), int(match_id)),
+        ).fetchone()
+        conn.close()
+        return row
+
+    def _sim_text(self, row):
+        total = int(row["pool_a"]) + int(row["pool_b"])
+        a = self._sim_odds(int(row["pool_a"]), total)
+        b = self._sim_odds(int(row["pool_b"]), total)
+        status = "OPEN" if row["status"] == "open" else "SETTLED — WINNER: " + str(row["winner"])
+        return (
+            "TEST ODDS SIMULATOR — MATCH #" + str(row["id"]) + "\n"
+            + str(row["team_a"]) + " vs " + str(row["team_b"]) + "\n"
+            + "Status: " + status + "\n\n"
+            + "Hypothetical pool totals:\n"
+            + str(row["team_a"]) + ": " + format(int(row["pool_a"]), ",") + " → " + format(a, ".2f") + "x\n"
+            + str(row["team_b"]) + ": " + format(int(row["pool_b"]), ",") + " → " + format(b, ".2f") + "x\n"
+            + "Combined test pool: " + format(total, ",") + "\n\n"
+            + "SIMULATION ONLY — no member stakes, currency, or payouts."
+        )
+
+    @commands.command(name="oddscreate")
+    @commands.guild_only()
+    async def oddscreate(self, ctx, *, teams=None):
+        if not await self._allowed(ctx, "oddscreate"):
+            return
+        parts = [x.strip() for x in (teams or "").split("|")]
+        if len(parts) != 2 or not all(parts):
+            return await ctx.reply("Usage: +oddscreate Team A | Team B", mention_author=False)
+        names = []
+        for query in parts:
+            result = self._find_team(query)
+            if result["status"] != "found":
+                return await self._send_team_error(ctx, 1, query, result)
+            names.append(result["team_name"])
+        if names[0].casefold() == names[1].casefold():
+            return await ctx.reply("Choose two different teams.", mention_author=False)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            "INSERT INTO odds_sim_matches(guild_id,team_a,team_b,created_by,created_at) "
+            "VALUES(?,?,?,?,strftime('%s','now'))",
+            (ctx.guild.id, names[0], names[1], ctx.author.id),
+        )
+        match_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        await ctx.reply(self._sim_text(self._sim_get(ctx.guild.id, match_id)), mention_author=False)
+
+    @commands.command(name="oddstest")
+    @commands.guild_only()
+    async def oddstest(self, ctx, match_id: int = None, *, pools=None):
+        if not await self._allowed(ctx, "oddstest"):
+            return
+        if match_id is None or not pools:
+            return await ctx.reply("Usage: +oddstest <match#> <pool A> | <pool B>\nExample: +oddstest 1 100000 | 100000", mention_author=False)
+        row = self._sim_get(ctx.guild.id, match_id)
+        if row is None:
+            return await ctx.reply("Test match not found in this server.", mention_author=False)
+        if row["status"] != "open":
+            return await ctx.reply("This test scenario is already settled.", mention_author=False)
+        values = [x.strip().replace(",", "") for x in pools.split("|")]
+        try:
+            if len(values) != 2:
+                raise ValueError
+            pool_a, pool_b = (int(x) for x in values)
+            if pool_a < 0 or pool_b < 0 or pool_a + pool_b <= 0:
+                raise ValueError
+        except ValueError:
+            return await ctx.reply("Enter two whole-number totals, zero or higher, and not both zero.", mention_author=False)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "UPDATE odds_sim_matches SET pool_a=?,pool_b=? WHERE guild_id=? AND id=? AND status='open'",
+            (pool_a, pool_b, ctx.guild.id, match_id),
+        )
+        conn.commit()
+        conn.close()
+        await ctx.reply(self._sim_text(self._sim_get(ctx.guild.id, match_id)), mention_author=False)
+
+    @commands.command(name="oddsview")
+    @commands.guild_only()
+    async def oddsview(self, ctx, match_id: int = None):
+        if match_id is None:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM odds_sim_matches WHERE guild_id=? ORDER BY id DESC LIMIT 1",
+                (ctx.guild.id,),
+            ).fetchone()
+            conn.close()
+        else:
+            row = self._sim_get(ctx.guild.id, match_id)
+        if row is None:
+            return await ctx.reply("No test scenario found. Staff can create one with +oddscreate.", mention_author=False)
+        await ctx.reply(self._sim_text(row), mention_author=False)
+
+    @commands.command(name="oddsresult")
+    @commands.guild_only()
+    async def oddsresult(self, ctx, match_id: int = None, *, winner=None):
+        if not await self._allowed(ctx, "oddsresult"):
+            return
+        if match_id is None or not winner:
+            return await ctx.reply("Usage: +oddsresult <match#> <winning team>", mention_author=False)
+        row = self._sim_get(ctx.guild.id, match_id)
+        if row is None:
+            return await ctx.reply("Test match not found in this server.", mention_author=False)
+        if row["status"] != "open":
+            return await ctx.reply("This test scenario is already settled.", mention_author=False)
+        chosen = next((n for n in (row["team_a"], row["team_b"]) if n.casefold() == winner.strip().casefold()), None)
+        if chosen is None:
+            return await ctx.reply("Winner must be " + row["team_a"] + " or " + row["team_b"] + ".", mention_author=False)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "UPDATE odds_sim_matches SET status='settled',winner=? WHERE guild_id=? AND id=?",
+            (chosen, ctx.guild.id, match_id),
+        )
+        conn.commit()
+        conn.close()
+        await ctx.reply("Test scenario #" + str(match_id) + " settled. Winner: " + chosen + "\n\n" + self._sim_text(self._sim_get(ctx.guild.id, match_id)), mention_author=False)
+
+    @commands.command(name="oddsdelete")
+    @commands.guild_only()
+    async def oddsdelete(self, ctx, match_id: int = None):
+        if not await self._allowed(ctx, "oddsdelete"):
+            return
+        if match_id is None:
+            return await ctx.reply("Usage: +oddsdelete <match#>", mention_author=False)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute("DELETE FROM odds_sim_matches WHERE guild_id=? AND id=?", (ctx.guild.id, match_id))
+        conn.commit()
+        deleted = cur.rowcount
+        conn.close()
+        await ctx.reply("Deleted test scenario #" + str(match_id) + "." if deleted else "Test match not found.", mention_author=False)
 
     async def _send_team_error(self, ctx, match_number, query, result):
         if result["status"] == "multiple":
