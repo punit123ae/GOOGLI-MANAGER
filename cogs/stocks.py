@@ -120,9 +120,25 @@ def build_prices(matches_by_player, pars, S, fielding):
 class StockPager(ImagePager):
     """Previous/Next buttons; each page is drawn (avatars fetched) only when somebody opens it."""
 
-    def __init__(self, ctx, first_png, count, build, filename):
+    def __init__(self, ctx, first_png, count, build, filename, start_index=0):
         super().__init__(ctx, first_png, count, None, [], filename)
+        self.pages = [None] * count
+        self.pages[start_index] = first_png
+        self.index = start_index
         self.build = build
+        self.first_button = discord.ui.Button(label="First", emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+        self.last_button = discord.ui.Button(label="Last", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
+        self.first_button.callback = self._first
+        self.last_button.callback = self._last
+        self.add_item(self.first_button)
+        self.add_item(self.last_button)
+        self._sync()
+
+    async def _first(self, interaction):
+        await self._show(interaction, 0)
+
+    async def _last(self, interaction):
+        await self._show(interaction, len(self.pages) - 1)
 
     async def _show(self, interaction, index):
         self.index = max(0, min(index, len(self.pages) - 1))
@@ -333,11 +349,13 @@ class Stocks(commands.Cog):
         if view is not None:
             view.message = message
 
-    async def _send_pages(self, ctx, count, build, filename):
-        first = await build(0)
+    async def _send_pages(self, ctx, count, build, filename, start_index=0):
+        start_index = max(0, min(int(start_index), count - 1))
+        first = await build(start_index)
         if count <= 1:
             return await self._send_png(ctx, first, filename)
-        await self._send_png(ctx, first, filename, StockPager(ctx, first, count, build, filename))
+        await self._send_png(ctx, first, filename,
+                             StockPager(ctx, first, count, build, filename, start_index))
 
     async def _empty(self, ctx):
         await ctx.reply("The market is empty: it opens once match stats have been imported.", mention_author=False)
@@ -357,6 +375,15 @@ class Stocks(commands.Cog):
         """The player stock market: +stocks [gainers|losers|cheap], +stock <player>, +stocks lb."""
         guild, text = ctx.guild, text.strip()
         word = text.casefold()
+        requested_page = None
+        if word.isdigit():
+            requested_page = int(word)
+            text = ""
+            word = ""
+        elif word.startswith("page ") and word[5:].strip().isdigit():
+            requested_page = int(word[5:].strip())
+            text = ""
+            word = ""
         if word in ("help", "guide", "how"):
             S = self._settings(guild.id)
             return await ctx.reply(
@@ -404,7 +431,13 @@ class Stocks(commands.Cog):
                         "guild": guild.name, "count": len(market), "trend": trend, "page": index + 1, "pages": pages,
                         "sort": label, "supply": S["supply"], "rows": rows})
 
-                await self._send_pages(ctx, pages, build, "market.png")
+                if requested_page is not None:
+                    if requested_page < 1 or requested_page > pages:
+                        return await ctx.reply(f"Choose a market page from 1 to {pages}.", mention_author=False)
+                    start_index = requested_page - 1
+                else:
+                    start_index = 0
+                await self._send_pages(ctx, pages, build, "market.png", start_index=start_index)
             except Exception as exc:                import traceback
                 traceback.print_exc()
                 print(f"[stocks] failed: {type(exc).__name__}: {exc}", flush=True)
