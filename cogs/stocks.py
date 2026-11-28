@@ -550,22 +550,31 @@ class Stocks(commands.Cog):
             "wickets_per_spell": True, "economy": False, "bowling_strike_rate": False,
             "duck_rate": False, "catch_success": True, "drops_per_chance": False,
         }
+        metric_groups = {
+            "batting": ("runs_per_innings", "batting_average", "strike_rate", "duck_rate"),
+            "bowling": ("wickets_per_spell", "economy", "bowling_strike_rate"),
+            "fielding": ("catch_success", "drops_per_chance"),
+        }
         scores = {}
         for player_id, values in metrics.items():
-            parts = []
-            for key, higher in higher_is_better.items():
-                value = values[key]
-                if value is None:
-                    continue
-                peers = [other[key] for other in metrics.values() if other[key] is not None]
-                if len(peers) <= 1:
-                    percentile = 50.0
-                else:
-                    below = sum(1 for peer in peers if peer < value)
-                    equal = sum(1 for peer in peers if peer == value)
-                    percentile = (below + (equal - 1) / 2) / (len(peers) - 1) * 100
-                parts.append(percentile if higher else 100 - percentile)
-            scores[player_id] = sum(parts) / len(parts) if parts else 50.0
+            group_scores = []
+            for keys in metric_groups.values():
+                parts = []
+                for key in keys:
+                    value = values[key]
+                    if value is None:
+                        continue
+                    peers = [other[key] for other in metrics.values() if other[key] is not None]
+                    if len(peers) <= 1:
+                        percentile = 50.0
+                    else:
+                        below = sum(1 for peer in peers if peer < value)
+                        equal = sum(1 for peer in peers if peer == value)
+                        percentile = (below + (equal - 1) / 2) / (len(peers) - 1) * 100
+                    parts.append(percentile if higher_is_better[key] else 100 - percentile)
+                if parts:
+                    group_scores.append(sum(parts) / len(parts))
+            scores[player_id] = sum(group_scores) / len(group_scores) if group_scores else 50.0
 
         item = totals.get(uid)
         if not item:
@@ -593,9 +602,9 @@ class Stocks(commands.Cog):
             f"**Fielding**\n"
             f"Catches: **{catches}** • Dropped catches: **{drops}**\n"
             f"Catch success: **{(catches / (catches + drops) * 100) if catches + drops else 0:.1f}%**\n\n"
-            f"<sub>Rating equally weighs available batting, bowling and fielding indicators against the league. "
+            f"*Rating equally weighs available batting, bowling and fielding indicators against the league. "
             f"Only stats currently stored by the bot are included; run-outs, stumpings and unrecorded events "
-            f"cannot be scored.</sub>"
+            f"cannot be scored.*"
         )
         await ctx.reply(report, mention_author=False,
                         allowed_mentions=discord.AllowedMentions.none())
