@@ -1,3 +1,4 @@
+import contextvars
 import re
 import os
 import sqlite3
@@ -18,21 +19,20 @@ RECOVERY_COMMANDS = {
 # Per-server trusted users ("+whitelist @user all"). Their grant only exists in the server it was made in.
 ALL_COMMANDS = "*"
 
-# Bot-owner only, now and always: nobody else can be given these, not even one by one.
+# Bot-owner only, now and always: nobody else can be given these, not even one by one. They either change who
+# may use the bot, reach data of every server at once, or can message people outside the server.
 NEVER_GRANTABLE = {
-    "whitelist", "unwhitelist", "whitelistlist", "toggleall", "untoggleall", "disableall", "enableall", "enablechannel",
+    "whitelist", "unwhitelist", "whitelistlist",
     "addbotowner", "removebotowner", "botban", "botunban", "botbanlist",
-    "backupdata", "backuplist", "restoredata", "adminlog", "auditteams", "resolveauditteams",
-    "predicttoggle", "syncemojis",
+    "backupdata", "backuplist", "restoredata", "adminlog", "auditteams", "resolveauditteams", "dm",
 }
-# Powerful or destructive: "all" does NOT include these. The owner can still give one of them to a user
-# on purpose with "+whitelist @user <command>".
-NOT_IN_ALL = {
-    "resetstats", "resetpt", "resetfieldingstats", "resetbatcatches", "resetbatterimpact", "resetmatchups",
-    "deleteallteams", "deleteallreserves", "deletegroupteams", "deleteallgroupsetups", "deletelivedraw",
-    "removerep", "dm", "echo", "testfdstats", "changefieldingstats", "starttracking", "stoptracking",
-    "syncfielding", "auditfielding", "lbreset", "rebuildresults",
-}
+# Kept for the list shown by +whitelistlist: nothing is held back from "all" except NEVER_GRANTABLE.
+NOT_IN_ALL = set()
+
+# Set for the length of one command run when the person has "all commands" in that server: (guild id, user id).
+# Commands that check "is this the bot owner?" inside (draw groups, fielding tools, resets...) then accept them,
+# but only in that server and never for the NEVER_GRANTABLE commands.
+_MANAGER_PASS = contextvars.ContextVar("manager_pass", default=None)
 
 
 def is_bot_owner_id(bot, user_id):
@@ -43,8 +43,28 @@ def is_bot_owner_id(bot, user_id):
         return False
     if user_id == BOT_OWNER_ID:
         return True
+    passed = _MANAGER_PASS.get()
+    if passed is not None and passed[1] == user_id:
+        return True
     utility = bot.get_cog("Utility") if bot is not None else None
     return bool(utility and utility.is_bot_owner(user_id))
+
+
+def is_real_bot_owner(bot, user_id):
+    """The main owner or an extra owner only: server managers do not count."""
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    if user_id == BOT_OWNER_ID:
+        return True
+    utility = bot.get_cog("Utility") if bot is not None else None
+    return bool(utility and utility.is_bot_owner(user_id))
+
+
+def is_owner_or_manager(bot, user_id, guild_id):
+    """For button clicks, where there is no command context: owner, or a manager of this server."""
+    return is_real_bot_owner(bot, user_id) or bool(guild_id and is_server_manager(bot, guild_id, user_id))
 
 
 def _normalise_command_name(name):
@@ -747,6 +767,10 @@ class Utility(commands.Cog):
             except discord.HTTPException:
                 pass
             return False
+        if ctx.guild is not None and ctx.command is not None:
+            command_name = _normalise_command_name(ctx.command.qualified_name.split(" ")[0])
+            if command_name not in NEVER_GRANTABLE and is_server_manager(self.bot, ctx.guild.id, ctx.author.id):
+                _MANAGER_PASS.set((int(ctx.guild.id), int(ctx.author.id)))
         if getattr(getattr(ctx, "command", None), "name", "") == "cancel":
             live_draws = self.bot.get_cog("LiveDraws")
             if live_draws is not None and live_draws.can_cancel_live_draw(ctx):
@@ -794,9 +818,16 @@ class Utility(commands.Cog):
         return True
 
     async def _can_manage_utility(self, guild_id, member):
-        # Bot owners may change whitelist and lock settings.
-        # Discord Administrator permission does not grant this access.
-        return member is not None and self.is_bot_owner(member.id)
+        # Bot owners, and people given "all commands" in this server, may change this server's lock and
+        # disabled-channel settings. Discord Administrator permission does not grant this access.
+        return member is not None and (self.is_bot_owner(member.id) or is_server_manager(self.bot, guild_id, member.id))
+
+    async def _require_owner(self, ctx):
+        """Bot owners only (the whitelist itself: a manager must never be able to widen anyone's access)."""
+        if self.is_bot_owner(ctx.author.id):
+            return True
+        await ctx.reply("Only the bot owner can change who may use the bot.", mention_author=False)
+        return False
 
     async def _require_manager(self, ctx):
         if await self._can_manage_utility(ctx.guild.id, ctx.author):
@@ -879,7 +910,7 @@ class Utility(commands.Cog):
     @commands.guild_only()
     async def whitelist(self, ctx, role: str, *, command_name: str):
         """+whitelist @Role command  |  +whitelist @user all  |  +whitelist @user command (this server only)."""
-        if not await self._require_manager(ctx):
+        if not await self._require_owner(ctx):
             return
         kind, target_id = self._who(ctx, role)
         if kind is None:
@@ -914,8 +945,8 @@ class Utility(commands.Cog):
             if name == ALL_COMMANDS:
                 await ctx.reply(
                     f"✅ <@{target_id}> can now use **all bot commands in this server** (only this server). "
-                    "Bot-owner commands and a short list of destructive ones stay locked; "
-                    f"see them with `+whitelistlist`. Remove with `+unwhitelist @user all`.",
+                    "Only the commands that change who can use the bot, reach other servers' data or DM people stay "
+                    "bot-owner only. Remove with `+unwhitelist @user all`.",
                     mention_author=False, allowed_mentions=none,
                 )
             else:
@@ -944,7 +975,7 @@ class Utility(commands.Cog):
     @commands.guild_only()
     async def unwhitelist(self, ctx, role: str, *, command_name: str):
         """+unwhitelist @Role command  |  +unwhitelist @user all  |  +unwhitelist @user command."""
-        if not await self._require_manager(ctx):
+        if not await self._require_owner(ctx):
             return
         kind, target_id = self._who(ctx, role)
         if kind is None:
@@ -976,7 +1007,7 @@ class Utility(commands.Cog):
     @commands.guild_only()
     async def whitelistlist(self, ctx):
         """Roles and people with extra command access in this server."""
-        if not await self._require_manager(ctx):
+        if not await self._require_owner(ctx):
             return
         rows = self.db.execute(
             "SELECT role_id, command_name FROM command_whitelist WHERE guild_id=? ORDER BY role_id, command_name",
@@ -1012,7 +1043,7 @@ class Utility(commands.Cog):
                 lines.append(f"{role_label} → `+{row['command_name']}`")
         if by_user:
             lines.append("")
-            lines.append("\"all\" leaves out: " + ", ".join(f"`+{n}`" for n in sorted(NOT_IN_ALL)))
+            lines.append("\"all\" never includes: " + ", ".join(f"`+{n}`" for n in sorted(NEVER_GRANTABLE)))
         await ctx.reply(
             "\n".join(lines)[:1900],
             mention_author=False,

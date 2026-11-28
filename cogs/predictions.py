@@ -22,7 +22,7 @@ from discord.ext import commands
 
 from .h2h import fetch_avatar, on_cooldown, render_png
 from .predict_image import render_board_png, render_prediction_png, render_result_png
-from .utility import is_bot_owner_id, owner_or_whitelisted
+from .utility import is_bot_owner_id, is_real_bot_owner, owner_or_whitelisted
 
 SIDE_A, SIDE_B = (70, 140, 255), (255, 120, 60)
 CATS = [("runs", "Top run scorer", "RUNS"), ("wickets", "Top wicket taker", "WICKETS"),
@@ -259,9 +259,9 @@ class PredictView(discord.ui.View):
         if wait:
             await interaction.response.send_message(f"Please wait {wait:.0f}s before drawing another image.", ephemeral=True)
             return
-        if not self.cog.predictions_enabled():
+        if not self.cog.predictions_enabled(self.ctx.guild.id):
             self.stop()
-            await interaction.response.edit_message(content="Predictions are temporarily disabled by the bot owner.", view=None)
+            await interaction.response.edit_message(content="Predictions are paused in this server right now.", view=None)
             return
         if self.cog.match_closed(self.ctx.guild.id, self.match["number"]):
             self.stop()
@@ -322,6 +322,7 @@ class Predictions(commands.Cog):
         db.execute("CREATE TABLE IF NOT EXISTS predict_settings (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)")
         db.execute("CREATE TABLE IF NOT EXISTS predict_global_state (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 1)")
         db.execute("INSERT OR IGNORE INTO predict_global_state (id, enabled) VALUES (1, 1)")
+        db.execute("CREATE TABLE IF NOT EXISTS predict_guild_state (guild_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1)")
         db.execute("CREATE TABLE IF NOT EXISTS predict_results (guild_id INTEGER NOT NULL, number INTEGER NOT NULL, result TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, number))")
         db.execute("CREATE TABLE IF NOT EXISTS predict_scores (guild_id INTEGER NOT NULL, number INTEGER NOT NULL, user_id INTEGER NOT NULL, points INTEGER NOT NULL, details TEXT NOT NULL, PRIMARY KEY (guild_id, number, user_id))")
         db.commit()
@@ -404,9 +405,16 @@ class Predictions(commands.Cog):
             return None, None, "Pick two different teams."
         return found[0], found[1], None
 
-    def predictions_enabled(self):
+    def predictions_enabled(self, guild_id=None):
+        """Open only when the owner's global switch AND this server's own switch are on."""
         row = self.bot.db.execute("SELECT enabled FROM predict_global_state WHERE id=1").fetchone()
-        return bool(row[0]) if row else True
+        if row and not row[0]:
+            return False
+        if guild_id is not None:
+            local = self.bot.db.execute("SELECT enabled FROM predict_guild_state WHERE guild_id=?", (int(guild_id),)).fetchone()
+            if local and not local[0]:
+                return False
+        return True
 
     def output_channel(self, guild, fallback):
         row = self.bot.db.execute("SELECT channel_id FROM predict_settings WHERE guild_id=?", (guild.id,)).fetchone()
@@ -822,15 +830,36 @@ class Predictions(commands.Cog):
     @commands.command(name="predicttoggle", aliases=["togglepredict", "predictlock"])
     @commands.check(lambda ctx: is_bot_owner_id(ctx.bot, ctx.author.id))
     @commands.guild_only()
-    async def predicttoggle(self, ctx, state: str = ""):
-        """Bot owner only: pause or resume predictions globally."""
-        current = self.predictions_enabled()
-        wanted = (not current) if not state else state.lower() in ("on", "enable", "enabled", "open")
-        if state and state.lower() not in ("on", "enable", "enabled", "open", "off", "disable", "disabled", "close"):
-            return await ctx.reply("Use +predicttoggle on or +predicttoggle off.", mention_author=False)
-        self.bot.db.execute("UPDATE predict_global_state SET enabled=? WHERE id=1", (int(wanted),))
+    async def predicttoggle(self, ctx, *, state: str = ""):
+        """Pause or resume predictions in THIS server: +predicttoggle [on|off]. The bot owner can add `global`."""
+        words = state.lower().split()
+        global_switch = "global" in words
+        if global_switch and not is_real_bot_owner(ctx.bot, ctx.author.id):
+            return await ctx.reply("Only the bot owner can change the global switch.", mention_author=False)
+        words = [w for w in words if w != "global"]
+        word = words[0] if words else ""
+        on_words, off_words = ("on", "enable", "enabled", "open"), ("off", "disable", "disabled", "close")
+        if word and word not in on_words + off_words:
+            return await ctx.reply("Use `+predicttoggle on` or `+predicttoggle off`.", mention_author=False)
+        if global_switch:
+            row = self.bot.db.execute("SELECT enabled FROM predict_global_state WHERE id=1").fetchone()
+            current = bool(row[0]) if row else True
+            wanted = (not current) if not word else word in on_words
+            self.bot.db.execute("UPDATE predict_global_state SET enabled=? WHERE id=1", (int(wanted),))
+            self.bot.db.commit()
+            return await ctx.reply("Predictions are now OPEN in every server." if wanted else
+                                   "Predictions are now PAUSED in every server. Saved cards can still be viewed.",
+                                   mention_author=False)
+        row = self.bot.db.execute("SELECT enabled FROM predict_guild_state WHERE guild_id=?", (ctx.guild.id,)).fetchone()
+        current = bool(row[0]) if row else True
+        wanted = (not current) if not word else word in on_words
+        self.bot.db.execute("INSERT INTO predict_guild_state (guild_id, enabled) VALUES (?, ?) "
+                            "ON CONFLICT(guild_id) DO UPDATE SET enabled=excluded.enabled", (ctx.guild.id, int(wanted)))
         self.bot.db.commit()
-        await ctx.reply("Predictions are now OPEN globally." if wanted else "Predictions are now PAUSED globally. Existing predictions can still be viewed.", mention_author=False)
+        await ctx.reply("Predictions are now OPEN in this server." if wanted else
+                        "Predictions are now PAUSED in this server. Saved cards can still be viewed.",
+                        mention_author=False)
+
     # ------------------------------------------------------------------ +predict
     @commands.command(name="predict", aliases=["prediction", "predictmatch", "pred", "mypredict", "mypred"])
     @commands.guild_only()
@@ -890,8 +919,8 @@ class Predictions(commands.Cog):
             return
         if row["closed"]:
             return await ctx.reply(f"Predictions for match #{number} are closed.", mention_author=False)
-        if not self.predictions_enabled():
-            return await ctx.reply("Predictions are temporarily disabled by the bot owner.", mention_author=False)
+        if not self.predictions_enabled(ctx.guild.id):
+            return await ctx.reply("Predictions are paused in this server right now.", mention_author=False)
         squads = []
         for team in (team_a, team_b):
             ranked, _scores = self._ranked_roster(ctx.guild.id, team, "runs")

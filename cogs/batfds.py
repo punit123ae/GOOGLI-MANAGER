@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import commands, tasks
 
-from .utility import is_bot_owner_id, owner_or_whitelisted
+from .utility import is_bot_owner_id, is_owner_or_manager, owner_or_whitelisted
 
 HANDCRICKET_BOT_ID = 753191385296928808
 BOT_OWNER_ID = 1014568928682459198
@@ -411,7 +411,7 @@ class CommitConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
+        if not is_owner_or_manager(self.cog.bot, interaction.user.id, interaction.guild_id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -450,7 +450,7 @@ class MarkEndedConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
+        if not is_owner_or_manager(self.cog.bot, interaction.user.id, interaction.guild_id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -490,7 +490,7 @@ class MarkAllEndedConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
+        if not is_owner_or_manager(self.cog.bot, interaction.user.id, interaction.guild_id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
@@ -538,7 +538,7 @@ class FixBatterImpactConfirmView(discord.ui.View):
         self.done = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not is_bot_owner_id(self.cog.bot, interaction.user.id):
+        if not is_owner_or_manager(self.cog.bot, interaction.user.id, interaction.guild_id):
             await interaction.response.send_message("Only the bot owner can confirm this.", ephemeral=True)
             return False
         return True
