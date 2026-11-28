@@ -254,7 +254,7 @@ class Insights(commands.Cog):
             pager = ImagePager(
                 ctx, first, page_count,
                 lambda index: render_scout_list(data, index),
-                [f"Page {i + 1}" for i in range(page_count)],
+                [],
                 "scout_players.png",
             )
             await loading.edit(content=f"**PLAYER SCOUTING BOARD** • {len(players)} players", attachments=[
