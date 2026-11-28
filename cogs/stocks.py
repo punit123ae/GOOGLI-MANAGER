@@ -1,57 +1,63 @@
-"""Googli stock exchange: every player with imported stats is a stock whose price follows their match stats.
+"""Googli stock exchange: every player with imported stats is a stock whose price follows their play.
 
 +stocks [gainers|losers|cheap]   the market, 10 players a page with Previous/Next buttons
-+stock <player>                  one stock: price, what moves it, last 5 games, shares left, your position
-+stocks lb                       richest traders (cash + value of shares)
-+stocks daily                    claim your daily coins
-+buy <player> <amount|all>  /  +sell <player> <amount|all>
-+portfolio [@user]               your holdings, 8 a page with buttons
-+stockset [name value|default]   (admins) base price, coins per run/wicket, share supply, limits and more
++stock <player>                  one stock: price, where the coins came from, history, shares left, your position
++stocks lb                       richest traders (coins + value of shares)
++buy <player> <amount|all>  /  +sell <player> <amount|all>     each trade posts a receipt card
++portfolio [@user]               holdings, 8 a page with buttons
++wallet [@user]                  coins, shares worth, profit and loss, fees, trades
++stockset [name value|default]   (admins) base price, weights, share supply, limits and more
 +stockreset confirm              (admins) wipe every account and holding of this server
 
-How a price is made
--------------------
-Every player starts at the base price. Each match they play adds (or removes) coins:
-  runs x coins per run, wickets x coins per wicket, a strike-rate edge (runs above or below what the league
-  scores off the same balls), an economy edge (runs saved or leaked against the league rate over the balls bowled)
-  and a penalty for every duck. The price is the base plus the running total, never below the minimum.
-Each player has a limited number of shares and a trader can hold only a few of each, so popular stocks sell out.
-Prices only change when match stats are imported or the settings change; there is no live work.
+How a price is made (fair both ways)
+------------------------------------
+Every player starts at the base price. After each match the price moves by how the player did compared with the
+league average, so an average match changes nothing, a better one adds coins and a worse one takes the same
+amount off:
+  runs above or below the average innings, wickets above or below the average spell, a strike-rate edge (runs vs
+  what the league scores off the same balls), an economy edge (runs saved or leaked vs the league rate over the
+  balls bowled), ducks against the usual duck rate, and fielding (catches above or below the average player,
+  drops the other way, spread over the player's matches).
+Across the whole league the gains and losses cancel out. Each player has a limited number of shares and a
+trader can hold only a few of each. Prices change only when stats are imported or settings change.
 """
 import asyncio
 import io
 import re
-import time
 
 import discord
 from discord.ext import commands
 
 from .h2h import ImagePager, fetch_avatar, on_cooldown, render_png
 from .predict_image import render_board_png
-from .stocks_image import render_market_png, render_portfolio_png, render_stock_png
+from .stocks_image import (render_market_png, render_portfolio_png, render_stock_png, render_trade_png,
+                           render_wallet_png)
 from .utility import owner_or_whitelisted
 
 # name -> (db key, default, min, max, what it does)
 SETTINGS = {
-    "base": ("base_price", 30000, 1, 100_000_000, "price every player's stock starts at"),
-    "run": ("per_run", 10, 0, 100_000, "coins added per run scored"),
-    "wicket": ("per_wicket", 375, 0, 1_000_000, "coins added per wicket taken"),
-    "sr": ("sr_weight", 6, 0, 100_000, "coins per run scored above (or below) the league rate off the same balls"),
-    "eco": ("eco_weight", 6, 0, 100_000, "coins per run saved (or leaked) against the league rate while bowling"),
-    "duck": ("duck_penalty", 1200, 0, 1_000_000, "coins taken off for every duck (out for 0)"),
-    "minprice": ("min_price", 1000, 1, 100_000_000, "a price never drops below this"),
+    "base": ("base_price", 100, 1, 100_000_000, "price every player's stock starts at"),
+    "run": ("per_run", 0.5, 0, 100_000, "coins per run above (or below) the average innings"),
+    "wicket": ("per_wicket", 5, 0, 1_000_000, "coins per wicket above (or below) the average spell"),
+    "sr": ("sr_weight", 0.3, 0, 100_000, "coins per run scored above (or below) the league rate off the same balls"),
+    "eco": ("eco_weight", 0.3, 0, 100_000, "coins per run saved (or leaked) against the league rate while bowling"),
+    "duck": ("duck_penalty", 4, 0, 1_000_000, "coins lost for a duck (a player with fewer ducks than usual gains)"),
+    "catch": ("catch_bonus", 4, 0, 1_000_000, "coins per catch above (or below) the average player"),
+    "drop": ("drop_penalty", 4, 0, 1_000_000, "coins lost per dropped catch above the average player"),
+    "minprice": ("min_price", 10, 1, 100_000_000, "a price never drops below this"),
     "supply": ("supply", 30, 1, 10_000, "shares that exist of each player"),
     "maxshares": ("max_per_user", 5, 1, 10_000, "most shares of one player a trader can hold"),
-    "start": ("start_cash", 1_000_000, 0, 10 ** 12, "coins a new trader starts with"),
-    "daily": ("daily_coins", 50_000, 0, 10 ** 12, "coins from +stocks daily (every 20 hours)"),
-    "fee": ("fee_pct", 1, 0, 50, "percent charged on every buy and sell"),
+    "start": ("start_cash", 1000, 0, 10 ** 12, "coins a new trader starts with"),
+    "fee": ("fee_pct", 2, 0, 50, "percent charged on every buy and sell"),
 }
+FLOAT_KEYS = {"per_run", "per_wicket", "sr_weight", "eco_weight", "duck_penalty", "catch_bonus", "drop_penalty", "fee_pct"}
+PRICE_KEYS = ("base", "run", "wicket", "sr", "eco", "duck", "catch", "drop", "minprice")
 ALIASES = {"baseprice": "base", "base_price": "base", "price": "base", "runs": "run", "perrun": "run",
            "wickets": "wicket", "wkt": "wicket", "wkts": "wicket", "strikerate": "sr", "economy": "eco",
-           "ducks": "duck", "min": "minprice", "minimum": "minprice", "shares": "supply", "total": "supply",
-           "max": "maxshares", "limit": "maxshares", "cash": "start", "startcash": "start", "dailycoins": "daily",
-           "fees": "fee", "tax": "fee"}
-DAILY_WAIT = 20 * 3600
+           "ducks": "duck", "catches": "catch", "fielding": "catch", "drops": "drop", "dropped": "drop",
+           "min": "minprice", "minimum": "minprice", "shares": "supply", "total": "supply",
+           "max": "maxshares", "limit": "maxshares", "cash": "start", "startcash": "start", "coins": "start",
+           "fees": "fee", "tax": "fee", "margin": "fee"}
 PAGE_MARKET = 10
 PAGE_PORTFOLIO = 8
 BALLS_PER_OVER = 6
@@ -61,29 +67,36 @@ def fee_for(amount, fee_pct):
     return 0 if fee_pct <= 0 else max(1, int(round(amount * fee_pct / 100)))
 
 
-def build_prices(matches_by_player, par_bat, par_bowl, S):
-    """{uid: stock} from per-match rows (oldest first). par_bat = league runs per ball, par_bowl = runs conceded per ball."""
+def build_prices(matches_by_player, pars, S, fielding):
+    """{uid: stock}. matches_by_player: per-match rows oldest first. pars: league averages. fielding: {uid: points}.
+
+    Every part is measured against the league average, so the league's gains and losses cancel out."""
     out = {}
     for uid, matches in matches_by_player.items():
-        total = {"runs": 0.0, "wickets": 0.0, "sr": 0.0, "eco": 0.0, "duck": 0.0}
+        total = {"runs": 0.0, "wickets": 0.0, "sr": 0.0, "eco": 0.0, "duck": 0.0, "field": 0.0}
+        field_each = fielding.get(uid, 0.0) / len(matches)
         history, deltas = [], []
         runs = balls = conceded = bowled = wickets = ducks = 0
         value = float(S["base_price"])
         for m in matches:
-            parts = {"runs": m["runs"] * S["per_run"], "wickets": m["wickets"] * S["per_wicket"],
-                     "sr": (m["runs"] - m["balls_faced"] * par_bat) * S["sr_weight"] if m["balls_faced"] else 0.0,
-                     "eco": (m["balls_bowled"] * par_bowl - m["runs_conceded"]) * S["eco_weight"] if m["balls_bowled"] else 0.0,
-                     "duck": 0.0}
-            if m["runs"] == 0 and not m["not_out"] and m["balls_faced"] > 0:
-                parts["duck"] = -float(S["duck_penalty"])
-                ducks += 1
+            parts = dict.fromkeys(total, 0.0)
+            if m["balls_faced"] > 0:
+                parts["runs"] = (m["runs"] - pars["avg_runs"]) * S["per_run"]
+                parts["sr"] = (m["runs"] - m["balls_faced"] * pars["bat"]) * S["sr_weight"]
+                is_duck = m["runs"] == 0 and not m["not_out"]
+                parts["duck"] = -S["duck_penalty"] * ((1.0 if is_duck else 0.0) - pars["duck_rate"])
+                ducks += 1 if is_duck else 0
+            if m["balls_bowled"] > 0:
+                parts["wickets"] = (m["wickets"] - pars["avg_wkts"]) * S["per_wicket"]
+                parts["eco"] = (m["balls_bowled"] * pars["bowl"] - m["runs_conceded"]) * S["eco_weight"]
+            parts["field"] = field_each
             for k, v in parts.items():
                 total[k] += v
             before = max(S["min_price"], int(round(value)))
             value += sum(parts.values())
             now = max(S["min_price"], int(round(value)))
+            deltas.append(now - (before if history else S["base_price"]))
             history.append(now)
-            deltas.append(now - (before if history[:-1] else S["base_price"]))
             runs += m["runs"]; balls += m["balls_faced"]; conceded += m["runs_conceded"]
             bowled += m["balls_bowled"]; wickets += m["wickets"]
         price = history[-1]
@@ -122,6 +135,7 @@ class Stocks(commands.Cog):
         self.bot = bot
         self._lock = asyncio.Lock()
         self._cache = {}            # guild id -> (version, market)
+        self._catches = {}
         db = bot.db
         db.execute("CREATE TABLE IF NOT EXISTS stock_accounts (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
                    "cash INTEGER NOT NULL, last_daily REAL NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id))")
@@ -131,11 +145,17 @@ class Stocks(commands.Cog):
         db.execute("CREATE TABLE IF NOT EXISTS stock_settings (guild_id INTEGER NOT NULL, key TEXT NOT NULL, "
                   "value REAL NOT NULL, PRIMARY KEY (guild_id, key))")
         db.execute("CREATE TABLE IF NOT EXISTS stock_meta (key TEXT PRIMARY KEY, value TEXT)")
-        # the first version priced players around 100 with a 10,000 wallet; those accounts do not fit the new scale
-        if not db.execute("SELECT 1 FROM stock_meta WHERE key='model'").fetchone():
+        columns = {r[1] for r in db.execute("PRAGMA table_info(stock_accounts)")}
+        for column in ("realized", "fees", "trades"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE stock_accounts ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        # earlier versions used other price scales and wallets; those accounts do not fit this model
+        row = db.execute("SELECT value FROM stock_meta WHERE key='model'").fetchone()
+        if not row or row[0] != "3":
             db.execute("DELETE FROM stock_accounts")
             db.execute("DELETE FROM stock_holdings")
-            db.execute("INSERT INTO stock_meta (key, value) VALUES ('model', '2')")
+            db.execute("DELETE FROM stock_settings")
+            db.execute("INSERT OR REPLACE INTO stock_meta (key, value) VALUES ('model', '3')")
         db.commit()
 
     @property
@@ -147,7 +167,7 @@ class Stocks(commands.Cog):
         S = {key: default for key, default, _lo, _hi, _t in SETTINGS.values()}
         for row in self.bot.db.execute("SELECT key, value FROM stock_settings WHERE guild_id=?", (int(guild_id),)):
             if row["key"] in S:
-                S[row["key"]] = float(row["value"]) if row["key"] == "fee_pct" else int(row["value"])
+                S[row["key"]] = float(row["value"]) if row["key"] in FLOAT_KEYS else int(row["value"])
         return S
 
     # ------------------------------------------------------------------ market data
@@ -157,7 +177,13 @@ class Stocks(commands.Cog):
         S = self._settings(guild_id)
         version = db.execute("SELECT COUNT(*), COALESCE(MAX(imported_at), '') FROM stats_imports WHERE guild_id=?",
                              (int(guild_id),)).fetchone()
-        version = (version[0], str(version[1]), tuple(sorted(S.items())))
+        try:
+            fv = db.execute("SELECT COUNT(*), COALESCE(SUM(catches_caught),0), COALESCE(SUM(catches_dropped),0) "
+                            "FROM fielding_stats WHERE guild_id=?", (int(guild_id),)).fetchone()
+            fv = tuple(fv)
+        except Exception:
+            fv = ()
+        version = (version[0], str(version[1]), tuple(sorted(S.items())), fv)
         hit = self._cache.get(int(guild_id))
         if hit and hit[0] == version:
             return hit[1], S
@@ -166,18 +192,40 @@ class Stocks(commands.Cog):
             "FROM player_match_stats p JOIN stats_imports i ON i.source_message_id=p.source_message_id "
             "WHERE i.guild_id=? AND COALESCE(i.competition,'MAIN TOURNAMENT')='MAIN TOURNAMENT' "
             "ORDER BY i.imported_at, p.source_message_id", (int(guild_id),)).fetchall()
-        per, runs, balls, conceded, bowled = {}, 0, 0, 0, 0
+        per = {}
+        runs = balls = conceded = bowled = wkts = innings = spells = ducks = 0
         for r in rows:
             per.setdefault(int(r["user_id"]), []).append({k: int(r[k]) for k in r.keys() if k != "user_id"})
-            runs += int(r["runs"]); balls += int(r["balls_faced"])
-            conceded += int(r["runs_conceded"]); bowled += int(r["balls_bowled"])
-        par_bat = runs / balls if balls else 0.0
-        par_bowl = conceded / bowled if bowled else 0.0
-        market = build_prices(per, par_bat, par_bowl, S) if per else {}
-        for stock in market.values():
-            stock["par_bat"], stock["par_bowl"] = par_bat, par_bowl
+            if r["balls_faced"] > 0:
+                innings += 1; runs += int(r["runs"]); balls += int(r["balls_faced"])
+                ducks += 1 if (r["runs"] == 0 and not r["not_out"]) else 0
+            if r["balls_bowled"] > 0:
+                spells += 1; wkts += int(r["wickets"]); bowled += int(r["balls_bowled"]); conceded += int(r["runs_conceded"])
+        pars = {"bat": runs / balls if balls else 0.0, "bowl": conceded / bowled if bowled else 0.0,
+                "avg_runs": runs / innings if innings else 0.0, "avg_wkts": wkts / spells if spells else 0.0,
+                "duck_rate": ducks / innings if innings else 0.0}
+        field = {}
+        if per:
+            caught = dict(self._fielding(guild_id))
+            mean_c = sum(caught.get(u, (0, 0))[0] for u in per) / len(per)
+            mean_d = sum(caught.get(u, (0, 0))[1] for u in per) / len(per)
+            field = {u: (caught.get(u, (0, 0))[0] - mean_c) * S["catch_bonus"] - (caught.get(u, (0, 0))[1] - mean_d) * S["drop_penalty"]
+                     for u in per}
+            for u in per:
+                self._catches[u] = caught.get(u, (0, 0))
+        market = build_prices(per, pars, S, field) if per else {}
+        for uid, stock in market.items():
+            stock["par_bat"], stock["par_bowl"] = pars["bat"], pars["bowl"]
+            stock["catches"], stock["drops"] = self._catches.get(uid, (0, 0))
         self._cache = {int(guild_id): (version, market)}      # one server at a time keeps memory small
         return market, S
+
+    def _fielding(self, guild_id):
+        try:
+            return {int(r[0]): (int(r[1]), int(r[2])) for r in self.bot.db.execute(
+                "SELECT user_id, catches_caught, catches_dropped FROM fielding_stats WHERE guild_id=?", (int(guild_id),))}
+        except Exception:
+            return {}
 
     def _held_totals(self, guild_id):
         return {int(r[0]): int(r[1]) for r in self.bot.db.execute(
@@ -230,7 +278,7 @@ class Stocks(commands.Cog):
         start = (S or self._settings(guild_id))["start_cash"]
         db.execute("INSERT OR IGNORE INTO stock_accounts (guild_id, user_id, cash) VALUES (?,?,?)",
                    (int(guild_id), int(user_id), int(start)))
-        return db.execute("SELECT cash, last_daily FROM stock_accounts WHERE guild_id=? AND user_id=?",
+        return db.execute("SELECT cash, realized, fees, trades FROM stock_accounts WHERE guild_id=? AND user_id=?",
                           (int(guild_id), int(user_id))).fetchone()
 
     def _holdings(self, guild_id, user_id):
@@ -291,21 +339,21 @@ class Stocks(commands.Cog):
     @commands.command(name="stocks", aliases=["stock", "market", "exchange"])
     @commands.guild_only()
     async def stocks(self, ctx, *, text: str = ""):
-        """The player stock market: +stocks [gainers|losers|cheap], +stock <player>, +stocks lb, +stocks daily."""
+        """The player stock market: +stocks [gainers|losers|cheap], +stock <player>, +stocks lb."""
         guild, text = ctx.guild, text.strip()
         word = text.casefold()
-        if word in ("daily", "claim", "bonus"):
-            return await self._daily(ctx)
         if word in ("help", "guide", "how"):
             S = self._settings(guild.id)
             return await ctx.reply(
                 "**Googli Stock Exchange**\nEvery player with match stats is a stock. It starts at "
-                f"**{S['base_price']:,}** and moves with their runs, wickets, strike rate, economy and ducks. "
+                f"**{S['base_price']:,}** and moves after each match by how they did compared with the league average "
+                "(runs, wickets, strike rate, economy, ducks, catches). A normal match changes nothing, a better one "
+                "gains and a worse one loses the same amount. "
                 f"Only **{S['supply']}** shares exist of each player and you can hold **{S['max_per_user']}**.\n"
                 "`+stocks` market (buttons to change page)  •  `+stock <player>` one stock  •  `+stocks lb` richest\n"
-                "`+buy <player> <amount|all>`  •  `+sell <player> <amount|all>`  •  `+portfolio [@user]`\n"
-                f"`+stocks daily` gives {S['daily_coins']:,} coins every 20 hours. You start with "
-                f"{S['start_cash']:,}. Each trade costs a {S['fee_pct']:g}% fee.", mention_author=False)
+                "`+buy <player> <amount|all>`  •  `+sell <player> <amount|all>`  •  `+portfolio [@user]`  •  `+wallet [@user]`\n"
+                f"You start with **{S['start_cash']:,}** coins. Each buy and sell costs a {S['fee_pct']:g}% fee.",
+                mention_author=False)
         market, S = self._market(guild.id)
         if not market:
             return await self._empty(ctx)
@@ -363,35 +411,22 @@ class Stocks(commands.Cog):
         shown = stock["history"][-20:]
         return {"guild": guild.name, "name": self._name(guild, uid), "ticker": tickers[uid], "avatar": avatars.get(uid),
                 "price": stock["price"], "change": stock["change"], "base": S["base_price"],
-                "factors": [("Runs scored", int(round(f["runs"]))), ("Wickets taken", int(round(f["wickets"]))),
+                "factors": [("Runs vs average", int(round(f["runs"]))), ("Wickets vs average", int(round(f["wickets"]))),
                             ("Strike-rate edge", int(round(f["sr"]))), ("Economy edge", int(round(f["eco"]))),
-                            ("Ducks", int(round(f["duck"])))],
+                            ("Ducks", int(round(f["duck"]))), ("Fielding", int(round(f["field"])))],
                 "sr": sr, "sr_par": stock["par_bat"] * 100, "wickets": stock["wickets"],
                 "wpo": stock["wickets"] / overs if overs else 0.0, "eco": eco,
-                "eco_par": stock["par_bowl"] * BALLS_PER_OVER, "ducks": stock["ducks"], "duck_pen": S["duck_penalty"],
+                "eco_par": stock["par_bowl"] * BALLS_PER_OVER, "ducks": stock["ducks"],
+                "catches": stock.get("catches", 0), "drops": stock.get("drops", 0),
                 "games": stock["games"], "history": shown, "first": n - len(shown) + 1, "rank": rank, "listed": len(market),
                 "left": max(0, S["supply"] - self._held_totals(guild.id).get(uid, 0)), "supply": S["supply"],
                 "max": S["max_per_user"], "holding": holding}
-
-    async def _daily(self, ctx):
-        S = self._settings(ctx.guild.id)
-        acct = self._account(ctx.guild.id, ctx.author.id, S)
-        wait = DAILY_WAIT - (time.time() - float(acct["last_daily"]))
-        if wait > 0:
-            hours, minutes = int(wait // 3600), int(wait % 3600 // 60)
-            self.bot.db.commit()
-            return await ctx.reply(f"You already claimed. Come back in **{hours}h {minutes}m**.", mention_author=False)
-        self.bot.db.execute("UPDATE stock_accounts SET cash=cash+?, last_daily=? WHERE guild_id=? AND user_id=?",
-                            (S["daily_coins"], time.time(), ctx.guild.id, ctx.author.id))
-        self.bot.db.commit()
-        await ctx.reply(f"💰 **+{S['daily_coins']:,} coins!** You now have **{acct['cash'] + S['daily_coins']:,}**.",
-                        mention_author=False)
 
     async def _leaderboard(self, ctx, market, S):
         guild = ctx.guild
         accounts = self.bot.db.execute("SELECT user_id, cash FROM stock_accounts WHERE guild_id=?", (guild.id,)).fetchall()
         if not accounts:
-            return await ctx.reply("Nobody has traded yet. Start with `+stocks daily` or `+buy`.", mention_author=False)
+            return await ctx.reply("Nobody has traded yet. Start with `+buy`.", mention_author=False)
         worth = sorted(((self._worth(guild.id, int(a["user_id"]), market, int(a["cash"]))[0], int(a["user_id"]))
                         for a in accounts), key=lambda item: (-item[0], item[1]))[:10]
         wait = on_cooldown(ctx.author.id)
@@ -406,7 +441,7 @@ class Stocks(commands.Cog):
             await self._send_png(ctx, await self._draw(render_board_png, data), "traders.png")
 
     # ------------------------------------------------------------------ +portfolio
-    @commands.command(name="portfolio", aliases=["wallet", "holdings", "port"])
+    @commands.command(name="portfolio", aliases=["holdings", "port"])
     @commands.guild_only()
     async def portfolio(self, ctx, member: discord.Member = None):
         """Your holdings, profit and loss (or another player's)."""
@@ -466,6 +501,52 @@ class Stocks(commands.Cog):
                 print(f"[stocks] portfolio failed: {type(exc).__name__}: {exc}", flush=True)
                 await ctx.reply("I couldn't draw the portfolio. Check the bot logs.", mention_author=False)
 
+    # ------------------------------------------------------------------ +wallet
+    @commands.command(name="wallet", aliases=["coins", "balance", "bal", "mywallet"])
+    @commands.guild_only()
+    async def wallet(self, ctx, member: discord.Member = None):
+        """Coins, shares worth, profit and loss, fees and trades (yours or another player's)."""
+        guild, member = ctx.guild, member or ctx.author
+        market, S = self._market(guild.id)
+        wait = on_cooldown(ctx.author.id)
+        if wait:
+            return await ctx.reply(f"Please wait {wait:.0f}s before drawing another image.", mention_author=False)
+        acct = self._account(guild.id, member.id, S)
+        self.bot.db.commit()
+        cash = int(acct["cash"])
+        holdings = self._holdings(guild.id, member.id)
+        worth = paid = 0
+        best = worst = None
+        for h in holdings:
+            uid = int(h["player_id"])
+            value = int(h["shares"]) * market.get(uid, {}).get("price", 0)
+            pl = value - int(h["cost"])
+            worth += value
+            paid += int(h["cost"])
+            if best is None or pl > best[1]:
+                best = (uid, pl)
+            if worst is None or pl < worst[1]:
+                worst = (uid, pl)
+        net = cash + worth
+        everyone = self.bot.db.execute("SELECT user_id, cash FROM stock_accounts WHERE guild_id=?", (guild.id,)).fetchall()
+        richer = sum(1 for a in everyone if self._worth(guild.id, int(a["user_id"]), market, int(a["cash"]))[0] > net)
+        async with ctx.typing():
+            try:
+                avatar = (await self._avatars(guild, {member.id})).get(member.id)
+                png = await self._draw(render_wallet_png, {
+                    "guild": guild.name, "user": {"name": member.name, "avatar": avatar}, "rank": richer + 1,
+                    "players": len(everyone), "cash": cash, "worth": worth, "paid": paid, "net": net,
+                    "start": S["start_cash"], "unrealized": worth - paid, "realized": int(acct["realized"]),
+                    "fees": int(acct["fees"]), "trades": int(acct["trades"]), "holdings": len(holdings),
+                    "best": (self._name(guild, best[0]), best[1]) if best else None,
+                    "worst": (self._name(guild, worst[0]), worst[1]) if worst else None})
+                await self._send_png(ctx, png, "wallet.png")
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                print(f"[stocks] wallet failed: {type(exc).__name__}: {exc}", flush=True)
+                await ctx.reply("I couldn't draw the wallet. Check the bot logs.", mention_author=False)
+
     # ------------------------------------------------------------------ +stockset / +stockreset
     @commands.command(name="stockset", aliases=["stocksettings", "setstock", "stockconfig"])
     @commands.guild_only()
@@ -486,7 +567,7 @@ class Stocks(commands.Cog):
                 number = float(value.replace(",", "").replace("_", "").rstrip("%"))
             except ValueError:
                 return await ctx.reply(f"Give a number, for example `+stockset {key} {default}`.", mention_author=False)
-            if key != "fee":
+            if dbkey not in FLOAT_KEYS:
                 number = int(round(number))
             if not lo <= number <= hi:
                 return await ctx.reply(f"`{key}` must be between {lo:,} and {hi:,}.", mention_author=False)
@@ -494,7 +575,7 @@ class Stocks(commands.Cog):
                        "ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value", (gid, dbkey, number))
             db.commit()
             extra = " Only new traders get this." if key == "start" else \
-                " Every price was recalculated." if key in ("base", "run", "wicket", "sr", "eco", "duck", "minprice") else ""
+                " Every price was recalculated." if key in PRICE_KEYS else ""
             return await ctx.reply(f"✅ **{key}** is now **{number:,.10g}** ({text}).{extra}", mention_author=False)
         if name:
             return await ctx.reply(f"I don't know a setting called `{name}`. Run `+stockset` to see the list.",
@@ -584,14 +665,31 @@ class Stocks(commands.Cog):
             db.commit()
             return await ctx.reply(f"You need **{cost + fee:,}** coins (price {cost:,} + fee {fee:,}) but have **{cash:,}**.",
                                    mention_author=False)
-        db.execute("UPDATE stock_accounts SET cash=cash-? WHERE guild_id=? AND user_id=?", (cost + fee, guild.id, ctx.author.id))
+        db.execute("UPDATE stock_accounts SET cash=cash-?, fees=fees+?, trades=trades+1 WHERE guild_id=? AND user_id=?",
+                   (cost + fee, fee, guild.id, ctx.author.id))
         db.execute("INSERT INTO stock_holdings (guild_id, user_id, player_id, shares, cost) VALUES (?,?,?,?,?) "
                    "ON CONFLICT(guild_id, user_id, player_id) DO UPDATE SET shares=shares+excluded.shares, "
                    "cost=cost+excluded.cost", (guild.id, ctx.author.id, uid, amount, cost + fee))
         db.commit()
-        await ctx.reply(f"📈 Bought **{amount:,} × {tickers[uid]}** ({self._name(guild, uid)}) at **{price:,}** "
-                        f"for **{cost:,}** + {fee:,} fee. Cash left: **{cash - cost - fee:,}**.",
-                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        total_cost = (int(held["cost"]) if held else 0) + cost + fee
+        left_after = max(0, S["supply"] - self._held_totals(guild.id).get(uid, 0))
+        text = (f"📈 Bought **{amount:,} × {tickers[uid]}** ({self._name(guild, uid)}) at **{price:,}** "
+                f"for **{cost:,}** + {fee:,} fee ({fee_pct:g}%). Coins left: **{cash - cost - fee:,}**.")
+        await self._receipt(ctx, uid, {
+            "kind": "buy", "guild": guild.name, "name": self._name(guild, uid), "ticker": tickers[uid],
+            "amount": amount, "price": price, "subtotal": cost, "fee": fee, "fee_pct": fee_pct, "total": cost + fee,
+            "cash": cash - cost - fee, "owned": owned + amount, "max": S["max_per_user"],
+            "avg": total_cost / (owned + amount), "left": left_after, "supply": S["supply"]}, text)
+
+    async def _receipt(self, ctx, uid, data, text):
+        """The trade card; plain text if the picture cannot be drawn."""
+        try:
+            data["avatar"] = (await self._avatars(ctx.guild, {uid})).get(uid)
+            png = await self._draw(render_trade_png, data)
+            await self._send_png(ctx, png, "trade.png")
+        except Exception as exc:
+            print(f"[stocks] receipt failed: {type(exc).__name__}: {exc}", flush=True)
+            await ctx.reply(text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="sell", aliases=["sellstock"])
     @commands.guild_only()
@@ -622,7 +720,9 @@ class Stocks(commands.Cog):
         basis = int(round(int(held["cost"]) * amount / owned))
         net = gross - fee
         self._account(guild.id, ctx.author.id, S)
-        db.execute("UPDATE stock_accounts SET cash=cash+? WHERE guild_id=? AND user_id=?", (net, guild.id, ctx.author.id))
+        profit = net - basis
+        db.execute("UPDATE stock_accounts SET cash=cash+?, realized=realized+?, fees=fees+?, trades=trades+1 "
+                   "WHERE guild_id=? AND user_id=?", (net, profit, fee, guild.id, ctx.author.id))
         if amount == owned:
             db.execute("DELETE FROM stock_holdings WHERE guild_id=? AND user_id=? AND player_id=?",
                        (guild.id, ctx.author.id, uid))
@@ -630,12 +730,17 @@ class Stocks(commands.Cog):
             db.execute("UPDATE stock_holdings SET shares=shares-?, cost=cost-? WHERE guild_id=? AND user_id=? AND player_id=?",
                        (amount, basis, guild.id, ctx.author.id, uid))
         db.commit()
-        profit = net - basis
-        cash = int(self._account(guild.id, ctx.author.id, S)["cash"])
-        await ctx.reply(f"{'📈' if profit >= 0 else '📉'} Sold **{amount:,} × {tickers[uid]}** ({self._name(guild, uid)}) at "
-                        f"**{price:,}** for **{gross:,}** − {fee:,} fee. "
-                        f"{'Profit' if profit >= 0 else 'Loss'}: **{abs(profit):,}**. Cash: **{cash:,}**.",
-                        mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        acct = self._account(guild.id, ctx.author.id, S)
+        cash = int(acct["cash"])
+        text = (f"{'📈' if profit >= 0 else '📉'} Sold **{amount:,} × {tickers[uid]}** ({self._name(guild, uid)}) at "
+                f"**{price:,}** for **{gross:,}** − {fee:,} fee. "
+                f"{'Profit' if profit >= 0 else 'Loss'}: **{abs(profit):,}**. Coins: **{cash:,}**.")
+        await self._receipt(ctx, uid, {
+            "kind": "sell", "guild": guild.name, "name": self._name(guild, uid), "ticker": tickers[uid],
+            "amount": amount, "price": price, "subtotal": gross, "fee": fee, "fee_pct": S["fee_pct"], "total": net,
+            "cash": cash, "owned": owned - amount, "max": S["max_per_user"], "basis": basis, "profit": profit,
+            "profit_pct": profit / basis * 100 if basis else 0.0, "realized": int(acct["realized"]),
+            "left": max(0, S["supply"] - self._held_totals(guild.id).get(uid, 0)), "supply": S["supply"]}, text)
 
 
 async def setup(bot):

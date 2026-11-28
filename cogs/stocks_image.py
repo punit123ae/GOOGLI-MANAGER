@@ -115,57 +115,53 @@ def _pips(d, x, y, filled, total, color, size=9, gap=5):
             d.rounded_rectangle((cx, y, cx + size, y + size), radius=3, outline=_mix(MUTED, _INK, 0.6), width=1)
 
 
-# =========================================================================== market (10 player cards a page)
+# =========================================================================== market (10 wide cards a page, 2 columns)
 
 def render_market(data):
     c = _Canvas(UP, BLUE)
-    c.card((50, 22, 1550, 104), 26, 168)
-    cw, ch, gx, gy, top = 288, 352, 15, 16, 120
+    c.card((50, 22, 1550, 100), 26, 168)
+    cw, ch, gx, gy, top = 742, 134, 16, 12, 114
     boxes = []
     for i in range(10):
-        x = 50 + (i % 5) * (cw + gx)
-        y = top + (i // 5) * (ch + gy)
+        x = 50 + (i % 2) * (cw + gx)
+        y = top + (i // 2) * (ch + gy)
         boxes.append((x, y, x + cw, y + ch))
-        c.card(boxes[-1], 26, 150)
+        c.card(boxes[-1], 24, 150)
     d = c.seal()
-    _tile_glass(c, (50, 22, 1550, 104), GOLD)
-    _title(d, (76, 63), "PLAYER STOCK MARKET", 36, WHITE, "lm", "head")
-    _text(d, (700, 63), f"{data['sort']}  •  {data['count']} LISTED", 14, GOLD, "lm", "head")
-    _text(d, (1300, 63), "MARKET MOOD", 12, MUTED, "rm", "bold")
-    _change_pill(d, 1430, 50, data.get("trend", 0.0), h=28, size=15, right=True)
-    _text(d, (1524, 63), f"{data['page']}/{data['pages']}", 16, WHITE, "rm", "head")
+    _tile_glass(c, (50, 22, 1550, 100), GOLD)
+    _title(d, (76, 61), "PLAYER STOCK MARKET", 34, WHITE, "lm", "head")
+    _text(d, (690, 61), f"{data['sort']}  •  {data['count']} LISTED", 14, GOLD, "lm", "head")
+    _text(d, (1270, 61), "MARKET MOOD", 12, MUTED, "rm", "bold")
+    _change_pill(d, 1400, 48, data.get("trend", 0.0), h=28, size=15, right=True)
+    _text(d, (1524, 61), f"PAGE {data['page']}/{data['pages']}", 15, WHITE, "rm", "head")
     rows = data["rows"]
-    for i, box in enumerate(boxes):
-        if i >= len(rows):
-            continue
-        row = rows[i]
+    for box, row in zip(boxes, rows):
         x1, y1, x2, y2 = box
-        mid = (x1 + x2) // 2
         col = tone(row["change"]) if abs(row["change"]) > 0.05 else GOLD
         _tile_glass(c, box, col)
         top3 = row["rank"] <= 3
-        d.rounded_rectangle((x1 + 16, y1 + 16, x1 + 66, y1 + 42), radius=13,
-                            fill=_mix(GOLD, _INK, 0.7) if top3 else _mix(MUTED, _INK, 0.8))
-        _text(d, (x1 + 41, y1 + 29), f"#{row['rank']}", 14, GOLD if top3 else MUTED, "mm", "head")
-        _pill(d, x2 - 16 - int(d.textlength(row["ticker"], font=font(11, "bold"))) - 20, y1 + 17, row["ticker"], 11,
-              fill=_mix(BLUE, _INK, 0.75), fg=BLUE, pad=10, h=24)
-        ring = _round_image(_open(row.get("avatar")), 84, ring=col, ring_w=4, initial=(row.get("name") or "?")[:1])
-        _paste(c.image, ring, (mid - ring.size[0] // 2, y1 + 54))
+        d.ellipse((x1 + 16, y1 + 16, x1 + 52, y1 + 52), fill=_mix(GOLD, _INK, 0.65) if top3 else _mix(MUTED, _INK, 0.78))
+        _text(d, (x1 + 34, y1 + 34), str(row["rank"]), 16, GOLD if top3 else MUTED, "mm", "head")
+        ring = _round_image(_open(row.get("avatar")), 76, ring=col, ring_w=4, initial=(row.get("name") or "?")[:1])
+        _paste(c.image, ring, (x1 + 66, y1 + 67 - ring.size[1] // 2))
+        nx = x1 + 164
         name = (row.get("name") or "?").upper()
-        size = _fit(d, name, cw - 30, 21, 12, "head")
-        _text(d, (mid, y1 + 162), _clip(d, name, cw - 30, size, "head"), size, WHITE, "mm", "head")
-        label = money(row["price"])
-        tw = d.textlength(label, font=font(34, "head"))
-        _coin(d, int(mid - tw / 2 - 18), y1 + 200, 10)
-        _text(d, (mid + 12, y1 + 200), label, 34, WHITE, "mm", "head")
-        _change_pill(d, mid - 48, y1 + 224, row["change"], h=26, size=14)
-        _spark(c, (x1 + 24, y1 + 270, x2 - 24, y1 + 308), row.get("spark") or [row["price"]], col, 3)
+        size = _fit(d, name, 220, 21, 12, "head")
+        _text(d, (nx, y1 + 38), _clip(d, name, 220, size, "head"), size, WHITE, "lm", "head")
+        _pill(d, nx, y1 + 56, row["ticker"], 10, fill=_mix(BLUE, _INK, 0.75), fg=BLUE, pad=8, h=20)
         supply = max(1, data["supply"])
-        segs = 10
-        filled = int(round(segs * max(0, row["left"]) / supply))
-        _pips(d, x1 + 24, y1 + 324, filled, segs, BLUE if row["left"] else DOWN, size=9, gap=4)
-        _text(d, (x2 - 20, y1 + 329), "SOLD OUT" if not row["left"] else f"{row['left']} LEFT", 12,
-              DOWN if not row["left"] else MUTED, "rm", "bold")
+        frac = max(0.0, min(1.0, row["left"] / supply))
+        d.rounded_rectangle((nx, y1 + 100, nx + 110, y1 + 108), radius=4, fill=_mix(MUTED, _INK, 0.8))
+        if frac > 0:
+            d.rounded_rectangle((nx, y1 + 100, nx + max(8, int(110 * frac)), y1 + 108), radius=4, fill=BLUE if frac > 0.2 else GOLD)
+        _text(d, (nx + 124, y1 + 104), "SOLD OUT" if not row["left"] else f"{row['left']} OF {supply} LEFT", 11,
+              DOWN if not row["left"] else MUTED, "lm", "bold")
+        _spark(c, (x1 + 400, y1 + 34, x1 + 540, y1 + 92), row.get("spark") or [row["price"]], col, 3)
+        label = money(row["price"])
+        tw = d.textlength(label, font=font(30, "head"))
+        _coin(d, int(x2 - 22 - tw - 20), y1 + 44, 10)
+        _text(d, (x2 - 22, y1 + 44), label, 30, WHITE, "rm", "head")
+        _change_pill(d, x2 - 22, y1 + 76, row["change"], h=28, size=14, right=True)
     if not rows:
         _text(d, (800, 480), "NOTHING ON THIS PAGE", 26, DIM, "mm", "head")
     _footer(c, "GOOGLI MANAGER  •  STOCK EXCHANGE  •  +stock <player> OPENS A FULL CARD", data.get("guild"))
@@ -195,15 +191,15 @@ def _history_chart(c, box, data, color):
         y = y_of(v)
         d.line((left, y, right, y), fill=_mix(MUTED, _INK, 0.82), width=1)
         _text(d, (left - 14, y), f"{v / 1000:.1f}K" if hi > 9999 else money(v), 12, DIM, "rm", "bold")
-    by = y_of(base)
-    for xx in range(int(left), int(right), 16):
-        d.line((xx, by, xx + 8, by), fill=GOLD, width=2)
-    _text(d, (right, by - 14), f"BASE {money(base)}", 12, GOLD, "rm", "bold")
     n = len(values)
     pts = [(left + (right - left) * (i / (n - 1) if n > 1 else 0.5), y_of(v)) for i, v in enumerate(values)]
     if n > 1:
         d.polygon(pts + [(pts[-1][0], bottom), (pts[0][0], bottom)], fill=_mix(color, _INK, 0.84))
         d.line(pts, fill=color, width=5, joint="curve")
+    by = y_of(base)
+    for xx in range(int(left), int(right), 16):
+        d.line((xx, by, xx + 8, by), fill=GOLD, width=2)
+    _text(d, (right, by - 14), f"BASE {money(base)}", 12, GOLD, "rm", "bold")
     for i, (x, y) in enumerate(pts):
         last = i == n - 1
         r = 9 if last else 4
@@ -225,18 +221,18 @@ def _waterfall(c, box, data):
     mid = (x1 + x2) // 2
     factors = data["factors"]
     big = max([abs(v) for _l, v in factors] + [1])
-    d.line((mid, y1 + 76, mid, y1 + 76 + len(factors) * 60), fill=_mix(MUTED, _INK, 0.7), width=2)
+    d.line((mid, y1 + 70, mid, y1 + 70 + len(factors) * 52), fill=_mix(MUTED, _INK, 0.7), width=2)
     half = (x2 - x1) // 2 - 52
     for i, (label, value) in enumerate(factors):
-        y = y1 + 76 + i * 60
+        y = y1 + 70 + i * 52
         col = tone(value)
         _text(d, (x1 + 28, y + 12), label.upper(), 12, MUTED, "lm", "bold")
         _text(d, (x2 - 28, y + 12), signed(value), 14, col, "rm", "head")
         length = int(half * abs(value) / big)
         if value:
             bx = (mid, mid + max(6, length)) if value > 0 else (mid - max(6, length), mid)
-            d.rounded_rectangle((bx[0], y + 28, bx[1], y + 44), radius=8, fill=col)
-    ty = y1 + 76 + len(factors) * 60 + 8
+            d.rounded_rectangle((bx[0], y + 26, bx[1], y + 40), radius=7, fill=col)
+    ty = y1 + 70 + len(factors) * 52 + 4
     d.line((x1 + 28, ty, x2 - 28, ty), fill=_mix(MUTED, _INK, 0.75), width=1)
     _text(d, (x1 + 28, ty + 26), f"STARTED AT {money(data['base'])}", 13, MUTED, "lm", "bold")
     _text(d, (x2 - 28, ty + 26), f"NOW {money(data['price'])}", 18, WHITE, "rm", "head")
@@ -293,14 +289,16 @@ def render_stock(data):
     facts = [("STRIKE RATE", f"{data['sr']:.0f}", f"LEAGUE {data['sr_par']:.0f}", BLUE),
              ("WICKETS", str(data["wickets"]), f"{data['wpo']:.1f} / OVER", VIOLET),
              ("ECONOMY", f"{data['eco']:.1f}", f"LEAGUE {data['eco_par']:.1f}", GOLD),
-             ("DUCKS", str(data["ducks"]), f"−{money(data['duck_pen'])} EACH", DOWN)]
+             ("DUCKS", str(data["ducks"]), "OUT FOR 0", DOWN),
+             ("CATCHES", str(data["catches"]), "TAKEN", UP),
+             ("DROPS", str(data["drops"]), "DROPPED", DOWN)]
     for i, (label, value, sub, col) in enumerate(facts):
-        bx = 920 + (i % 2) * 316
-        by = 676 + (i // 2) * 84
-        d.rounded_rectangle((bx, by, bx + 302, by + 74), radius=18, fill=_mix(col, _INK, 0.9), outline=_mix(col, _INK, 0.55), width=1)
-        _text(d, (bx + 18, by + 22), label, 11, col, "lm", "head")
-        _text(d, (bx + 18, by + 52), sub, 11, MUTED, "lm", "bold")
-        _text(d, (bx + 284, by + 37), value, 30, WHITE, "rm", "head")
+        bx = 920 + (i % 3) * 205
+        by = 690 + (i // 3) * 76
+        d.rounded_rectangle((bx, by, bx + 195, by + 68), radius=16, fill=_mix(col, _INK, 0.9), outline=_mix(col, _INK, 0.55), width=1)
+        _text(d, (bx + 14, by + 20), label, 11, col, "lm", "head")
+        _text(d, (bx + 14, by + 48), sub, 10, MUTED, "lm", "bold")
+        _text(d, (bx + 181, by + 34), value, 26, WHITE, "rm", "head")
     _footer(c, f"GOOGLI MANAGER  •  {data['ticker']}  •  PRICE FOLLOWS MATCH STATS", data.get("guild"))
     return c.image
 
@@ -391,3 +389,135 @@ def render_portfolio(data):
 
 def render_portfolio_png(data):
     return _png(render_portfolio(data))
+
+
+# =========================================================================== trade receipt
+
+def render_trade(data):
+    buy = data["kind"] == "buy"
+    profit = data.get("profit", 0)
+    accent = BLUE if buy else (UP if profit >= 0 else DOWN)
+    c = _Canvas(accent, VIOLET if buy else BLUE)
+    c.card((50, 22, 520, 852), 28, 168)
+    c.card((545, 22, 1550, 520), 26, 150)
+    tiles = [(545 + i * 340, 536, 545 + i * 340 + 325, 852) for i in range(3)]
+    for box in tiles:
+        c.card(box, 24, 150)
+    d = c.seal()
+    _tile_glass(c, (50, 22, 520, 852), accent)
+    ring = _round_image(_open(data.get("avatar")), 200, ring=accent, ring_w=6, initial=data["name"][:1])
+    _paste(c.image, ring, (285 - ring.size[0] // 2, 70))
+    name = data["name"].upper()
+    size = _fit(d, name, 400, 32, 17, "head")
+    _text(d, (285, 318), _clip(d, name, 400, size, "head"), size, WHITE, "mm", "head")
+    width = int(d.textlength(data["ticker"], font=font(15, "bold"))) + 40
+    _pill(d, 285 - width // 2, 344, data["ticker"], 15, fill=_mix(BLUE, _INK, 0.75), fg=BLUE, pad=20, h=32)
+    d.rounded_rectangle((76, 430, 494, 560), radius=26, fill=_mix(accent, _INK, 0.82), outline=accent, width=3)
+    _text(d, (285, 470), "BOUGHT" if buy else "SOLD", 30, accent, "mm", "head")
+    _text(d, (285, 520), f"{data['amount']:,} SHARE{'S' if data['amount'] != 1 else ''}", 34, WHITE, "mm", "head")
+    _text(d, (285, 610), f"AT {money(data['price'])} EACH", 16, MUTED, "mm", "bold")
+    _text(d, (285, 700), f"{data['left']} OF {data['supply']} SHARES", 13, DIM, "mm", "bold")
+    _text(d, (285, 726), "STILL ON THE MARKET", 13, DIM, "mm", "bold")
+    _tile_glass(c, (545, 22, 1550, 520), accent)
+    _text(d, (580, 58), "RECEIPT", 20, accent, "lm", "head")
+    _text(d, (1520, 58), str(data.get("guild", "")).upper(), 12, DIM, "rm")
+    lines = [(f"{data['amount']:,} × {money(data['price'])}", money(data["subtotal"]), WHITE),
+             (f"Fee ({data['fee_pct']:g}%)", ("+" if buy else "−") + money(data["fee"]), DOWN)]
+    for i, (lab, val, col) in enumerate(lines):
+        y = 124 + i * 66
+        _text(d, (590, y), lab.upper(), 17, MUTED, "lm", "bold")
+        _coin(d, 1520 - int(d.textlength(val, font=font(30, "head"))) - 26, y, 10)
+        _text(d, (1520, y), val, 30, col, "rm", "head")
+        d.line((580, y + 34, 1520, y + 34), fill=_mix(MUTED, _INK, 0.78), width=1)
+    d.rounded_rectangle((580, 282, 1520, 490), radius=24, fill=_mix(accent, _INK, 0.88), outline=_mix(accent, _INK, 0.45), width=2)
+    _text(d, (616, 326), "YOU PAID" if buy else "YOU RECEIVED", 18, accent, "lm", "head")
+    label = money(data["total"])
+    fs = _fit(d, label, 520, 92, 40, "head")
+    _text(d, (1486, 408), label, fs, WHITE, "rm", "head")
+    _coin(d, int(1486 - d.textlength(label, font=font(fs, "head")) - 34), 408, 18)
+    if buy:
+        facts = [("COINS LEFT", money(data["cash"]), "IN YOUR WALLET", GOLD),
+                 ("NOW HOLDING", f"{data['owned']} / {data['max']}", "SHARES OF THIS PLAYER", BLUE),
+                 ("AVERAGE COST", money(data["avg"]), "PER SHARE, FEES INCLUDED", VIOLET)]
+    else:
+        facts = [("PROFIT / LOSS", signed(profit), f"{pct(data['profit_pct'])} ON THE {data['amount']} SOLD", tone(profit)),
+                 ("COINS NOW", money(data["cash"]), "IN YOUR WALLET", GOLD),
+                 ("STILL HOLDING", f"{data['owned']} / {data['max']}", f"TOTAL BOOKED {signed(data['realized'])}", BLUE)]
+    for box, (label, value, sub, col) in zip(tiles, facts):
+        x1, y1, x2, y2 = box
+        _tile_glass(c, box, col)
+        _text(d, ((x1 + x2) // 2, y1 + 48), label, 17, col, "mm", "head")
+        shade = col if label == "PROFIT / LOSS" else WHITE
+        _text(d, ((x1 + x2) // 2, y1 + 150), value, _fit(d, value, 290, 58, 26, "head"), shade, "mm", "head")
+        _text(d, ((x1 + x2) // 2, y1 + 248), sub, 12, MUTED, "mm", "bold")
+    _footer(c, f"GOOGLI MANAGER  •  {'BUY' if buy else 'SELL'} RECEIPT  •  {data['ticker']}", data.get("guild"))
+    return c.image
+
+
+def render_trade_png(data):
+    return _png(render_trade(data))
+
+
+# =========================================================================== wallet
+
+def render_wallet(data):
+    start = data["start"]
+    growth = data["net"] - start
+    gpct = growth / start * 100 if start else 0.0
+    accent = UP if growth > 0 else DOWN if growth < 0 else GOLD
+    c = _Canvas(accent, BLUE)
+    c.card((50, 22, 560, 852), 28, 168)
+    tiles = []
+    for i in range(8):
+        x = 576 + (i % 2) * 494
+        y = 22 + (i // 2) * 209
+        tiles.append((x, y, x + 480, y + 195))
+        c.card(tiles[-1], 24, 150)
+    d = c.seal()
+    _tile_glass(c, (50, 22, 560, 852), accent)
+    user = data["user"]
+    ring = _round_image(_open(user.get("avatar")), 150, ring=accent, ring_w=6, initial=user["name"][:1])
+    _paste(c.image, ring, (305 - ring.size[0] // 2, 56))
+    name = user["name"].upper()
+    size = _fit(d, name, 430, 32, 16, "head")
+    _text(d, (305, 244), _clip(d, name, 430, size, "head"), size, WHITE, "mm", "head")
+    _text(d, (305, 278), f"RANK {data['rank']} OF {data['players']} TRADERS", 13, GOLD, "mm", "head")
+    _text(d, (305, 336), "NET WORTH", 14, MUTED, "mm", "bold")
+    label = money(data["net"])
+    fs = _fit(d, label, 340, 66, 30, "head")
+    _coin(d, int(305 - d.textlength(label, font=font(fs, "head")) / 2 - 26), 392, 14)
+    _text(d, (305 + 12, 392), label, fs, WHITE, "mm", "head")
+    _change_pill(d, 305 - 66, 430, gpct, h=34, size=18)
+    _text(d, (305, 492), f"{signed(growth)} SINCE STARTING WITH {money(start)}", 12, MUTED, "mm", "bold")
+    d.line((86, 530, 524, 530), fill=_mix(MUTED, _INK, 0.75), width=1)
+    for i, (lab, item, col) in enumerate((("BEST HOLDING", data.get("best"), UP), ("WEAKEST HOLDING", data.get("worst"), DOWN))):
+        y = 556 + i * 134
+        d.rounded_rectangle((80, y, 530, y + 118), radius=20, fill=_mix(col, _INK, 0.9), outline=_mix(col, _INK, 0.55), width=1)
+        _text(d, (104, y + 28), lab, 12, col, "lm", "head")
+        if item:
+            nm = item[0].upper()
+            _text(d, (104, y + 62), _clip(d, nm, 400, 20, "head"), 20, WHITE, "lm", "head")
+            _text(d, (104, y + 94), signed(item[1]), 20, tone(item[1]), "lm", "head")
+        else:
+            _text(d, (104, y + 72), "NO SHARES HELD", 16, DIM, "lm", "bold")
+    facts = [("COINS IN HAND", money(data["cash"]), "READY TO SPEND", GOLD),
+             ("SHARES WORTH", money(data["worth"]), f"{data['holdings']} PLAYERS HELD", BLUE),
+             ("PAID FOR SHARES", money(data["paid"]), "COST BASIS INCL. FEES", VIOLET),
+             ("PROFIT / LOSS ON HOLDINGS", signed(data["unrealized"]), "NOT BOOKED YET", tone(data["unrealized"])),
+             ("BOOKED PROFIT / LOSS", signed(data["realized"]), "FROM SHARES SOLD", tone(data["realized"])),
+             ("FEES PAID", money(data["fees"]), "ON ALL TRADES", DOWN),
+             ("TRADES MADE", str(data["trades"]), "BUYS AND SELLS", BLUE),
+             ("WEALTH CHANGE", pct(gpct), "NET WORTH VS START", tone(growth))]
+    for box, (label, value, sub, col) in zip(tiles, facts):
+        x1, y1, x2, y2 = box
+        _tile_glass(c, box, col)
+        _text(d, ((x1 + x2) // 2, y1 + 36), label, 14, col, "mm", "head")
+        shade = WHITE if col in (GOLD, BLUE, VIOLET, DOWN) and label not in ("PROFIT / LOSS ON HOLDINGS", "BOOKED PROFIT / LOSS") else col
+        _text(d, ((x1 + x2) // 2, y1 + 104), value, _fit(d, value, 420, 48, 24, "head"), shade, "mm", "head")
+        _text(d, ((x1 + x2) // 2, y1 + 164), sub, 11, MUTED, "mm", "bold")
+    _footer(c, "GOOGLI MANAGER  •  STOCK EXCHANGE  •  WALLET", data.get("guild"))
+    return c.image
+
+
+def render_wallet_png(data):
+    return _png(render_wallet(data))
