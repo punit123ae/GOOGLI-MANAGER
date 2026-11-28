@@ -954,7 +954,7 @@ class Strengths(commands.Cog):
         return True
 
 
-    @commands.command(name="strengths", aliases=["scout", "scouting"])
+    @commands.command(name="strengths")
     @commands.guild_only()
     async def strengths(self, ctx, *, team: str = ""):
         """Scouting report: +strengths (your team), +strengths <team>, +strengths @player, +strengths @a @b."""
